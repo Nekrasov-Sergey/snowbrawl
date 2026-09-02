@@ -1,0 +1,42 @@
+# SnowBrawl — сервер мультиплеера
+
+Браузерная PvP-игра в снежки 1×1…4×4. Этот репозиторий содержит сервер на Go, который
+отдаёт клиент игры, держит WebSocket-соединения, сводит игроков в матчи (комнаты по коду и
+Quick Match с добором ботами) и исполняет общую симуляцию `web/sim/sim.js`.
+
+Игроки заходят на один адрес, вводят ник и играют. Регистрации нет, базы данных нет.
+
+## Быстрый старт
+
+```bash
+make dev          # go run с клиентом с диска, http://localhost:8080, админка token=dev
+make test         # тесты (юниты + интеграционные с WebSocket-клиентами)
+make bench        # нагрузка goja: 17 матчей 4×4 при 20 тиках/с
+make build        # bin/snowbrawl-server с версией из git
+```
+
+Продакшен: см. [docs/RUNBOOK.md](docs/RUNBOOK.md) (один Docker-образ, `docker compose up -d`).
+
+## Устройство
+
+| Каталог | Что там | Владелец |
+|---|---|---|
+| `cmd/snowbrawl-server` | точка входа | сервер |
+| `internal/` | hub, комнаты, очереди, матчи, WebSocket, goja-раннер, админка | сервер |
+| `web/sim/sim.js` | общая симуляция: физика, попадания, способности, ИИ ботов | **разработчик игры** |
+| `web/client/`, `web/index.html` | экраны, рендер, звук, сетевой и оффлайн-драйверы | **разработчик игры** (эталон сделан сервером) |
+| `deploy/` | Dockerfile, docker-compose, Caddy, скрипт выкладки | сервер |
+| `docs/` | архитектура, протокол, контракт sim.js, версии, эксплуатация, передача | все |
+
+Документы:
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — как устроен сервер и почему так.
+- [docs/PROTOCOL.md](docs/PROTOCOL.md) — сообщения WebSocket.
+- [docs/SIM_CONTRACT.md](docs/SIM_CONTRACT.md) — что можно и нельзя в `sim.js`; читать разработчику игры.
+- [docs/VERSIONING.md](docs/VERSIONING.md) — версии сборки, симуляции и протокола, релизы.
+- [docs/RUNBOOK.md](docs/RUNBOOK.md) — запуск, обновление, откат, диагностика.
+- [docs/HANDOVER.md](docs/HANDOVER.md) — передача заказчику: аккаунты, секреты, стоимость.
+
+## Стек
+
+Go 1.27, gin, coder/websocket, dop251/goja, zerolog, pkg/errors. Клиент — ванильный JS без сборки.

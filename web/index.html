@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="build" content="__BUILD__">
+<title>SnowBrawl</title>
+<link rel="stylesheet" href="client/style.css?v=__BUILD__">
+</head>
+<body>
+<div id="app">
+  <button id="soundToggle" title="Звук">🔊</button>
+  <div id="connState" title="Соединение с сервером">●</div>
+  <h1 class="title">❄️ SNOWBRAWL</h1>
+  <div id="drainBanner" hidden>⚠️ Сервер скоро перезапустится для обновления. Новые матчи не начинаются, текущие доигрываются.</div>
+
+  <!-- Ник -->
+  <div id="screen-nick" class="panel" hidden>
+    <div class="subtitle">Как вас называть в игре?</div>
+    <div class="stub-box">
+      <input type="text" id="nickInput" placeholder="Ваш ник" maxlength="16" autocomplete="off">
+      <button class="menuBtn primary" id="nickOk" style="width:100%">Продолжить</button>
+      <div class="stub-note" id="nickMsg"></div>
+    </div>
+  </div>
+
+  <!-- Меню -->
+  <div id="screen-menu" class="panel" hidden>
+    <div class="subtitle">Зашёл → выбрал бойца → нашёл соперников → бросай снежки → победи.</div>
+    <div class="who">Вы: <b id="menuNick"></b> <button class="linkBtn" id="changeNick">сменить</button></div>
+    <button class="menuBtn primary" id="btnQuickMatch">QUICK MATCH</button>
+    <button class="menuBtn" id="btnCreateRoom">CREATE ROOM</button>
+    <button class="menuBtn" id="btnJoinRoom">JOIN ROOM</button>
+    <button class="menuBtn ghost" id="btnOffline" style="width:320px">Тренировка с ботами (оффлайн)</button>
+  </div>
+
+  <!-- Quick Match: режим -->
+  <div id="screen-mode" class="panel" hidden>
+    <div class="subtitle">Выберите режим</div>
+    <div class="modeGrid" id="modeGrid"></div>
+    <div class="navRow"><button class="menuBtn ghost" id="backFromMode">Назад</button></div>
+  </div>
+
+  <!-- Quick Match / оффлайн: боец -->
+  <div id="screen-character" class="panel" hidden>
+    <div class="subtitle">Выберите бойца</div>
+    <div class="cardGrid" id="heroGrid"></div>
+    <div class="navRow">
+      <button class="menuBtn ghost" id="backFromCharacter">Назад</button>
+      <button class="menuBtn primary" id="nextFromCharacter" disabled>Далее</button>
+    </div>
+  </div>
+
+  <!-- Оффлайн: арена -->
+  <div id="screen-map" class="panel" hidden>
+    <div class="subtitle">Выберите арену</div>
+    <div class="cardGrid" id="mapGrid"></div>
+    <div class="navRow">
+      <button class="menuBtn ghost" id="backFromMap">Назад</button>
+      <button class="menuBtn primary" id="startOfflineBtn">Начать матч</button>
+    </div>
+  </div>
+
+  <!-- Quick Match: поиск -->
+  <div id="screen-search" class="panel" hidden>
+    <div class="stub-box">
+      <div class="searching">Ищем соперников…</div>
+      <div class="stub-code" id="searchCount">1 / 6</div>
+      <div class="subtitle" id="searchHint">Через <b id="searchTimer">15</b> с свободные места займут боты.</div>
+    </div>
+    <button class="menuBtn ghost" id="cancelSearch">Отмена</button>
+  </div>
+
+  <!-- Создание комнаты -->
+  <div id="screen-createroom" class="panel" hidden>
+    <div class="subtitle">Режим</div>
+    <div class="modeGrid small" id="createModeGrid"></div>
+    <div class="subtitle">Арена</div>
+    <div class="cardGrid" id="createMapGrid"></div>
+    <div class="navRow">
+      <button class="menuBtn ghost" id="backFromCreate">Назад</button>
+      <button class="menuBtn primary" id="createRoomBtn">Создать комнату</button>
+    </div>
+  </div>
+
+  <!-- Вход по коду -->
+  <div id="screen-joinroom" class="panel" hidden>
+    <div class="stub-box">
+      <div>Введите код комнаты:</div>
+      <input type="text" id="joinCodeInput" placeholder="SNB-XXXX" maxlength="8" autocomplete="off">
+      <button class="menuBtn primary" id="btnJoinConfirm" style="width:100%">JOIN ROOM</button>
+      <div class="stub-note" id="joinMsg"></div>
+    </div>
+    <button class="menuBtn ghost" id="backFromJoin">Назад</button>
+  </div>
+
+  <!-- Лобби комнаты -->
+  <div id="screen-lobby" class="panel" hidden>
+    <div class="lobbyHead">
+      <div>Код комнаты: <span class="stub-code inline" id="lobbyCode">SNB-0000</span> <button class="linkBtn" id="copyCode">копировать</button></div>
+      <div class="subtitle">Друзья вводят этот код на экране JOIN ROOM.</div>
+      <div id="lobbyResult" class="lobbyResult" hidden></div>
+    </div>
+    <div class="lobbyConfig">
+      <label>Режим <select id="lobbyMode"></select></label>
+      <label>Арена <select id="lobbyArena"></select></label>
+      <span class="subtitle" id="lobbyConfigHint"></span>
+    </div>
+    <div class="teamsGrid">
+      <div class="teamCol"><div class="teamlabel a">Команда A</div><div id="slotsA" class="slots"></div></div>
+      <div class="teamCol"><div class="teamlabel b">Команда B</div><div id="slotsB" class="slots"></div></div>
+    </div>
+    <div class="subtitle">Ваш боец (кликните, чтобы сменить):</div>
+    <div class="cardGrid" id="lobbyHeroGrid"></div>
+    <div class="navRow">
+      <button class="menuBtn ghost" id="leaveLobby">Выйти</button>
+      <button class="menuBtn primary" id="startRoomBtn">Начать матч</button>
+    </div>
+    <div class="subtitle" id="lobbyWait"></div>
+  </div>
+
+  <!-- Игра -->
+  <div id="screen-game" class="panel" hidden>
+    <div id="topGameBar">
+      <button id="btnToMenu">← Выйти</button>
+      <div id="hint" style="margin:0">ЛКМ на бойце — заряд броска. ЛКМ мимо — перемещение.</div>
+      <div id="matchTimer">5:00</div>
+    </div>
+    <div id="abilityHint"></div>
+    <div id="stage">
+      <canvas id="c" width="900" height="560"></canvas>
+      <div id="overlay">
+        <h2 id="overlayText">ПОБЕДА</h2>
+        <div id="overlaySub"></div>
+        <div class="ovRow">
+          <button id="againBtn">Играть снова</button>
+          <button class="secondary" id="toMenuBtn">Главное меню</button>
+        </div>
+      </div>
+      <div id="reconnectOverlay" hidden><div>Связь с сервером потеряна, переподключаемся…</div></div>
+    </div>
+    <div id="bottomRow">
+      <div>
+        <div class="teamlabel a" id="teamALabel">Команда A</div>
+        <div id="teamA"></div>
+      </div>
+      <div id="abilityBox">
+        <button id="abilityBtn">Способность (Q)</button>
+        <div id="abilityCd">готова</div>
+      </div>
+      <div style="text-align:right">
+        <div class="teamlabel b" id="teamBLabel">Команда B</div>
+        <div id="teamB"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+  <div class="footer">SnowBrawl <span id="verBuild">__BUILD__</span> · sim <span id="verSim">—</span></div>
+</div>
+
+<script src="sim/sim.js?v=__BUILD__"></script>
+<script src="client/audio.js?v=__BUILD__"></script>
+<script src="client/render.js?v=__BUILD__"></script>
+<script src="client/net.js?v=__BUILD__"></script>
+<script src="client/offline.js?v=__BUILD__"></script>
+<script src="client/app.js?v=__BUILD__"></script>
+</body>
+</html>

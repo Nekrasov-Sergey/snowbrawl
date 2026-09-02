@@ -1,0 +1,51 @@
+# Продакшен-стек SnowBrawl на одной VPS.
+#
+#   Без домена (демо):  docker compose up -d            → игра на http://<ip>/
+#   С доменом и TLS:    docker compose --profile tls up -d → Caddy сам получит сертификат
+#
+# Переменные берутся из файла .env рядом (см. .env.example).
+services:
+  server:
+    image: ${SNOWBRAWL_IMAGE:-ghcr.io/nekrasov-sergey/snowbrawl:latest}
+    container_name: snowbrawl-server
+    restart: unless-stopped
+    environment:
+      SNOWBRAWL_ADDR: ":8080"
+      SNOWBRAWL_ADMIN_TOKEN: ${SNOWBRAWL_ADMIN_TOKEN:?set SNOWBRAWL_ADMIN_TOKEN in .env}
+      SNOWBRAWL_MAX_CONNS: ${SNOWBRAWL_MAX_CONNS:-200}
+      SNOWBRAWL_LOG_LEVEL: ${SNOWBRAWL_LOG_LEVEL:-info}
+      SNOWBRAWL_TRUST_PROXY: ${SNOWBRAWL_TRUST_PROXY:-false}
+    ports:
+      # Без Caddy сервер слушает 80-й порт напрямую. С профилем tls этот порт
+      # переопределяется в override ниже, чтобы не конфликтовать с Caddy.
+      - "${SNOWBRAWL_HTTP_PORT:-80}:8080"
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    healthcheck:
+      test: ["CMD", "/snowbrawl-server", "--help"]
+      interval: 1m
+      timeout: 5s
+      retries: 3
+      disable: true
+
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    container_name: snowbrawl-caddy
+    restart: unless-stopped
+    depends_on: [server]
+    environment:
+      SNOWBRAWL_DOMAIN: ${SNOWBRAWL_DOMAIN:?set SNOWBRAWL_DOMAIN in .env for tls profile}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

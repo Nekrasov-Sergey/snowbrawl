@@ -1,0 +1,6 @@
+bin/
+*.log
+.env
+deploy/.env
+.idea/
+.DS_Store

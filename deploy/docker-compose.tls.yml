@@ -1,0 +1,7 @@
+# Override для профиля TLS: сервер не публикует порт наружу, трафик идёт через Caddy.
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml --profile tls up -d
+services:
+  server:
+    ports: !override []
+    environment:
+      SNOWBRAWL_TRUST_PROXY: "true"

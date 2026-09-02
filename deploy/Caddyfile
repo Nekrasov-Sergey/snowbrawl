@@ -1,0 +1,7 @@
+# Caddy: автоматический TLS (Let's Encrypt) и проксирование WebSocket на сервер игры.
+{$SNOWBRAWL_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy server:8080 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
