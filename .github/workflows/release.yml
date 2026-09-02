@@ -22,6 +22,11 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -60,12 +65,8 @@ jobs:
           generate_release_notes: true
 
       - name: Deploy to VPS
-        if: ${{ secrets.DEPLOY_HOST != '' }}
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        # Контекст secrets недоступен в if, поэтому проверяем через env job-а (см. ниже).
+        if: env.DEPLOY_HOST != ''
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_deploy
