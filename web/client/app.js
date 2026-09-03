@@ -2,6 +2,7 @@
 (function () {
   'use strict';
   var Sim = window.SnowBrawlSim, Audio_ = window.SBAudio, Net = window.SBNet;
+  var Settings = window.SBSettings, Device = window.SBDevice;
   var $ = function (id) { return document.getElementById(id); };
   var BUILD = document.querySelector('meta[name=build]').content;
   var store = {
@@ -9,7 +10,7 @@
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { /* игнор */ } }
   };
 
-  var SCREENS = ['nick', 'menu', 'mode', 'character', 'map', 'search', 'createroom', 'joinroom', 'lobby', 'game'];
+  var SCREENS = ['nick', 'menu', 'mode', 'character', 'map', 'search', 'createroom', 'joinroom', 'lobby', 'game', 'settings'];
   var app = {
     screen: 'nick',
     nick: store.get('sb.nick') || '',
@@ -37,7 +38,9 @@
     if (name === 'map') buildMapGrid();
     if (name === 'createroom') buildCreateGrids();
     if (name === 'menu') $('menuNick').textContent = app.nick;
+    if (name === 'settings') renderSettings();
     if (name !== 'game' && app.game) stopGame();
+    document.documentElement.classList.toggle('ingame', name === 'game');
   }
   var toastTimer = null;
   function toast(msg) {
@@ -157,6 +160,20 @@
   $('btnCreateRoom').onclick = function () { Audio_.uiClick(); goto('createroom'); };
   $('btnJoinRoom').onclick = function () { Audio_.uiClick(); $('joinMsg').textContent = ''; goto('joinroom'); };
   $('btnOffline').onclick = function () { Audio_.uiClick(); app.flow = 'offline'; goto('mode'); };
+  $('btnSettings').onclick = function () { Audio_.uiClick(); goto('settings'); };
+
+  // ------------------------------------------------------------
+  // Настройки (localStorage, см. settings.js)
+  // ------------------------------------------------------------
+  function renderSettings() {
+    $('setAssist').checked = !!Settings.get('aimAssist');
+    $('setHaptics').checked = !!Settings.get('haptics');
+    $('setTouch').value = Settings.get('touch');
+  }
+  $('setAssist').onchange = function () { Settings.set('aimAssist', $('setAssist').checked); };
+  $('setHaptics').onchange = function () { Settings.set('haptics', $('setHaptics').checked); };
+  $('setTouch').onchange = function () { Settings.set('touch', $('setTouch').value); Device.apply(); };
+  $('backFromSettings').onclick = function () { Audio_.uiClick(); goto('menu'); };
 
   // ------------------------------------------------------------
   // Quick Match / оффлайн: режим → боец → (арена)
@@ -314,6 +331,7 @@
   // ------------------------------------------------------------
   var canvas = $('c'), overlay = $('overlay'), overlayText = $('overlayText'), overlaySub = $('overlaySub');
   var abilityBtn = $('abilityBtn'), abilityCd = $('abilityCd');
+  var touchAbility = $('touchAbility'), touchAbilityCd = $('touchAbilityCd'), touchLayer = $('touchLayer');
   var render = window.SBRender.create(canvas);
   var lastMouse = { x: 450, y: 280 };
   var rafId = null;
@@ -328,48 +346,86 @@
     return null;
   }
   function canAct(p) { return p && p.hp > 0 && !p.koed && p.stun <= 0; }
+  function radiusOf(p) { return (Sim.ROLE_STATS[p.role] || { radius: 15 }).radius; }
+  function overMe(pt, me) { return !!me && Math.hypot(pt.x - me.x, pt.y - me.y) <= radiusOf(me) + 10; }
 
-  // Локальный замах для мгновенного отклика (сервер подтвердит через снапшот).
-  var local = { charging: false, start: 0, aimX: 0, aimY: 0, power: 0, dragging: false, audioStop: null, lastSent: 0 };
-  function throttled() { var now = performance.now(); if (now - local.lastSent < 66) return false; local.lastSent = now; return true; }
+  // Слой намерений: мышь и стики дают команды сюда, он шлёт протокол и держит локальный замах
+  // (intent.local) для мгновенного отклика в рендере — сервер подтвердит через снапшот.
+  var chargeAudioStop = null;
+  var intent = window.SBIntent.create({
+    getGame: function () { return app.game; },
+    getMe: myPlayer,
+    canAct: canAct,
+    useAssist: function () { return Device.isTouch() && !!Settings.get('aimAssist'); },
+    onChargeStart: function () { chargeAudioStop = Audio_.chargeLoopStart(function () { return intent.local.power; }); },
+    onChargeEnd: function () { if (chargeAudioStop) { chargeAudioStop(); chargeAudioStop = null; } }
+  });
+  var local = intent.local;
 
+  // ---- источник намерений: мышь (ПК) ----
+  // ЛКМ по бойцу — замах, отпустить снова над бойцом — отмена; ЛКМ мимо — идти в точку.
+  var mouse = { dragging: false };
   canvas.addEventListener('mousedown', function (e) {
-    if (app.screen !== 'game' || !app.game || app.game.over) return;
+    if (Device.isTouch() || app.screen !== 'game' || !app.game || app.game.over) return;
     var pt = toLocal(e), me = myPlayer(app.game.lastSnap);
+    lastMouse = pt;
     if (!canAct(me)) return;
-    var r = (Sim.ROLE_STATS[me.role] || { radius: 15 }).radius;
-    if (Math.hypot(pt.x - me.x, pt.y - me.y) <= r + 10) {
-      local.charging = true; local.start = performance.now(); local.aimX = pt.x; local.aimY = pt.y; local.power = 0; local.dragging = false;
-      local.audioStop = Audio_.chargeLoopStart(function () { return local.power; });
-      app.game.input('chargeStart', pt.x, pt.y);
-    } else {
-      local.dragging = true;
-      app.game.input('move', pt.x, pt.y);
-    }
+    if (overMe(pt, me)) intent.chargeStartAt(pt.x, pt.y);
+    else { mouse.dragging = true; intent.moveTo(pt.x, pt.y, true); }
   });
   canvas.addEventListener('mousemove', function (e) {
     var pt = toLocal(e); lastMouse = pt;
-    if (app.screen !== 'game' || !app.game) return;
-    if (local.charging) { local.aimX = pt.x; local.aimY = pt.y; if (throttled()) app.game.input('aim', pt.x, pt.y); }
-    else if (local.dragging && throttled()) app.game.input('move', pt.x, pt.y);
+    if (Device.isTouch() || app.screen !== 'game' || !app.game) return;
+    if (local.charging) intent.aimAt(pt.x, pt.y);
+    else if (mouse.dragging) intent.moveTo(pt.x, pt.y, false);
   });
-  window.addEventListener('mouseup', function () {
+  window.addEventListener('mouseup', function (e) {
     if (!app.game) return;
-    if (local.charging) {
-      local.charging = false;
-      if (local.audioStop) { local.audioStop(); local.audioStop = null; }
-      var power = Math.min((performance.now() - local.start) / Sim.CHARGE_FULL_MS, 1);
-      app.game.input('throw', local.aimX, local.aimY, power);
+    if (local.charging && !Device.isTouch()) {
+      var pt = toLocal(e), me = myPlayer(app.game.lastSnap);
+      if (overMe(pt, me)) intent.cancelCharge();
+      else intent.throwAt(local.aimX, local.aimY);
     }
-    if (local.dragging) { local.dragging = false; app.game.input('move', lastMouse.x, lastMouse.y); }
+    if (mouse.dragging) { mouse.dragging = false; intent.moveTo(lastMouse.x, lastMouse.y, true); }
   });
   window.addEventListener('keydown', function (e) {
     if (app.screen !== 'game' || !app.game) return;
-    if (['q', 'Q', 'й', 'Й'].indexOf(e.key) >= 0) app.game.input('special', lastMouse.x, lastMouse.y);
+    if (['q', 'Q', 'й', 'Й'].indexOf(e.key) >= 0) intent.specialAt(lastMouse.x, lastMouse.y);
   });
-  abilityBtn.onclick = function () { if (app.game) app.game.input('special', lastMouse.x, lastMouse.y); };
+  abilityBtn.onclick = function () { if (app.game) intent.specialAt(lastMouse.x, lastMouse.y); };
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
+  // ---- источник намерений: стики (сенсорный экран) ----
+  var touch = window.SBTouch.create({
+    layer: touchLayer, zoneL: $('zoneL'), zoneR: $('zoneR'), stickL: $('stickL'), stickR: $('stickR'),
+    ability: touchAbility, stickS: $('stickS'), intent: intent,
+    getMe: function () { return app.game ? myPlayer(app.game.lastSnap) : null; },
+    hasDirSpecial: function (role) { var sp = Sim.SPECIALS[role]; return !!sp && sp.type === 'wall'; }
+  });
+  var zonesHintTimer = null;
+
+  // Полный экран (Android; на iPhone Safari недоступен — там режим «на экран Домой»).
+  $('fsBtn').onclick = function () {
+    if (document.fullscreenElement) { document.exitFullscreen(); return; }
+    var el = document.documentElement;
+    try { el.requestFullscreen({ navigationUI: 'hide' }).catch(function () { /* отказ — не страшно */ }); } catch (e) { /* игнор */ }
+  };
+
+  // Возврат из фона: сервер через 20 с без ввода отдаёт бойца боту; любой ввод возвращает управление.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible' || !app.game || app.game.over || app.screen !== 'game') return;
+    touch.reset(); intent.reset();
+    var me = myPlayer(app.game.lastSnap);
+    if (me) intent.moveTo(me.x, me.y, true);
+    toast('Вы снова в игре.');
+  });
+
+  function vibrate(ms) {
+    if (!Settings.get('haptics') || !Device.canVibrate()) return;
+    try { navigator.vibrate(ms); } catch (e) { /* игнор */ }
+  }
+
+  var hudCache = { a: '', b: '' };
   function updateHUD(snap) {
     var me = myPlayer(snap);
     function row(p, right) {
@@ -380,16 +436,30 @@
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'
         : '<div class="charrow"><span class="' + cls + '">' + name + '</span><span class="pips">' + pips + '</span></div>';
     }
-    $('teamA').innerHTML = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
-    $('teamB').innerHTML = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
+    // innerHTML перерисовываем только при изменении составов/HP, а не каждый кадр.
+    var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
+    var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
+    if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
+    if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
     $('matchTimer').textContent = fmtTime(snap.timeLeft);
     if (!me) return;
     var hasSpec = !!Sim.SPECIALS[me.role];
-    if (!hasSpec) { abilityBtn.disabled = true; abilityBtn.textContent = 'Нет способности'; abilityCd.textContent = ''; }
-    else {
+    if (!hasSpec) {
+      abilityBtn.disabled = true; abilityBtn.textContent = 'Нет способности'; abilityCd.textContent = '';
+      touchAbility.hidden = true;
+    } else {
       abilityBtn.textContent = me.special ? 'Способность заряжена' : 'Способность (Q)';
-      if (me.cd > 0) { abilityBtn.disabled = true; abilityCd.textContent = me.cd.toFixed(1) + ' с'; }
-      else { abilityBtn.disabled = false; abilityCd.textContent = me.special ? 'следующий бросок' : 'готова'; }
+      touchAbility.hidden = !Device.isTouch();
+      touchAbility.className = me.cd > 0 ? 'off' : (me.special ? 'armed' : 'ready');
+      if (me.cd > 0) { abilityBtn.disabled = true; abilityCd.textContent = me.cd.toFixed(1) + ' с'; touchAbilityCd.textContent = Math.ceil(me.cd) + 'с'; }
+      else { abilityBtn.disabled = false; abilityCd.textContent = me.special ? 'следующий бросок' : 'готова'; touchAbilityCd.textContent = ''; }
+    }
+  }
+  function myHitEvents(events) {
+    if (!events || !app.game) return;
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      if ((e.type === 'hit' || e.type === 'ko') && e.targetId === app.game.meId) { vibrate(e.type === 'ko' ? 80 : 30); return; }
     }
   }
 
@@ -401,12 +471,8 @@
     var g = app.game; if (!g || app.screen !== 'game') return null;
     var fr = g.frame();
     if (!fr || !fr.snap) return null;
-    if (fr.events && fr.events.length) render.handleEvents(fr.events, Audio_);
-    if (local.charging) local.power = Math.min((performance.now() - local.start) / Sim.CHARGE_FULL_MS, 1);
-    var me = myPlayer(fr.snap);
-    if (local.charging && !canAct(me)) { // оглушили во время замаха
-      local.charging = false; if (local.audioStop) { local.audioStop(); local.audioStop = null; }
-    }
+    if (fr.events && fr.events.length) { render.handleEvents(fr.events, Audio_); myHitEvents(fr.events); }
+    intent.tick(); // сила замаха, сброс при оглушении, переотправка цели движения по стику
     render.frame(fr.snap, g.meId, local);
     updateHUD(fr.snap);
     return fr;
@@ -419,17 +485,38 @@
     $('reconnectOverlay').hidden = true;
     var myRole = null;
     g.players.forEach(function (p) { if (p.id === g.meId) myRole = p.role; });
-    $('abilityHint').textContent = Sim.ABILITY_HINT_TEXT[myRole] || 'У вашего бойца нет активной способности — играйте позиционированием.';
+    var isTouch = Device.isTouch();
+    var abilityHint = Sim.ABILITY_HINT_TEXT[myRole] || 'У вашего бойца нет активной способности — играйте позиционированием.';
+    if (isTouch) abilityHint = abilityHint.replace('(Q)', '(кнопка справа)');
+    $('abilityHint').textContent = abilityHint;
+    $('hint').textContent = isTouch
+      ? 'Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.'
+      : 'ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.';
     $('teamALabel').textContent = 'Команда A' + (g.myTeam === 'A' ? ' (вы)' : '');
     $('teamBLabel').textContent = 'Команда B' + (g.myTeam === 'B' ? ' (вы)' : '');
-    $('teamA').innerHTML = ''; $('teamB').innerHTML = '';
+    $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; hudCache.a = hudCache.b = '';
+    Device.apply();
+    touchLayer.hidden = !isTouch;
+    touch.reset(); intent.reset();
+    $('fsBtn').hidden = !(isTouch && Device.fullscreenAvailable());
+    clearTimeout(zonesHintTimer);
+    if (isTouch) {
+      touchLayer.classList.add('showZones');
+      zonesHintTimer = setTimeout(function () { touchLayer.classList.remove('showZones'); }, 4000);
+      if (Sim.SPECIALS[myRole]) toast(abilityHint);
+      if (Device.isPortrait() && !sessionFlag('sb.portraitHint')) toast('В горизонтальном положении телефона играть удобнее.');
+    }
     goto('game');
     if (!rafId) loop();
+  }
+  function sessionFlag(k) {
+    try { if (sessionStorage.getItem(k)) return true; sessionStorage.setItem(k, '1'); } catch (e) { /* игнор */ }
+    return false;
   }
   function showResult(winner, myTeam, reason) {
     var g = app.game; if (!g) return;
     g.over = true;
-    if (local.charging) { local.charging = false; if (local.audioStop) { local.audioStop(); local.audioStop = null; } }
+    intent.reset(); touch.reset();
     overlay.style.display = 'flex';
     if (reason === 'shutdown') { overlayText.textContent = 'МАТЧ ПРЕРВАН'; overlayText.style.color = '#ffd166'; overlaySub.textContent = 'Сервер перезапускается для обновления.'; }
     else if (reason === 'abandoned') { overlayText.textContent = 'МАТЧ ЗАВЕРШЁН'; overlayText.style.color = '#ffd166'; overlaySub.textContent = 'Все игроки покинули матч.'; }
@@ -441,8 +528,7 @@
   function stopGame() {
     var g = app.game; if (!g) return;
     app.game = null;
-    if (local.charging) { local.charging = false; if (local.audioStop) { local.audioStop(); local.audioStop = null; } }
-    local.dragging = false;
+    intent.reset(); touch.reset(); mouse.dragging = false;
     if (g.stop) g.stop();
   }
 
@@ -528,8 +614,9 @@
   // Старт
   // ------------------------------------------------------------
   // Отладочный хук для DevTools и автотестов: состояние приложения и ручной кадр.
-  window.SBApp = { state: app, renderOnce: renderOnce, send: send };
+  window.SBApp = { state: app, renderOnce: renderOnce, send: send, intent: intent };
 
+  Device.apply();
   $('verBuild').textContent = BUILD;
   if (app.nick) { connect(); goto('menu'); }
   else { $('nickInput').value = ''; goto('nick'); }

@@ -44,6 +44,9 @@
 - **Разработчик игры** правит `web/sim/sim.js` и `web/client/*` по
   [SIM_CONTRACT.md](SIM_CONTRACT.md), поднимает `SIM_VERSION`, тегирует релиз.
   Ему не нужно знать Go: тесты `go test ./internal/sim/` проверят его файл в goja.
+  Сенсорное управление живёт в `web/client/touch.js` (стики) и `web/client/intent.js`
+  (общий слой намерений для мыши и стиков); проверять на реальных Android и iPhone
+  через pre-release тег `vX.Y.Z-rc.N` — он выкладывается на VPS, но не трогает `:latest`.
 - **Любой Go-разработчик** правит сервер по [ARCHITECTURE.md](ARCHITECTURE.md) и
   [PROTOCOL.md](PROTOCOL.md).
 - **Администратор** (может быть нетехнический) обновляет по RUNBOOK: одна команда

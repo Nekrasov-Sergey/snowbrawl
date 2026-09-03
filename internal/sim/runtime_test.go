@@ -38,11 +38,54 @@ type snap struct {
 	Over    bool `json:"over"`
 	Winner  any  `json:"winner"`
 	Players []struct {
-		ID string  `json:"id"`
-		X  float64 `json:"x"`
-		Y  float64 `json:"y"`
-		HP int     `json:"hp"`
+		ID       string  `json:"id"`
+		X        float64 `json:"x"`
+		Y        float64 `json:"y"`
+		HP       int     `json:"hp"`
+		Charging bool    `json:"charging"`
 	} `json:"players"`
+	Balls []json.RawMessage `json:"balls"`
+}
+
+// TestCancelCharge — отмена замаха: chargeStart → cancelCharge не бросает снежок,
+// повторный chargeStart принимается, cancelCharge без замаха отклоняется.
+func TestCancelCharge(t *testing.T) {
+	p := loadProgram(t)
+	cfg := botsConfig(1, p.Roles())
+	cfg.Players[0].Bot = false
+	m, err := p.NewMatch(cfg, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := m.ApplyInput("a0", json.RawMessage(`{"kind":"cancelCharge"}`)); ok {
+		t.Fatal("cancelCharge without charge must be rejected")
+	}
+	if ok, _ := m.ApplyInput("a0", json.RawMessage(`{"kind":"chargeStart","x":700,"y":280}`)); !ok {
+		t.Fatal("chargeStart rejected")
+	}
+	if ok, _ := m.ApplyInput("a0", json.RawMessage(`{"kind":"cancelCharge"}`)); !ok {
+		t.Fatal("cancelCharge rejected during charge")
+	}
+	// События applyInput между шагами sim не накапливает (step обнуляет state.events),
+	// поэтому проверяем результат по снапшоту: замах снят, снежка нет.
+	if _, err := m.Step(1.0 / 20); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := m.Snapshot()
+	var s snap
+	_ = json.Unmarshal(raw, &s)
+	if s.Players[0].Charging {
+		t.Fatal("charging must be reset after cancelCharge")
+	}
+	if len(s.Balls) != 0 {
+		t.Fatal("cancelCharge must not throw a snowball")
+	}
+	if ok, _ := m.ApplyInput("a0", json.RawMessage(`{"kind":"throw","x":700,"y":280}`)); ok {
+		t.Fatal("throw after cancel must be rejected")
+	}
+	if ok, _ := m.ApplyInput("a0", json.RawMessage(`{"kind":"chargeStart","x":700,"y":280}`)); !ok {
+		t.Fatal("chargeStart after cancel rejected")
+	}
 }
 
 func TestCompileExports(t *testing.T) {

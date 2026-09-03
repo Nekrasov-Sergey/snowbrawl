@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.0.0';
+  var SIM_VERSION = '1.1.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -221,6 +221,7 @@
    *  'chargeStart' {x, y}               — начать замах, (x,y) — прицел
    *  'aim'         {x, y}               — обновить прицел во время замаха
    *  'throw'       {x, y, power?}       — бросить; power 0..1 от клиента, сверяется с серверным таймингом
+   *  'cancelCharge' {}                  — отменить замах без броска (стик вернулся в мёртвую зону)
    *  'special'     {x, y}               — способность (Q), (x,y) — прицел/направление
    * Возвращает true, если ввод принят.
    */
@@ -253,6 +254,11 @@
         }
         p.charging = false;
         throwSnowball(state, p, p.aimX, p.aimY, power);
+        return true;
+      case 'cancelCharge':
+        if (!p.charging) return false;
+        p.charging = false;
+        emit(state, { type: 'chargeCancel', playerId: p.id });
         return true;
       case 'special':
         return useSpecial(state, p, x, y);

@@ -2,7 +2,9 @@ html, body {
   margin: 0; padding: 0; background: #0e1a2b; color: #eaf2ff;
   font-family: 'Segoe UI', Arial, sans-serif; overflow-x: hidden;
 }
-#app { display: flex; flex-direction: column; align-items: center; padding: 18px; max-width: 920px; margin: 0 auto; position: relative; min-height: 95vh; }
+html.touch, html.touch body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+html.touch #screen-game, html.touch #screen-game * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#app { display: flex; flex-direction: column; align-items: center; padding: 18px; max-width: 920px; margin: 0 auto; position: relative; min-height: 100vh; min-height: 100dvh; box-sizing: border-box; }
 h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align: center; }
 .panel { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .panel[hidden] { display: none; }
@@ -16,6 +18,8 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .menuBtn:hover { background: #33587f; }
 .menuBtn:disabled { opacity: 0.45; cursor: default; }
 .menuBtn.ghost { background: transparent; border: 1px solid #3a5a80; color: #a9c2e0; font-weight: 500; width: 200px; }
+.menuBtn.ghost.wide { width: 320px; }
+.menuBtn, .menuBtn.ghost, .menuBtn.ghost.wide { max-width: 90vw; }
 .menuBtn.ghost:hover { background: #16283f; }
 .linkBtn { background: none; border: none; color: #4aa8ff; cursor: pointer; font-size: 13px; text-decoration: underline; padding: 0 4px; }
 .subtitle { color: #a9c2e0; font-size: 14px; text-align: center; max-width: 560px; }
@@ -54,6 +58,14 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .heroSwatch { width: 34px; height: 34px; border-radius: 50%; border: 2px solid #0b1622; }
 .navRow { display: flex; gap: 12px; margin-top: 4px; }
 
+/* настройки */
+.settingsBox { background: #16283f; border: 1px solid #3a5a80; border-radius: 10px; padding: 8px 18px; width: 100%; max-width: 460px; box-sizing: border-box; }
+.setRow { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid #23405f; font-size: 15px; cursor: pointer; }
+.setRow:last-child { border-bottom: none; }
+.setRow small { display: block; color: #a9c2e0; font-size: 12px; margin-top: 3px; line-height: 1.35; }
+.setRow input[type=checkbox] { width: 22px; height: 22px; flex: none; accent-color: #4aa8ff; }
+.setRow select { background: #0e1a2b; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; padding: 6px 8px; font-size: 14px; flex: none; }
+
 /* лобби */
 .lobbyHead { text-align: center; display: flex; flex-direction: column; gap: 6px; align-items: center; }
 .lobbyResult { background: #16283f; border: 1px solid #3a5a80; border-radius: 8px; padding: 8px 16px; font-weight: 700; color: #ffd166; }
@@ -85,10 +97,12 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 #topGameBar button { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; }
 #topGameBar button:hover { background:#274363; }
 #matchTimer { width: 70px; text-align: right; font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 14px; }
-#stage { position: relative; max-width: 100%; }
+#topGameBar #fsBtn { font-size: 15px; padding: 4px 10px; margin-left: 8px; }
+#gameWrap { width: 100%; display: flex; flex-direction: column; align-items: center; position: relative; }
+#stage { position: relative; max-width: 100%; aspect-ratio: 900 / 560; }
 canvas {
   background: linear-gradient(180deg,#dfeeff 0%, #c3ddf7 100%);
-  border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); cursor: crosshair; display: block; max-width: 100%;
+  border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); cursor: crosshair; display: block; max-width: 100%; height: 100%; width: 100%;
 }
 #overlay {
   position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
@@ -104,7 +118,7 @@ canvas {
 #overlay button.secondary { background: #274363; color: #eaf2ff; }
 #overlay button:hover { filter: brightness(1.15); }
 #reconnectOverlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,10,20,0.6); border-radius: 10px; font-size: 16px; }
-#bottomRow { display: flex; justify-content: space-between; width: 100%; max-width: 900px; margin-top: 8px; font-size: 12px; align-items: flex-start; }
+#bottomRow { display: flex; justify-content: space-between; width: 100%; max-width: 900px; margin-top: 8px; font-size: 12px; align-items: flex-start; box-sizing: border-box; }
 .pips { display: flex; gap: 4px; }
 .pip { width: 14px; height: 14px; border-radius: 3px; background: #294159; border: 1px solid #4b6a8a; }
 .pip.on.a { background: #4aa8ff; }
@@ -118,6 +132,69 @@ canvas {
 #abilityBtn { padding: 8px 18px; font-size: 13px; border-radius: 8px; border: 1px solid #7a5cff; background: #2a2050; color: #e6d9ff; cursor: pointer; font-weight: 700; }
 #abilityBtn:disabled { opacity: 0.4; cursor: default; }
 #abilityCd { font-size: 11px; color: #b7a6ff; margin-top: 4px; }
+
+/* сенсорное управление */
+#touchLayer { position: absolute; inset: 0; z-index: 4; touch-action: none; overflow: hidden; }
+#touchLayer .zone { position: absolute; top: 0; bottom: 0; left: 0; width: 50%; touch-action: none; }
+#touchLayer .zone.right { left: 50%; }
+#touchLayer .zoneHint { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); font-size: 12px; color: rgba(234,242,255,0.55); letter-spacing: 1px; text-transform: uppercase; opacity: 0; transition: opacity 0.4s; pointer-events: none; white-space: nowrap; }
+#touchLayer.showZones .zone { background: rgba(74,168,255,0.06); box-shadow: inset 0 0 0 1px rgba(74,168,255,0.25); }
+#touchLayer.showZones .zoneHint { opacity: 1; }
+#touchLayer .stick { position: absolute; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%; background: rgba(255,255,255,0.10); border: 2px solid rgba(255,255,255,0.35); pointer-events: none; }
+#touchLayer .stick .knob { position: absolute; left: 50%; top: 50%; width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%; background: rgba(255,255,255,0.75); box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+#touchLayer .stick.mini { width: 100px; height: 100px; margin: -50px 0 0 -50px; border-color: rgba(183,166,255,0.6); }
+#touchLayer .stick.mini .knob { background: rgba(183,166,255,0.9); }
+#touchAbility { position: absolute; right: 18px; bottom: 96px; width: 64px; height: 64px; border-radius: 50%; border: 2px solid #7a5cff; background: rgba(42,32,80,0.85); color: #e6d9ff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; touch-action: none; padding: 0; z-index: 5; }
+#touchAbility.off { opacity: 0.35; }
+#touchAbility.ready { box-shadow: 0 0 16px rgba(122,92,255,0.8); }
+#touchAbility.armed { background: rgba(122,92,255,0.9); color: #fff; }
+#touchAbilityIcon { font-size: 22px; line-height: 1; }
+#touchAbilityCd { font-size: 10px; line-height: 1; color: #b7a6ff; min-height: 10px; }
+
+/* сенсорный режим: игровой экран во весь вьюпорт, HUD поверх полей, меню под палец */
+html.touch .menuBtn, html.touch .modeCard, html.touch .heroCard, html.touch .mapCard, html.touch .slot { min-height: 44px; }
+html.touch canvas { cursor: default; }
+html.touch .heroCard:hover, html.touch .mapCard:hover, html.touch .modeCard:hover, html.touch .menuBtn:hover { border-color: inherit; background: inherit; }
+html.touch.ingame #app { padding: 0; max-width: none; min-height: 100vh; min-height: 100dvh; height: 100vh; height: 100dvh; overflow: hidden; }
+html.touch.ingame h1.title, html.touch.ingame .footer, html.touch.ingame #soundToggle, html.touch.ingame #connState, html.touch.ingame #abilityHint, html.touch.ingame #abilityBox { display: none; }
+html.touch.ingame #drainBanner { margin: 0; border-radius: 0; font-size: 11px; padding: 4px 8px; }
+html.touch.ingame #screen-game { gap: 0; flex: 1; min-height: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
+html.touch.ingame #topGameBar { max-width: none; margin: 0; padding: 4px 10px; box-sizing: border-box; height: 36px; flex: none; }
+html.touch.ingame #topGameBar button { padding: 4px 10px; font-size: 12px; }
+html.touch.ingame #hint { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
+html.touch.ingame #gameWrap { flex: 1; min-height: 0; width: 100%; }
+html.touch.ingame #stage { border-radius: 0; }
+html.touch.ingame canvas { border-radius: 6px; box-shadow: none; }
+html.touch.ingame #overlay, html.touch.ingame #reconnectOverlay { border-radius: 6px; }
+html.touch.ingame #overlay { z-index: 6; }
+html.touch.ingame #overlay h2 { font-size: 26px; }
+html.touch.ingame .charname { min-width: 0; }
+html.touch.ingame .pip { width: 11px; height: 11px; }
+/* ландшафт: арена по высоте, поля по бокам под стики и HUD */
+@media (orientation: landscape) {
+  html.touch.ingame #gameWrap { flex-direction: row; justify-content: center; align-items: stretch; }
+  html.touch.ingame #stage { height: 100%; width: auto; max-width: 100%; }
+  html.touch.ingame #bottomRow { position: absolute; inset: 0; margin: 0; max-width: none; pointer-events: none; padding: 8px 10px; box-sizing: border-box; }
+  html.touch.ingame #hudA, html.touch.ingame #hudB { max-width: 24%; }
+}
+/* портрет: арена сверху по ширине, HUD под ней, стики в оставшемся месте */
+@media (orientation: portrait) {
+  html.touch.ingame #gameWrap { flex-direction: column; }
+  html.touch.ingame #stage { width: 100%; height: auto; flex: none; }
+  html.touch.ingame #bottomRow { margin: 6px 8px 0; width: auto; align-self: stretch; flex: none; }
+  html.touch.ingame #touchLayer { position: absolute; top: 0; }
+  html.touch.ingame #touchAbility { bottom: 24px; }
+}
+/* узкие экраны меню (телефон в портрете) */
+@media (max-width: 600px) {
+  #app { padding: 12px; }
+  h1.title { font-size: 24px; margin-bottom: 12px; }
+  .cardGrid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .teamsGrid { grid-template-columns: 1fr; gap: 12px; }
+  .lobbyConfig { flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .stub-box { padding: 16px; }
+  #bottomRow { flex-wrap: wrap; gap: 8px; }
+}
 #soundToggle { position:absolute; top:10px; right:10px; background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; z-index:5; }
 #connState { position:absolute; top:14px; left:14px; font-size: 14px; color: #6f89a8; z-index: 5; }
 #connState.on { color: #7CFFB2; }

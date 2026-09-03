@@ -22,7 +22,7 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.0.0',                 // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.1.0',                 // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, CHARGE_FULL_MS, KO_ANIM_MS,
   ARENAS, ROLE_STATS, SPECIALS, MODES, HERO_DESCRIPTIONS, ABILITY_HINT_TEXT, ALL_ROLES,
   makeRng(seed), shuffle(rng, arr),
@@ -68,6 +68,7 @@ config = {
 | `chargeStart` | начать замах, (x,y) — прицел |
 | `aim` | обновить прицел во время замаха |
 | `throw` | бросить; `power` 0..1 от клиента; sim сверяет со своим таймингом (допуск 0.25) |
+| `cancelCharge` | отменить замах без броска (с 1.1.0; стик вернулся в мёртвую зону, курсор отпущен над бойцом) |
 | `special` | способность (Q) |
 
 Возвращает `true`, если ввод принят. Неизвестный игрок, мёртвый боец, оглушение — `false`,

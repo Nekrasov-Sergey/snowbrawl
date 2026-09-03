@@ -2,7 +2,15 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1a2b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SnowBrawl">
+<link rel="manifest" href="manifest.json?v=__BUILD__">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <meta name="build" content="__BUILD__">
 <title>SnowBrawl</title>
 <link rel="stylesheet" href="client/style.css?v=__BUILD__">
@@ -31,7 +39,20 @@
     <button class="menuBtn primary" id="btnQuickMatch">QUICK MATCH</button>
     <button class="menuBtn" id="btnCreateRoom">CREATE ROOM</button>
     <button class="menuBtn" id="btnJoinRoom">JOIN ROOM</button>
-    <button class="menuBtn ghost" id="btnOffline" style="width:320px">Тренировка с ботами (оффлайн)</button>
+    <button class="menuBtn ghost wide" id="btnOffline">Тренировка с ботами (оффлайн)</button>
+    <button class="menuBtn ghost" id="btnSettings">Настройки</button>
+  </div>
+
+  <!-- Настройки -->
+  <div id="screen-settings" class="panel" hidden>
+    <div class="subtitle">Настройки сохраняются на этом устройстве.</div>
+    <div class="settingsBox">
+      <label class="setRow"><span>Помощь в прицеливании<small>Только на сенсорном экране: прицел доворачивается на ближайшего врага в конусе 15°.</small></span><input type="checkbox" id="setAssist"></label>
+      <label class="setRow"><span>Вибрация при попадании<small>Работает на Android; iPhone не поддерживает.</small></span><input type="checkbox" id="setHaptics"></label>
+      <label class="setRow"><span>Сенсорное управление<small>Стики вместо мыши. «Авто» — по типу устройства.</small></span>
+        <select id="setTouch"><option value="auto">авто</option><option value="on">включено</option><option value="off">выключено</option></select></label>
+    </div>
+    <div class="navRow"><button class="menuBtn ghost" id="backFromSettings">Назад</button></div>
   </div>
 
   <!-- Quick Match: режим -->
@@ -123,34 +144,46 @@
   <div id="screen-game" class="panel" hidden>
     <div id="topGameBar">
       <button id="btnToMenu">← Выйти</button>
-      <div id="hint" style="margin:0">ЛКМ на бойце — заряд броска. ЛКМ мимо — перемещение.</div>
+      <div id="hint" style="margin:0">ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.</div>
       <div id="matchTimer">5:00</div>
+      <button id="fsBtn" title="Во весь экран" hidden>⛶</button>
     </div>
     <div id="abilityHint"></div>
-    <div id="stage">
-      <canvas id="c" width="900" height="560"></canvas>
-      <div id="overlay">
-        <h2 id="overlayText">ПОБЕДА</h2>
-        <div id="overlaySub"></div>
-        <div class="ovRow">
-          <button id="againBtn">Играть снова</button>
-          <button class="secondary" id="toMenuBtn">Главное меню</button>
+    <div id="gameWrap">
+      <div id="stage">
+        <canvas id="c" width="900" height="560"></canvas>
+        <div id="overlay">
+          <h2 id="overlayText">ПОБЕДА</h2>
+          <div id="overlaySub"></div>
+          <div class="ovRow">
+            <button id="againBtn">Играть снова</button>
+            <button class="secondary" id="toMenuBtn">Главное меню</button>
+          </div>
+        </div>
+        <div id="reconnectOverlay" hidden><div>Связь с сервером потеряна, переподключаемся…</div></div>
+      </div>
+      <div id="bottomRow">
+        <div id="hudA">
+          <div class="teamlabel a" id="teamALabel">Команда A</div>
+          <div id="teamA"></div>
+        </div>
+        <div id="abilityBox">
+          <button id="abilityBtn">Способность (Q)</button>
+          <div id="abilityCd">готова</div>
+        </div>
+        <div id="hudB" style="text-align:right">
+          <div class="teamlabel b" id="teamBLabel">Команда B</div>
+          <div id="teamB"></div>
         </div>
       </div>
-      <div id="reconnectOverlay" hidden><div>Связь с сервером потеряна, переподключаемся…</div></div>
-    </div>
-    <div id="bottomRow">
-      <div>
-        <div class="teamlabel a" id="teamALabel">Команда A</div>
-        <div id="teamA"></div>
-      </div>
-      <div id="abilityBox">
-        <button id="abilityBtn">Способность (Q)</button>
-        <div id="abilityCd">готова</div>
-      </div>
-      <div style="text-align:right">
-        <div class="teamlabel b" id="teamBLabel">Команда B</div>
-        <div id="teamB"></div>
+      <!-- Сенсорное управление: плавающие стики и кнопка способности (см. client/touch.js) -->
+      <div id="touchLayer" hidden>
+        <div class="zone" id="zoneL"><span class="zoneHint">движение</span></div>
+        <div class="zone right" id="zoneR"><span class="zoneHint">замах и бросок</span></div>
+        <div class="stick" id="stickL" hidden><div class="knob"></div></div>
+        <div class="stick" id="stickR" hidden><div class="knob"></div></div>
+        <div class="stick mini" id="stickS" hidden><div class="knob"></div></div>
+        <button id="touchAbility" hidden><span id="touchAbilityIcon">✦</span><span id="touchAbilityCd"></span></button>
       </div>
     </div>
   </div>
@@ -164,6 +197,10 @@
 <script src="client/render.js?v=__BUILD__"></script>
 <script src="client/net.js?v=__BUILD__"></script>
 <script src="client/offline.js?v=__BUILD__"></script>
+<script src="client/settings.js?v=__BUILD__"></script>
+<script src="client/device.js?v=__BUILD__"></script>
+<script src="client/intent.js?v=__BUILD__"></script>
+<script src="client/touch.js?v=__BUILD__"></script>
 <script src="client/app.js?v=__BUILD__"></script>
 </body>
 </html>
