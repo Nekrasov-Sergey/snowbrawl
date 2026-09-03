@@ -43,34 +43,51 @@ window.SBAudio = (function () {
     setEnabled: function (v) { enabled = v; try { localStorage.setItem('sb.sound', v ? 'on' : 'off'); } catch (e) { /* игнор */ } },
     isEnabled: function () { return enabled; },
     uiClick: function () { tone({ freq: 900, duration: 0.05, type: 'square', gain: 0.07 }); },
-    /** Замах: треугольная волна (как у броска) через lowpass, яркость и высота растут с силой.
-     *  Параметры обновляются ~15 раз/с, а не каждый кадр: на телефонах аудиопоток чувствителен к потоку событий. */
+    /** Замах = лепка снежка: череда мягких «шлепков» ладонями по снегу. Не тон, а ритмичный
+     *  шум — каждый шлепок это короткий всплеск шума через bandpass плюс низкий уплотняющий
+     *  толчок. Темп и громкость растут с силой. Бёрсты планируются по таймеру (~5–9/с), а не
+     *  каждый кадр: на телефонах аудиопоток чувствителен к потоку событий. */
     chargeLoopStart: function (getPower) {
       if (!enabled) return function () {};
       var c = ensureCtx();
-      var osc = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
-      osc.type = 'triangle'; osc.frequency.value = 180;
-      f.type = 'lowpass'; f.frequency.value = 1200; f.Q.value = 0.9;
-      g.gain.value = 0.0001;
-      osc.connect(f); f.connect(g); g.connect(c.destination);
-      osc.start();
-      var raf, lastUpd = 0;
-      function update() {
-        var now = performance.now();
-        if (now - lastUpd >= 66) {
-          lastUpd = now;
-          var p = getPower();
-          osc.frequency.setTargetAtTime(180 + p * 240, c.currentTime, 0.06);
-          f.frequency.setTargetAtTime(1200 + p * 1400, c.currentTime, 0.06);
-          g.gain.setTargetAtTime(0.03 + p * 0.04, c.currentTime, 0.06);
-        }
-        raf = requestAnimationFrame(update);
+      var stopped = false, raf, nextAt = c.currentTime;
+      function pack(power) {
+        var t0 = c.currentTime;
+        // мягкий скрип-хруст сжимаемого снега
+        var dur = 0.05 + Math.random() * 0.05;
+        var src = c.createBufferSource(); src.buffer = noiseBuffer;
+        src.playbackRate.value = 0.7 + Math.random() * 0.35;
+        var bp = c.createBiquadFilter(); bp.type = 'bandpass';
+        bp.frequency.value = 460 + power * 520 + Math.random() * 160; bp.Q.value = 0.8;
+        var g = c.createGain();
+        var vol = 0.02 + power * 0.05;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(vol, t0 + 0.008);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        src.connect(bp); bp.connect(g); g.connect(c.destination);
+        src.start(t0); src.stop(t0 + dur + 0.02);
+        // низкий короткий толчок уплотнения
+        var o = c.createOscillator(), og = c.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(150 + power * 40, t0);
+        o.frequency.exponentialRampToValueAtTime(70, t0 + 0.09);
+        og.gain.setValueAtTime(0.025 + power * 0.03, t0);
+        og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.1);
+        o.connect(og); og.connect(c.destination);
+        o.start(t0); o.stop(t0 + 0.13);
       }
-      update();
-      return function () {
-        cancelAnimationFrame(raf);
-        try { g.gain.setTargetAtTime(0.0001, c.currentTime, 0.03); osc.stop(c.currentTime + 0.2); } catch (e) { /* уже остановлен */ }
-      };
+      function tick() {
+        if (stopped) return;
+        var now = c.currentTime;
+        if (now >= nextAt) {
+          var p = getPower(); p = p < 0 ? 0 : (p > 1 ? 1 : p);
+          pack(p);
+          nextAt = now + (0.24 - p * 0.13) * (0.85 + Math.random() * 0.3);
+        }
+        raf = requestAnimationFrame(tick);
+      }
+      tick();
+      return function () { stopped = true; cancelAnimationFrame(raf); };
     },
     throwWhoosh: function (power) { tone({ freq: 500 + power * 300, glideTo: 120, duration: 0.18 + power * 0.1, type: 'triangle', gain: 0.15 + power * 0.1 }); },
     hitPoof: function () { noiseBurst({ duration: 0.12, filterFreq: 1500, gain: 0.22 }); },

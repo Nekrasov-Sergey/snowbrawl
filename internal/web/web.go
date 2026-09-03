@@ -41,7 +41,10 @@ func ReadSim(fsys fs.FS) ([]byte, error) {
 // Register вешает отдачу статики на роутер. index.html не кэшируется и отдаётся
 // с подставленной версией сборки (__BUILD__), остальные файлы кэшируются на час —
 // клиент подставляет ?v=<build> к их URL, поэтому после деплоя кэш инвалидируется сам.
+// Исключение — сборка "dev" (без git-тега) и отдача с диска: там ?v=dev не меняется
+// между правками, поэтому статику не кэшируем, иначе F5 не подхватывает изменения.
 func Register(r *gin.Engine, fsys fs.FS, fromDisk bool, build string) {
+	noCacheStatic := fromDisk || build == "dev"
 	fileServer := http.FileServer(http.FS(fsys))
 	r.NoRoute(func(c *gin.Context) {
 		p := c.Request.URL.Path
@@ -60,7 +63,7 @@ func Register(r *gin.Engine, fsys fs.FS, fromDisk bool, build string) {
 			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(strings.ReplaceAll(string(b), "__BUILD__", build)))
 			return
 		}
-		if fromDisk {
+		if noCacheStatic {
 			c.Header("Cache-Control", "no-store")
 		} else {
 			c.Header("Cache-Control", "public, max-age=3600")
