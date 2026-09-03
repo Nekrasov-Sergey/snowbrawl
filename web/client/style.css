@@ -1,11 +1,13 @@
+/* На html/body намеренно нет overflow/touch-action: иначе в мобильных Chromium корневым
+ * скроллером становится html и страница перестаёт листаться одним пальцем. */
 html, body {
   margin: 0; padding: 0; background: #0e1a2b; color: #eaf2ff;
-  font-family: 'Segoe UI', Arial, sans-serif; overflow-x: hidden;
+  font-family: 'Segoe UI', Arial, sans-serif;
 }
-html { overflow-y: auto; }
-html.touch, html.touch body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+html.touch { -webkit-tap-highlight-color: transparent; }
+html.touch.ingame, html.touch.ingame body { overscroll-behavior: none; }
 html.touch #screen-game, html.touch #screen-game * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-#app { display: flex; flex-direction: column; align-items: center; padding: 18px; max-width: 920px; margin: 0 auto; position: relative; min-height: 100vh; min-height: 100dvh; box-sizing: border-box; }
+#app { display: flex; flex-direction: column; align-items: center; padding: 18px; max-width: 920px; margin: 0 auto; position: relative; min-height: 100vh; min-height: 100dvh; box-sizing: border-box; overflow-x: clip; }
 h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align: center; }
 .panel { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .panel[hidden] { display: none; }
@@ -150,7 +152,7 @@ canvas {
 #touchLayer.showZones .zone { background: rgba(74,168,255,0.06); box-shadow: inset 0 0 0 1px rgba(74,168,255,0.25); }
 #touchLayer.showZones .zoneHint { opacity: 1; }
 #touchLayer .stick { position: absolute; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%; background: rgba(255,255,255,0.10); border: 2px solid rgba(255,255,255,0.35); pointer-events: none; }
-#touchLayer .stick .knob { position: absolute; left: 50%; top: 50%; width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%; background: rgba(255,255,255,0.75); box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+#touchLayer .stick .knob { position: absolute; left: 50%; top: 50%; width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%; background: rgba(255,255,255,0.75); box-shadow: 0 2px 8px rgba(0,0,0,0.35); will-change: transform; }
 #touchLayer .stick.mini { width: 100px; height: 100px; margin: -50px 0 0 -50px; border-color: rgba(183,166,255,0.6); }
 #touchLayer .stick.mini .knob { background: rgba(183,166,255,0.9); }
 #touchAbility { position: absolute; right: 18px; bottom: 96px; width: 64px; height: 64px; border-radius: 50%; border: 2px solid #7a5cff; background: rgba(42,32,80,0.85); color: #e6d9ff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; touch-action: none; padding: 0; z-index: 5; }

@@ -7,11 +7,17 @@ window.SBDevice = (function () {
   /** Автоопределение: основной указатель грубый (палец) и есть touch-события. */
   function autoTouch() { return mq('(pointer: coarse)') && hasTouchEvents(); }
 
-  function isTouch() {
+  // Значение кэшируется: matchMedia в горячем пути (кадр, pointermove) дорого. Пересчёт в apply().
+  var touchCached = null;
+  function computeTouch() {
     var s = Settings.get('touch');
     if (s === 'on') return true;
     if (s === 'off') return false;
     return autoTouch();
+  }
+  function isTouch() {
+    if (touchCached === null) touchCached = computeTouch();
+    return touchCached;
   }
   function isIOS() {
     var ua = navigator.userAgent || '';
@@ -24,6 +30,7 @@ window.SBDevice = (function () {
 
   /** Проставить классы на <html>, чтобы CSS знал режим. */
   function apply() {
+    touchCached = computeTouch();
     var root = document.documentElement;
     root.classList.toggle('touch', isTouch());
     root.classList.toggle('ios', isIOS());

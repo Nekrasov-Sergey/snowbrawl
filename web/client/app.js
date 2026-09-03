@@ -435,7 +435,9 @@
     try { navigator.vibrate(ms); } catch (e) { /* игнор */ }
   }
 
-  var hudCache = { a: '', b: '' };
+  // HUD пишется в DOM только при изменении: сигнатура составов/HP, секунда таймера, состояние способности.
+  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '' };
+  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = ''; }
   function updateHUD(snap) {
     var me = myPlayer(snap);
     function row(p, right) {
@@ -446,14 +448,22 @@
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'
         : '<div class="charrow"><span class="' + cls + '">' + name + '</span><span class="pips">' + pips + '</span></div>';
     }
-    // innerHTML перерисовываем только при изменении составов/HP, а не каждый кадр.
-    var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
-    var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
-    if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
-    if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
-    $('matchTimer').textContent = fmtTime(snap.timeLeft);
+    var sig = '';
+    for (var i = 0; i < snap.players.length; i++) { var q = snap.players[i]; sig += q.id + ':' + q.hp + (q.koed ? 'k' : '') + ';'; }
+    if (sig !== hudCache.sig) {
+      hudCache.sig = sig;
+      var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
+      var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
+      if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
+      if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
+    }
+    var tm = fmtTime(snap.timeLeft);
+    if (tm !== hudCache.timer) { hudCache.timer = tm; $('matchTimer').textContent = tm; }
     if (!me) return;
     var hasSpec = !!Sim.SPECIALS[me.role];
+    var abil = (hasSpec ? '1' : '0') + (me.special ? 's' : '-') + (me.cd > 0 ? me.cd.toFixed(1) : '0');
+    if (abil === hudCache.abil) return;
+    hudCache.abil = abil;
     if (!hasSpec) {
       abilityBtn.disabled = true; abilityBtn.textContent = 'Нет способности'; abilityCd.textContent = '';
       touchAbility.hidden = true;
@@ -504,7 +514,7 @@
       : 'ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.';
     $('teamALabel').textContent = 'Команда A' + (g.myTeam === 'A' ? ' (вы)' : '');
     $('teamBLabel').textContent = 'Команда B' + (g.myTeam === 'B' ? ' (вы)' : '');
-    $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; hudCache.a = hudCache.b = '';
+    $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
     Device.apply();
     touchLayer.hidden = !isTouch;
     touch.reset(); intent.reset();
@@ -539,6 +549,7 @@
     var g = app.game; if (!g) return;
     app.game = null;
     intent.reset(); touch.reset(); mouse.dragging = false;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (g.stop) g.stop();
   }
 

@@ -43,28 +43,33 @@ window.SBAudio = (function () {
     setEnabled: function (v) { enabled = v; try { localStorage.setItem('sb.sound', v ? 'on' : 'off'); } catch (e) { /* игнор */ } },
     isEnabled: function () { return enabled; },
     uiClick: function () { tone({ freq: 900, duration: 0.05, type: 'square', gain: 0.07 }); },
-    /** Замах: мягкий нарастающий гул (две синусоиды через lowpass), а не пилообразное жужжание. */
+    /** Замах: треугольная волна (как у броска) через lowpass, яркость и высота растут с силой.
+     *  Параметры обновляются ~15 раз/с, а не каждый кадр: на телефонах аудиопоток чувствителен к потоку событий. */
     chargeLoopStart: function (getPower) {
       if (!enabled) return function () {};
       var c = ensureCtx();
-      var o1 = c.createOscillator(), o2 = c.createOscillator(), g2 = c.createGain(), f = c.createBiquadFilter(), g = c.createGain();
-      o1.type = 'sine'; o2.type = 'sine'; g2.gain.value = 0.4;
-      f.type = 'lowpass'; f.frequency.value = 900; f.Q.value = 0.7;
+      var osc = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
+      osc.type = 'triangle'; osc.frequency.value = 180;
+      f.type = 'lowpass'; f.frequency.value = 1200; f.Q.value = 0.9;
       g.gain.value = 0.0001;
-      o1.connect(f); o2.connect(g2); g2.connect(f); f.connect(g); g.connect(c.destination);
-      o1.start(); o2.start();
-      var raf;
+      osc.connect(f); f.connect(g); g.connect(c.destination);
+      osc.start();
+      var raf, lastUpd = 0;
       function update() {
-        var p = getPower(), base = 140 + p * 160;
-        o1.frequency.setTargetAtTime(base, c.currentTime, 0.05);
-        o2.frequency.setTargetAtTime(base * 1.5, c.currentTime, 0.05);
-        g.gain.setTargetAtTime(0.02 + p * 0.03, c.currentTime, 0.08);
+        var now = performance.now();
+        if (now - lastUpd >= 66) {
+          lastUpd = now;
+          var p = getPower();
+          osc.frequency.setTargetAtTime(180 + p * 240, c.currentTime, 0.06);
+          f.frequency.setTargetAtTime(1200 + p * 1400, c.currentTime, 0.06);
+          g.gain.setTargetAtTime(0.03 + p * 0.04, c.currentTime, 0.06);
+        }
         raf = requestAnimationFrame(update);
       }
       update();
       return function () {
         cancelAnimationFrame(raf);
-        try { g.gain.setTargetAtTime(0.0001, c.currentTime, 0.04); o1.stop(c.currentTime + 0.25); o2.stop(c.currentTime + 0.25); } catch (e) { /* уже остановлен */ }
+        try { g.gain.setTargetAtTime(0.0001, c.currentTime, 0.03); osc.stop(c.currentTime + 0.2); } catch (e) { /* уже остановлен */ }
       };
     },
     throwWhoosh: function (power) { tone({ freq: 500 + power * 300, glideTo: 120, duration: 0.18 + power * 0.1, type: 'triangle', gain: 0.15 + power * 0.1 }); },

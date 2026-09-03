@@ -5,14 +5,71 @@ window.SBRender = (function () {
   var W = Sim.W, H = Sim.H;
 
   function create(canvas) {
-    var ctx = canvas.getContext('2d');
+    // alpha:false — слой непрозрачный, композитору не нужно блендить его с фоном страницы;
+    // фон арены рисуется в кэше арены (см. buildArena).
+    var ctx = canvas.getContext('2d', { alpha: false }) || canvas.getContext('2d');
     var snowflakes = [], particles = [], explosions = [], trails = {};
     var shake = { mag: 0, until: 0, total: 1 };
     var lastFrame = performance.now();
+    var coarse = false;
+    try { coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches; } catch (e) { /* игнор */ }
 
-    for (var i = 0; i < 70; i++) {
+    // Снежинки в трёх «корзинах» прозрачности: три fill на кадр вместо одного на снежинку.
+    var SNOW_ALPHA = [0.35, 0.55, 0.75];
+    for (var i = 0, n = coarse ? 28 : 40; i < n; i++) {
       snowflakes.push({ x: Math.random() * W, y: Math.random() * H, speed: 20 + Math.random() * 40,
-        drift: (Math.random() - 0.5) * 20, size: 1 + Math.random() * 2, alpha: 0.3 + Math.random() * 0.5 });
+        drift: (Math.random() - 0.5) * 20, size: 1 + Math.random() * 2, bucket: i % 3 });
+    }
+
+    // Статичная арена (фон + препятствия) рисуется один раз в offscreen-canvas: градиенты и
+    // shadowBlur на каждое препятствие каждый кадр на телефонах стоят дороже всего остального.
+    var arenaCache = { index: -1, canvas: null };
+    function buildArena(index) {
+      var oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+      var c = oc.getContext('2d');
+      var bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#dfeeff'); bg.addColorStop(1, '#c3ddf7');
+      c.fillStyle = bg; c.fillRect(0, 0, W, H);
+      var arena = Sim.ARENAS[index] || Sim.ARENAS[0];
+      for (var i = 0; i < arena.obstacles.length; i++) {
+        var ob = arena.obstacles[i];
+        if (ob.type === 'rect') {
+          var grad = c.createLinearGradient(ob.x, ob.y - ob.h / 2, ob.x, ob.y + ob.h / 2);
+          grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#c9deF5');
+          c.save(); c.shadowColor = 'rgba(0,0,0,0.25)'; c.shadowBlur = 6; c.shadowOffsetY = 3;
+          c.fillStyle = grad; c.fillRect(ob.x - ob.w / 2, ob.y - ob.h / 2, ob.w, ob.h);
+          c.restore();
+          c.strokeStyle = '#9cc0e6'; c.lineWidth = 2; c.strokeRect(ob.x - ob.w / 2, ob.y - ob.h / 2, ob.w, ob.h);
+        } else {
+          c.fillStyle = '#8a5a3b'; c.fillRect(ob.x - 3, ob.y, 6, 12);
+          var g2 = c.createRadialGradient(ob.x - 4, ob.y - 6, 2, ob.x, ob.y - 2, ob.r);
+          g2.addColorStop(0, '#4fae74'); g2.addColorStop(1, '#1f5636');
+          c.beginPath(); c.arc(ob.x, ob.y - 2, ob.r, 0, Math.PI * 2);
+          c.fillStyle = g2; c.fill(); c.strokeStyle = '#1f5636'; c.stroke();
+        }
+      }
+      arenaCache.index = index; arenaCache.canvas = oc;
+    }
+
+    // Подписи бойцов (ник сверху, роль снизу) — спрайт на бойца, fillText со сменой шрифта
+    // каждый кадр на телефонах заметно дорог (особенно эмодзи бота).
+    var labels = {};
+    function labelOf(p, isMe, r) {
+      var key = p.nick + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r;
+      var l = labels[p.id];
+      if (l && l.key === key) return l;
+      var nick = p.nick + (p.bot ? ' 🤖' : '');
+      var oc = document.createElement('canvas'), c = oc.getContext('2d');
+      c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
+      var w = Math.ceil(Math.max(c.measureText(nick).width, 20)) + 8;
+      c.font = '9px Segoe UI, Arial';
+      w = Math.max(w, Math.ceil(c.measureText(p.role).width) + 8);
+      var top = r + 16, h = top + r + 16; // ник на базовой линии top-10, роль на top + 2r + 12
+      oc.width = w; oc.height = h;
+      c = oc.getContext('2d'); c.textAlign = 'center';
+      c.fillStyle = '#0b1622'; c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial'; c.fillText(nick, w / 2, top - 6);
+      c.fillStyle = '#3c5a7c'; c.font = '9px Segoe UI, Arial'; c.fillText(p.role, w / 2, top + r + 12);
+      l = labels[p.id] = { key: key, canvas: oc, w: w, top: top };
+      return l;
     }
 
     function triggerShake(mag, durationMs) { shake.mag = mag; shake.until = performance.now() + durationMs; shake.total = durationMs; }
@@ -47,25 +104,10 @@ window.SBRender = (function () {
     }
 
     function drawArena(snap) {
-      ctx.clearRect(0, 0, W, H);
-      var arena = Sim.ARENAS[snap.arena] || Sim.ARENAS[0];
-      for (var i = 0; i < arena.obstacles.length; i++) {
-        var ob = arena.obstacles[i];
-        if (ob.type === 'rect') {
-          var grad = ctx.createLinearGradient(ob.x, ob.y - ob.h / 2, ob.x, ob.y + ob.h / 2);
-          grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#c9deF5');
-          ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.25)'; ctx.shadowBlur = 6; ctx.shadowOffsetY = 3;
-          ctx.fillStyle = grad; ctx.fillRect(ob.x - ob.w / 2, ob.y - ob.h / 2, ob.w, ob.h);
-          ctx.restore();
-          ctx.strokeStyle = '#9cc0e6'; ctx.lineWidth = 2; ctx.strokeRect(ob.x - ob.w / 2, ob.y - ob.h / 2, ob.w, ob.h);
-        } else {
-          ctx.fillStyle = '#8a5a3b'; ctx.fillRect(ob.x - 3, ob.y, 6, 12);
-          var g2 = ctx.createRadialGradient(ob.x - 4, ob.y - 6, 2, ob.x, ob.y - 2, ob.r);
-          g2.addColorStop(0, '#4fae74'); g2.addColorStop(1, '#1f5636');
-          ctx.beginPath(); ctx.arc(ob.x, ob.y - 2, ob.r, 0, Math.PI * 2);
-          ctx.fillStyle = g2; ctx.fill(); ctx.strokeStyle = '#1f5636'; ctx.stroke();
-        }
-      }
+      if (arenaCache.index !== snap.arena) buildArena(snap.arena);
+      // При тряске экрана края сдвигаются: подложка тем же фоном закрывает щели.
+      ctx.fillStyle = '#c3ddf7'; ctx.fillRect(-12, -12, W + 24, H + 24);
+      ctx.drawImage(arenaCache.canvas, 0, 0);
       for (var k = 0; k < snap.walls.length; k++) {
         var wl = snap.walls[k];
         ctx.globalAlpha = 0.5 + (wl.ttl / wl.life) * 0.5;
@@ -80,7 +122,16 @@ window.SBRender = (function () {
         f.y += f.speed * dt; f.x += f.drift * dt;
         if (f.y > H) { f.y = -5; f.x = Math.random() * W; }
         if (f.x < 0) f.x = W; if (f.x > W) f.x = 0;
-        ctx.globalAlpha = f.alpha; ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(f.x, f.y, f.size, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = '#ffffff';
+      for (var b = 0; b < SNOW_ALPHA.length; b++) {
+        ctx.globalAlpha = SNOW_ALPHA[b]; ctx.beginPath();
+        for (var j = 0; j < snowflakes.length; j++) {
+          var s = snowflakes[j];
+          if (s.bucket !== b) continue;
+          ctx.moveTo(s.x + s.size, s.y); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+        }
+        ctx.fill();
       }
       ctx.globalAlpha = 1;
     }
@@ -116,10 +167,8 @@ window.SBRender = (function () {
 
       if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
 
-      ctx.fillStyle = '#0b1622'; ctx.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial'; ctx.textAlign = 'center';
-      ctx.fillText(p.nick + (p.bot ? ' 🤖' : ''), vx, vy - r - 6);
-      ctx.fillStyle = '#3c5a7c'; ctx.font = '9px Segoe UI, Arial';
-      ctx.fillText(p.role, vx, vy + r + 12);
+      var lb = labelOf(p, isMe, r);
+      ctx.drawImage(lb.canvas, Math.round(vx - lb.w / 2), Math.round(vy - lb.top));
       ctx.restore();
 
       if (charging) {
@@ -194,40 +243,49 @@ window.SBRender = (function () {
       ctx.restore();
     }
 
-    function reset() { particles = []; explosions = []; trails = {}; shake.until = 0; }
+    function reset() { particles = []; explosions = []; trails = {}; labels = {}; shake.until = 0; }
 
     return { frame: frame, handleEvents: handleEvents, reset: reset };
   }
 
-  /** Линейная интерполяция двух снапшотов (по id игроков и снежков). t ∈ [0,1]. */
+  /**
+   * Линейная интерполяция двух снапшотов (по id игроков и снежков). t ∈ [0,1].
+   * Результат — один переиспользуемый объект: вызов идёт каждый кадр, и свежие объекты на
+   * каждого игрока давали заметные GC-паузы на телефонах. Держать ссылку на результат дольше
+   * кадра нельзя, следующий вызов его перепишет.
+   */
+  var lerpOut = { players: [], balls: [] };
+  function findById(arr, id, hint) {
+    if (hint < arr.length && arr[hint].id === id) return arr[hint];
+    for (var i = 0; i < arr.length; i++) if (arr[i].id === id) return arr[i];
+    return null;
+  }
   function lerpSnap(a, b, t) {
     if (!a) return b;
     if (!b || t <= 0) return a;
     if (t >= 1) return b;
-    var byId = {};
-    for (var i = 0; i < a.players.length; i++) byId[a.players[i].id] = a.players[i];
-    var players = b.players.map(function (pb) {
-      var pa = byId[pb.id];
-      if (!pa) return pb;
-      var o = {};
-      for (var k in pb) o[k] = pb[k];
-      o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
-      o.anim = pa.anim + (pb.anim - pa.anim) * t;
-      o.power = pa.power + (pb.power - pa.power) * t;
-      return o;
-    });
-    var ballsA = {};
-    for (var j = 0; j < a.balls.length; j++) ballsA[a.balls[j].id] = a.balls[j];
-    var balls = b.balls.map(function (sb) {
-      var sa = ballsA[sb.id];
-      if (!sa) return sb;
-      return { id: sb.id, r: sb.r, team: sb.team, ex: sb.ex, fr: sb.fr,
-        x: sa.x + (sb.x - sa.x) * t, y: sa.y + (sb.y - sa.y) * t, z: sa.z + (sb.z - sa.z) * t };
-    });
-    var o2 = {};
-    for (var k2 in b) o2[k2] = b[k2];
-    o2.players = players; o2.balls = balls;
+    var o2 = lerpOut;
+    for (var k2 in b) if (k2 !== 'players' && k2 !== 'balls') o2[k2] = b[k2];
     o2.time = a.time + (b.time - a.time) * t;
+    var players = o2.players; players.length = b.players.length;
+    for (var i = 0; i < b.players.length; i++) {
+      var pb = b.players[i], pa = findById(a.players, pb.id, i);
+      var o = players[i] || (players[i] = {});
+      for (var k in pb) o[k] = pb[k];
+      if (pa) {
+        o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
+        o.anim = pa.anim + (pb.anim - pa.anim) * t;
+        o.power = pa.power + (pb.power - pa.power) * t;
+      }
+    }
+    var balls = o2.balls; balls.length = b.balls.length;
+    for (var j = 0; j < b.balls.length; j++) {
+      var sb = b.balls[j], sa = findById(a.balls, sb.id, j);
+      var s = balls[j] || (balls[j] = {});
+      s.id = sb.id; s.r = sb.r; s.team = sb.team; s.ex = sb.ex; s.fr = sb.fr;
+      if (sa) { s.x = sa.x + (sb.x - sa.x) * t; s.y = sa.y + (sb.y - sa.y) * t; s.z = sa.z + (sb.z - sa.z) * t; }
+      else { s.x = sb.x; s.y = sb.y; s.z = sb.z; }
+    }
     return o2;
   }
 
