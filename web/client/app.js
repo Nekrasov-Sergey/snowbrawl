@@ -191,20 +191,30 @@
   }
   $('backFromMode').onclick = function () { Audio_.uiClick(); goto('menu'); };
 
-  function heroCard(role, selected, onClick) {
+  // Компактная карточка: цвет, имя и кнопка «i». Описание показывается в общем блоке infoEl
+  // под сеткой, чтобы шесть бойцов помещались на экране телефона без прокрутки.
+  function heroCard(role, selected, onClick, infoEl) {
     var stats = Sim.ROLE_STATS[role];
     var card = document.createElement('div');
     card.className = 'heroCard' + (selected ? ' selected' : '');
     card.innerHTML = '<div class="heroSwatch" style="background:' + stats.color + '"></div>' +
-      '<div class="heroName">' + role + '</div><div class="heroDesc">' + Sim.HERO_DESCRIPTIONS[role] + '</div>';
+      '<div class="heroName">' + role + '</div><button type="button" class="heroInfoBtn" title="Описание">i</button>';
     card.onclick = onClick;
+    card.querySelector('.heroInfoBtn').onclick = function (e) { e.stopPropagation(); Audio_.uiClick(); toggleHeroInfo(infoEl, role); };
     return card;
+  }
+  function toggleHeroInfo(el, role) {
+    if (!el) return;
+    if (!el.hidden && el.getAttribute('data-role') === role) { el.hidden = true; return; }
+    el.setAttribute('data-role', role);
+    el.innerHTML = '<b>' + role + '.</b> ' + Sim.HERO_DESCRIPTIONS[role];
+    el.hidden = false;
   }
   function buildHeroGrid() {
     var grid = $('heroGrid'); grid.innerHTML = '';
     var cur = app.flow === 'qm' ? app.qm : app.offline;
     Sim.ALL_ROLES.forEach(function (role) {
-      grid.appendChild(heroCard(role, cur.role === role, function () { Audio_.uiClick(); cur.role = role; buildHeroGrid(); }));
+      grid.appendChild(heroCard(role, cur.role === role, function () { Audio_.uiClick(); cur.role = role; buildHeroGrid(); }, $('heroInfo')));
     });
     $('nextFromCharacter').disabled = !cur.role;
     $('nextFromCharacter').textContent = app.flow === 'qm' ? 'Искать матч' : 'Далее';
@@ -318,7 +328,7 @@
     var me = r.players.filter(function (p) { return p.id === app.me; })[0];
     var grid = $('lobbyHeroGrid'); grid.innerHTML = '';
     Sim.ALL_ROLES.forEach(function (role) {
-      grid.appendChild(heroCard(role, me && me.role === role, function () { Audio_.uiClick(); send('room.role', { role: role }); }));
+      grid.appendChild(heroCard(role, me && me.role === role, function () { Audio_.uiClick(); send('room.role', { role: role }); }, $('lobbyHeroInfo')));
     });
     $('startRoomBtn').hidden = !isHost;
     $('startRoomBtn').disabled = r.inMatch || app.draining;

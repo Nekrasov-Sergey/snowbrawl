@@ -2,7 +2,8 @@ html, body {
   margin: 0; padding: 0; background: #0e1a2b; color: #eaf2ff;
   font-family: 'Segoe UI', Arial, sans-serif; overflow-x: hidden;
 }
-html.touch, html.touch body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+html { overflow-y: auto; }
+html.touch, html.touch body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 html.touch #screen-game, html.touch #screen-game * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 #app { display: flex; flex-direction: column; align-items: center; padding: 18px; max-width: 920px; margin: 0 auto; position: relative; min-height: 100vh; min-height: 100dvh; box-sizing: border-box; }
 h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align: center; }
@@ -46,7 +47,7 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .modeCard:hover { border-color: #4aa8ff; }
 .modeCard.selected { border-color: #4aa8ff; background: #1c3a58; }
 
-.cardGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; width: 100%; }
+.cardGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; width: 100%; }
 .heroCard, .mapCard {
   padding: 14px; border-radius: 10px; border: 2px solid #3a5a80; background: #16283f;
   cursor: pointer; text-align: left; display: flex; flex-direction: column; gap: 6px;
@@ -56,7 +57,15 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .heroName { font-weight: 700; font-size: 15px; }
 .heroDesc { font-size: 12px; color: #a9c2e0; line-height: 1.4; }
 .heroSwatch { width: 34px; height: 34px; border-radius: 50%; border: 2px solid #0b1622; }
-.navRow { display: flex; gap: 12px; margin-top: 4px; }
+/* компактная карточка бойца: строка «цвет · имя · i», описание — в .heroInfo под сеткой */
+.heroCard { flex-direction: row; align-items: center; gap: 10px; padding: 8px 10px; min-width: 0; }
+.heroCard .heroName { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.heroCard .heroSwatch { width: 26px; height: 26px; flex: none; }
+.heroInfoBtn { width: 28px; height: 28px; border-radius: 50%; border: 1px solid #3a5a80; background: #0e1a2b; color: #a9c2e0; font: italic 700 14px Georgia, 'Times New Roman', serif; cursor: pointer; flex: none; padding: 0; line-height: 1; }
+.heroInfoBtn:hover { border-color: #4aa8ff; color: #eaf2ff; }
+.heroInfo { background: #16283f; border: 1px solid #3a5a80; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #a9c2e0; line-height: 1.4; width: 100%; max-width: 560px; box-sizing: border-box; }
+.heroInfo b { color: #eaf2ff; }
+.navRow { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; justify-content: center; }
 
 /* настройки */
 .settingsBox { background: #16283f; border: 1px solid #3a5a80; border-radius: 10px; padding: 8px 18px; width: 100%; max-width: 460px; box-sizing: border-box; }
@@ -154,7 +163,10 @@ canvas {
 /* сенсорный режим: игровой экран во весь вьюпорт, HUD поверх полей, меню под палец */
 html.touch .menuBtn, html.touch .modeCard, html.touch .heroCard, html.touch .mapCard, html.touch .slot { min-height: 44px; }
 html.touch canvas { cursor: default; }
-html.touch .heroCard:hover, html.touch .mapCard:hover, html.touch .modeCard:hover, html.touch .menuBtn:hover { border-color: inherit; background: inherit; }
+html.touch .heroCard:not(.selected):hover, html.touch .mapCard:not(.selected):hover, html.touch .modeCard:not(.selected):hover { border-color: #3a5a80; background: #16283f; }
+html.touch .menuBtn:hover { background: #274363; }
+html.touch .menuBtn.primary:hover { background: #4aa8ff; }
+html.touch .menuBtn.ghost:hover { background: transparent; }
 html.touch.ingame #app { padding: 0; max-width: none; min-height: 100vh; min-height: 100dvh; height: 100vh; height: 100dvh; overflow: hidden; }
 html.touch.ingame h1.title, html.touch.ingame .footer, html.touch.ingame #soundToggle, html.touch.ingame #connState, html.touch.ingame #abilityHint, html.touch.ingame #abilityBox { display: none; }
 html.touch.ingame #drainBanner { margin: 0; border-radius: 0; font-size: 11px; padding: 4px 8px; }
@@ -185,11 +197,23 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   html.touch.ingame #touchLayer { position: absolute; top: 0; }
   html.touch.ingame #touchAbility { bottom: 24px; }
 }
+/* телефон в ландшафте: экраны меню без заголовка, чтобы не прокручивать */
+@media (orientation: landscape) and (max-height: 450px) {
+  html.touch h1.title { display: none; }
+  html.touch #app { padding: 8px 12px; }
+  html.touch .panel { gap: 8px; }
+  html.touch .subtitle { font-size: 12px; }
+  html.touch .menuBtn { padding: 10px; font-size: 15px; }
+  html.touch .cardGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+}
 /* узкие экраны меню (телефон в портрете) */
 @media (max-width: 600px) {
   #app { padding: 12px; }
   h1.title { font-size: 24px; margin-bottom: 12px; }
-  .cardGrid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .cardGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .heroCard { padding: 8px 8px; gap: 8px; }
+  .heroCard .heroName { font-size: 13px; }
+  .subtitle { font-size: 13px; }
   .teamsGrid { grid-template-columns: 1fr; gap: 12px; }
   .lobbyConfig { flex-wrap: wrap; justify-content: center; gap: 10px; }
   .stub-box { padding: 16px; }

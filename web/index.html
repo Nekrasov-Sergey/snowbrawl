@@ -64,8 +64,9 @@
 
   <!-- Quick Match / оффлайн: боец -->
   <div id="screen-character" class="panel" hidden>
-    <div class="subtitle">Выберите бойца</div>
+    <div class="subtitle">Выберите бойца. Кнопка «i» покажет описание.</div>
     <div class="cardGrid" id="heroGrid"></div>
+    <div class="heroInfo" id="heroInfo" hidden></div>
     <div class="navRow">
       <button class="menuBtn ghost" id="backFromCharacter">Назад</button>
       <button class="menuBtn primary" id="nextFromCharacter" disabled>Далее</button>
@@ -133,6 +134,7 @@
     </div>
     <div class="subtitle">Ваш боец (кликните, чтобы сменить):</div>
     <div class="cardGrid" id="lobbyHeroGrid"></div>
+    <div class="heroInfo" id="lobbyHeroInfo" hidden></div>
     <div class="navRow">
       <button class="menuBtn ghost" id="leaveLobby">Выйти</button>
       <button class="menuBtn primary" id="startRoomBtn">Начать матч</button>

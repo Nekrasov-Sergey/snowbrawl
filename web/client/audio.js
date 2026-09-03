@@ -43,21 +43,29 @@ window.SBAudio = (function () {
     setEnabled: function (v) { enabled = v; try { localStorage.setItem('sb.sound', v ? 'on' : 'off'); } catch (e) { /* игнор */ } },
     isEnabled: function () { return enabled; },
     uiClick: function () { tone({ freq: 900, duration: 0.05, type: 'square', gain: 0.07 }); },
+    /** Замах: мягкий нарастающий гул (две синусоиды через lowpass), а не пилообразное жужжание. */
     chargeLoopStart: function (getPower) {
       if (!enabled) return function () {};
       var c = ensureCtx();
-      var osc = c.createOscillator(), g = c.createGain();
-      osc.type = 'sawtooth'; osc.frequency.value = 220; g.gain.value = 0.0001;
-      osc.connect(g); g.connect(c.destination); osc.start();
+      var o1 = c.createOscillator(), o2 = c.createOscillator(), g2 = c.createGain(), f = c.createBiquadFilter(), g = c.createGain();
+      o1.type = 'sine'; o2.type = 'sine'; g2.gain.value = 0.4;
+      f.type = 'lowpass'; f.frequency.value = 900; f.Q.value = 0.7;
+      g.gain.value = 0.0001;
+      o1.connect(f); o2.connect(g2); g2.connect(f); f.connect(g); g.connect(c.destination);
+      o1.start(); o2.start();
       var raf;
       function update() {
-        var p = getPower();
-        osc.frequency.setTargetAtTime(220 + p * 380, c.currentTime, 0.05);
-        g.gain.setTargetAtTime(0.04 + p * 0.05, c.currentTime, 0.05);
+        var p = getPower(), base = 140 + p * 160;
+        o1.frequency.setTargetAtTime(base, c.currentTime, 0.05);
+        o2.frequency.setTargetAtTime(base * 1.5, c.currentTime, 0.05);
+        g.gain.setTargetAtTime(0.02 + p * 0.03, c.currentTime, 0.08);
         raf = requestAnimationFrame(update);
       }
       update();
-      return function () { cancelAnimationFrame(raf); try { g.gain.setTargetAtTime(0.0001, c.currentTime, 0.05); osc.stop(c.currentTime + 0.2); } catch (e) { /* уже остановлен */ } };
+      return function () {
+        cancelAnimationFrame(raf);
+        try { g.gain.setTargetAtTime(0.0001, c.currentTime, 0.04); o1.stop(c.currentTime + 0.25); o2.stop(c.currentTime + 0.25); } catch (e) { /* уже остановлен */ }
+      };
     },
     throwWhoosh: function (power) { tone({ freq: 500 + power * 300, glideTo: 120, duration: 0.18 + power * 0.1, type: 'triangle', gain: 0.15 + power * 0.1 }); },
     hitPoof: function () { noiseBurst({ duration: 0.12, filterFreq: 1500, gain: 0.22 }); },
