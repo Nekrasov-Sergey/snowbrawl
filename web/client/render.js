@@ -137,6 +137,99 @@ window.SBRender = (function () {
     }
     function radiusOf(p) { return (Sim.ROLE_STATS[p.role] || { radius: 15 }).radius; }
 
+    // Кастомная «модель» под роль поверх круга-тела: силуэтные метки и иконки способностей,
+    // чтобы бойцы отличались друг от друга, а не только цветом команды. Всё векторное и мелкое
+    // (корпус ~15 px), без теней и градиентов — дёшево для телефонов. Локальные координаты
+    // повёрнуты так, что +x смотрит по направлению взгляда (прицел) или движения.
+    function drawRoleModel(c2, role, cx, cy, r, ang) {
+      var D = '#0b1622', WHT = '#ffffff';
+      c2.save();
+      c2.translate(cx, cy);
+      c2.rotate(ang);
+      c2.lineJoin = 'round'; c2.lineCap = 'round';
+      if (role === 'Раннер') {
+        // лёгкий бегун: повязка поперёк корпуса, хвостики и след скорости назад
+        c2.strokeStyle = D; c2.lineWidth = 3;
+        c2.beginPath(); c2.moveTo(1, -r + 3); c2.lineTo(-2, r - 3); c2.stroke();
+        c2.lineWidth = 2;
+        c2.beginPath();
+        c2.moveTo(-2, -2); c2.lineTo(-r - 4, -7);
+        c2.moveTo(-2, 2); c2.lineTo(-r - 4, 7);
+        c2.stroke();
+        c2.strokeStyle = 'rgba(255,255,255,0.85)'; c2.lineWidth = 2;
+        c2.beginPath();
+        c2.moveTo(-r + 1, -5); c2.lineTo(-r - 7, -5);
+        c2.moveTo(-r + 1, 0); c2.lineTo(-r - 10, 0);
+        c2.moveTo(-r + 1, 5); c2.lineTo(-r - 7, 5);
+        c2.stroke();
+      } else if (role === 'Танк') {
+        // тяжёлая броня: внутренний контур, нагрудный шеврон, заклёпки
+        c2.strokeStyle = D; c2.lineWidth = 2.5;
+        c2.beginPath(); c2.arc(0, 0, r - 4, 0, Math.PI * 2); c2.stroke();
+        c2.lineWidth = 3.5;
+        c2.beginPath(); c2.moveTo(r - 9, -7); c2.lineTo(r - 1, 0); c2.lineTo(r - 9, 7); c2.stroke();
+        c2.fillStyle = D;
+        for (var ti = 0; ti < 4; ti++) {
+          var taa = Math.PI / 4 + ti * Math.PI / 2;
+          c2.beginPath(); c2.arc(Math.cos(taa) * (r - 4), Math.sin(taa) * (r - 4), 1.8, 0, Math.PI * 2); c2.fill();
+        }
+      } else if (role === 'Снайпер') {
+        // прицел-перекрестие на корпусе и тонкий ствол вперёд
+        c2.strokeStyle = D; c2.lineWidth = 2;
+        c2.beginPath(); c2.arc(0, 0, r - 5, 0, Math.PI * 2); c2.stroke();
+        c2.lineWidth = 1.5;
+        c2.beginPath();
+        c2.moveTo(-(r - 5), 0); c2.lineTo(r - 5, 0);
+        c2.moveTo(0, -(r - 5)); c2.lineTo(0, r - 5);
+        c2.stroke();
+        c2.lineWidth = 2;
+        c2.beginPath(); c2.moveTo(r - 2, 0); c2.lineTo(r + 9, 0); c2.stroke();
+      } else if (role === 'Бомбер') {
+        // тёмная перевязь через корпус и заклёпки-заряды
+        c2.strokeStyle = D; c2.lineWidth = 4;
+        c2.beginPath(); c2.moveTo(-r + 2, -4); c2.lineTo(r - 2, 4); c2.stroke();
+        c2.fillStyle = D;
+        c2.beginPath();
+        c2.arc(-3, -5, 1.6, 0, Math.PI * 2);
+        c2.arc(3, -1, 1.6, 0, Math.PI * 2);
+        c2.arc(-6, 2, 1.6, 0, Math.PI * 2);
+        c2.fill();
+        // фитиль с искрой — всегда вверх экрана, поэтому гасим поворот модели
+        c2.save(); c2.rotate(-ang);
+        c2.strokeStyle = D; c2.lineWidth = 1.5;
+        c2.beginPath(); c2.moveTo(0, -r + 2); c2.quadraticCurveTo(5, -r - 3, 1, -r - 6); c2.stroke();
+        c2.fillStyle = '#ffd166';
+        c2.beginPath(); c2.arc(1, -r - 7, 2, 0, Math.PI * 2); c2.fill();
+        c2.restore();
+      } else if (role === 'Фризер') {
+        // ледяной кристалл в центре и шипы инея по ободу
+        c2.strokeStyle = WHT; c2.lineWidth = 2;
+        for (var si = 0; si < 3; si++) {
+          var sa = si * Math.PI / 3;
+          c2.beginPath();
+          c2.moveTo(-Math.cos(sa) * (r - 4), -Math.sin(sa) * (r - 4));
+          c2.lineTo(Math.cos(sa) * (r - 4), Math.sin(sa) * (r - 4));
+          c2.stroke();
+        }
+        c2.strokeStyle = D; c2.lineWidth = 1.5;
+        for (var fi = 0; fi < 6; fi++) {
+          var fa = fi * Math.PI / 3 + Math.PI / 6;
+          c2.beginPath();
+          c2.moveTo(Math.cos(fa) * r, Math.sin(fa) * r);
+          c2.lineTo(Math.cos(fa) * (r + 4), Math.sin(fa) * (r + 4));
+          c2.stroke();
+        }
+      } else if (role === 'Щит') {
+        // отставленная дуга щита со стороны взгляда: двойная линия и хват-скоба
+        c2.strokeStyle = D; c2.lineWidth = 3.5;
+        c2.beginPath(); c2.arc(0, 0, r + 5, -0.95, 0.95); c2.stroke();
+        c2.lineWidth = 1.5;
+        c2.beginPath(); c2.arc(0, 0, r + 2, -0.8, 0.8); c2.stroke();
+        c2.beginPath(); c2.moveTo(r - 1, 0); c2.lineTo(r + 5, 0); c2.stroke();
+      }
+      c2.restore();
+    }
+
     function drawCharacter(snap, p, isMe, local) {
       var r = radiusOf(p), vx = p.x, vy = p.y;
       var charging = isMe && local && local.charging ? true : p.charging;
@@ -164,6 +257,9 @@ window.SBRender = (function () {
       ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
       ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
       ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
+
+      var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
+      drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
 
       if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
 
