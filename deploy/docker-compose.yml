@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
     depends_on: [server]
     environment:
-      SNOWBRAWL_DOMAIN: ${SNOWBRAWL_DOMAIN:?set SNOWBRAWL_DOMAIN in .env for tls profile}
+      SNOWBRAWL_DOMAIN: ${SNOWBRAWL_DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"
