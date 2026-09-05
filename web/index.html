@@ -51,6 +51,8 @@
       <label class="setRow"><span>Вибрация при попадании<small>Работает на Android; iPhone не поддерживает.</small></span><input type="checkbox" id="setHaptics"></label>
       <label class="setRow"><span>Сенсорное управление<small>Стики вместо мыши. «Авто» — по типу устройства.</small></span>
         <select id="setTouch"><option value="auto">авто</option><option value="on">включено</option><option value="off">выключено</option></select></label>
+      <label class="setRow" id="pcRow"><span>Управление на ПК<small>WASD — движение, зажать ЛКМ в любой точке — замах и бросок. Классическое: клик — идти, ЛКМ на бойце — замах.</small></span>
+        <select id="setPc"><option value="wasd">WASD + мышь</option><option value="classic">классическое</option></select></label>
     </div>
     <div class="navRow"><button class="menuBtn ghost" id="backFromSettings">Назад</button></div>
   </div>
@@ -147,6 +149,7 @@
     <div id="topGameBar">
       <button id="btnToMenu">← Выйти</button>
       <div id="hint" style="margin:0">ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.</div>
+      <span id="netStat" title="Задержка сети" hidden></span>
       <div id="matchTimer">5:00</div>
       <button id="fsBtn" title="Во весь экран" hidden>⛶</button>
     </div>

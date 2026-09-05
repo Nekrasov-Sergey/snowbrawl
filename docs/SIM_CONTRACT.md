@@ -22,7 +22,7 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.1.0',                 // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.1.1',                 // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, CHARGE_FULL_MS, KO_ANIM_MS,
   ARENAS, ROLE_STATS, SPECIALS, MODES, HERO_DESCRIPTIONS, ABILITY_HINT_TEXT, ALL_ROLES,
   makeRng(seed), shuffle(rng, arr),
@@ -38,7 +38,9 @@ SnowBrawlSim = {
 ```
 
 Сервер обязательно использует: `SIM_VERSION`, `ARENAS.length`, `ALL_ROLES`, `createMatch`,
-`applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`. Остальное — для клиента.
+`applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`. Остальное — для клиента,
+в том числе `canHitTarget(obstacles, shooter, x, y, power)` (с 1.1.1): упрётся ли снежок в
+препятствие — клиент красит луч прицела красным.
 
 ### `createMatch(config, seed)`
 

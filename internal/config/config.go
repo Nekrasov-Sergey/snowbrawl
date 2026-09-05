@@ -39,7 +39,7 @@ func Defaults() Config {
 		LogLevel:     "info",
 		BuildVersion: "dev",
 		TickRate:     20,
-		QueueWait:    15 * time.Second,
+		QueueWait:    10 * time.Second,
 		ReconnectTTL: 60 * time.Second,
 		AFKTimeout:   20 * time.Second,
 		RoomTTL:      10 * time.Minute,

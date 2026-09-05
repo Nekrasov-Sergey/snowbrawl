@@ -107,6 +107,8 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 #topGameBar { display:flex; justify-content:space-between; align-items:center; width:100%; max-width:900px; margin-bottom:6px; }
 #topGameBar button { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; }
 #topGameBar button:hover { background:#274363; }
+#netStat { font-size: 12px; color: #a9c2e0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#netStat.bad { color: #ff6b6b; font-weight: 600; }
 #matchTimer { width: 70px; text-align: right; font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 14px; }
 #topGameBar #fsBtn { font-size: 15px; padding: 4px 10px; margin-left: 8px; }
 #gameWrap { width: 100%; display: flex; flex-direction: column; align-items: center; position: relative; }

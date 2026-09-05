@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.1.0';
+  var SIM_VERSION = '1.1.1';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -638,6 +638,7 @@
     ARENAS: ARENAS, ROLE_STATS: ROLE_STATS, SPECIALS: SPECIALS, MODES: MODES,
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,
     makeRng: makeRng, shuffle: shuffle,
+    canHitTarget: canHitTarget, // чистая функция для клиента: упрётся ли снежок в препятствие (луч прицела)
     createMatch: createMatch,
     applyInput: applyInput,
     setBot: setBot,
