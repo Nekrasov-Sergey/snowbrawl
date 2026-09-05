@@ -169,14 +169,12 @@
   // Настройки (localStorage, см. settings.js)
   // ------------------------------------------------------------
   function renderSettings() {
-    $('setAssist').checked = !!Settings.get('aimAssist');
     $('setHaptics').checked = !!Settings.get('haptics');
     $('setTouch').value = Settings.get('touch');
     $('setPc').value = pcMode();
     $('pcRow').hidden = Device.isTouch();
   }
   $('setPc').onchange = function () { Settings.set('pcControls', $('setPc').value); };
-  $('setAssist').onchange = function () { Settings.set('aimAssist', $('setAssist').checked); };
   $('setHaptics').onchange = function () { Settings.set('haptics', $('setHaptics').checked); };
   $('setTouch').onchange = function () { Settings.set('touch', $('setTouch').value); Device.apply(); };
   $('backFromSettings').onclick = function () { Audio_.uiClick(); goto('menu'); };
@@ -191,10 +189,16 @@
       var card = document.createElement('div');
       card.className = 'modeCard' + (cur.mode === n ? ' selected' : '');
       card.textContent = n + ' на ' + n;
-      card.onclick = function () { Audio_.uiClick(); cur.mode = n; goto('character'); };
+      card.onclick = function () { Audio_.uiClick(); cur.mode = n; buildModeGrid(); };
       grid.appendChild(card);
     });
+    $('nextFromMode').disabled = !cur.mode;
   }
+  $('nextFromMode').onclick = function () {
+    var cur = app.flow === 'qm' ? app.qm : app.offline;
+    if (!cur.mode) return;
+    Audio_.uiClick(); goto('character');
+  };
   $('backFromMode').onclick = function () { Audio_.uiClick(); goto('menu'); };
 
   // Компактная карточка: цвет, имя и кнопка «i». Описание показывается в общем блоке infoEl
@@ -372,7 +376,6 @@
     getGame: function () { return app.game; },
     getMe: myPlayer,
     canAct: canAct,
-    useAssist: function () { return Device.isTouch() && !!Settings.get('aimAssist'); },
     onChargeStart: function () { chargeAudioStop = Audio_.chargeLoopStart(function () { return intent.local.power; }); },
     onChargeEnd: function () { if (chargeAudioStop) { chargeAudioStop(); chargeAudioStop = null; } }
   });

@@ -8,31 +8,14 @@ window.SBIntent = (function () {
   var STOP_LEAD_S = 0.08;   // с: сколько сервер успеет пройти, пока получит «стоп» — чтобы боец не пятился
   var AIM_LEAD = 200;       // px: точка прицела по стику (дальность задаёт power, а не удалённость точки)
   var SEND_MS = 66;         // не чаще ~15/с на вид команды; лимит сервера — 30 сообщений/с на всё
-  var ASSIST_COS = Math.cos(15 * Math.PI / 180);
 
   function norm(x, y) { var d = Math.hypot(x, y); return d > 1e-6 ? { x: x / d, y: y / d } : null; }
-
-  /** Магнит прицела: направление на ближайшего живого врага в конусе 15° от dir; иначе dir. */
-  function assistDir(dir, me, snap) {
-    if (!dir || !me || !snap) return dir;
-    var best = null, bestD = Infinity;
-    for (var i = 0; i < snap.players.length; i++) {
-      var p = snap.players[i];
-      if (p.team === me.team || p.hp <= 0 || p.koed) continue;
-      var dx = p.x - me.x, dy = p.y - me.y, d = Math.hypot(dx, dy);
-      if (d < 1) continue;
-      if ((dx * dir.x + dy * dir.y) / d < ASSIST_COS) continue;
-      if (d < bestD) { bestD = d; best = { x: dx / d, y: dy / d }; }
-    }
-    return best || dir;
-  }
 
   /**
    * create(o):
    *  o.getGame()     → активный матч {input(kind,x,y,power), lastSnap, over} или null
    *  o.getMe(snap)   → мой боец из снапшота
    *  o.canAct(p)     → может ли боец действовать (жив, не оглушён)
-   *  o.useAssist()   → включён ли магнит прицела
    *  o.onChargeStart(), o.onChargeEnd() — хуки (звук замаха)
    * Возвращает api; api.local — {charging, power, aimX, aimY} для мгновенного отклика в рендере.
    */
@@ -47,11 +30,7 @@ window.SBIntent = (function () {
     function now() { return performance.now(); }
     function speedOf(p) { return (Sim.ROLE_STATS[p.role] || { speed: 150 }).speed; }
     function chargePower() { return Math.min((now() - local.start) / Sim.CHARGE_FULL_MS, 1); }
-    function aimPoint(dir, p) {
-      var g = o.getGame();
-      var d = o.useAssist() ? assistDir(dir, p, g && g.lastSnap) : dir;
-      return { x: p.x + d.x * AIM_LEAD, y: p.y + d.y * AIM_LEAD };
-    }
+    function aimPoint(dir, p) { return { x: p.x + dir.x * AIM_LEAD, y: p.y + dir.y * AIM_LEAD }; }
     function beginCharge(x, y) {
       local.charging = true; local.start = now(); local.aimX = x; local.aimY = y; local.power = 0;
       send('chargeStart', x, y);
@@ -163,5 +142,5 @@ window.SBIntent = (function () {
     return api;
   }
 
-  return { create: create, assistDir: assistDir };
+  return { create: create };
 })();

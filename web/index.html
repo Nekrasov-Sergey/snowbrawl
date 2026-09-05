@@ -47,7 +47,6 @@
   <div id="screen-settings" class="panel" hidden>
     <div class="subtitle">Настройки сохраняются на этом устройстве.</div>
     <div class="settingsBox">
-      <label class="setRow"><span>Помощь в прицеливании<small>Только на сенсорном экране: прицел доворачивается на ближайшего врага в конусе 15°.</small></span><input type="checkbox" id="setAssist"></label>
       <label class="setRow"><span>Вибрация при попадании<small>Работает на Android; iPhone не поддерживает.</small></span><input type="checkbox" id="setHaptics"></label>
       <label class="setRow"><span>Сенсорное управление<small>Стики вместо мыши. «Авто» — по типу устройства.</small></span>
         <select id="setTouch"><option value="auto">авто</option><option value="on">включено</option><option value="off">выключено</option></select></label>
@@ -61,7 +60,10 @@
   <div id="screen-mode" class="panel" hidden>
     <div class="subtitle">Выберите режим</div>
     <div class="modeGrid" id="modeGrid"></div>
-    <div class="navRow"><button class="menuBtn ghost" id="backFromMode">Назад</button></div>
+    <div class="navRow">
+      <button class="menuBtn ghost" id="backFromMode">Назад</button>
+      <button class="menuBtn primary" id="nextFromMode" disabled>Далее</button>
+    </div>
   </div>
 
   <!-- Quick Match / оффлайн: боец -->

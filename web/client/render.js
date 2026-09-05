@@ -285,7 +285,7 @@ window.SBRender = (function () {
           var adx = aimX - p.x, ady = aimY - p.y, ad = Math.hypot(adx, ady) || 1;
           var range = 140 + power * 380, ex = p.x + adx / ad * range, ey = p.y + ady / ad * range;
           var blocked = !Sim.canHitTarget(obstaclesOf(snap), p, ex, ey, power);
-          var col = blocked ? 'rgba(255,80,80,0.9)' : (p.special ? 'rgba(180,120,255,0.9)' : 'rgba(255, ' + Math.round(255 - power * 180) + ', 60, 0.8)');
+          var col = blocked ? 'rgba(255,80,80,0.9)' : 'rgba(255,224,102,0.9)'; // красный — не долетит, жёлтый — долетит
           ctx.strokeStyle = col; ctx.fillStyle = col;
           ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey); ctx.lineWidth = 2; ctx.stroke();
           ctx.beginPath(); ctx.arc(ex, ey, 12, 0, Math.PI * 2); ctx.lineWidth = 1.5; ctx.stroke();

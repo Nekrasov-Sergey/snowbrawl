@@ -41,6 +41,9 @@ jobs:
         # Теги с дефисом (v0.2.0-rc.1) — pre-release: образ без :latest, GitHub Release с пометкой.
         run: |
           echo "image=$(echo '${{ env.IMAGE }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          # Версия сборки = тег + короткий SHA: клиент подставляет её в ?v= URL статики, поэтому
+          # повторный деплой того же тега (перенесённый тег) даёт новые URL и кэш браузеров обновляется.
+          echo "build=${{ github.ref_name }}+$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
           case '${{ github.ref_name }}' in
             *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT"; echo "latest=" >> "$GITHUB_OUTPUT" ;;
             *)   echo "prerelease=false" >> "$GITHUB_OUTPUT"; echo "latest=$(echo '${{ env.IMAGE }}' | tr '[:upper:]' '[:lower:]'):latest" >> "$GITHUB_OUTPUT" ;;
@@ -58,7 +61,7 @@ jobs:
           file: deploy/Dockerfile
           platforms: linux/amd64
           push: true
-          build-args: BUILD_VERSION=${{ github.ref_name }}
+          build-args: BUILD_VERSION=${{ steps.img.outputs.build }}
           tags: |
             ${{ steps.img.outputs.image }}:${{ github.ref_name }}
             ${{ steps.img.outputs.latest }}
