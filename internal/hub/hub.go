@@ -838,6 +838,19 @@ type QueueStat struct {
 	WaitLeft int `json:"waitLeftMs"`
 }
 
+// Online возвращает число подключённых игроков (для публичного /api/online).
+func (h *Hub) Online() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, p := range h.byID {
+		if p.Connected() {
+			n++
+		}
+	}
+	return n
+}
+
 // Stats возвращает сводку.
 func (h *Hub) Stats() Stats {
 	h.mu.Lock()

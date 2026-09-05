@@ -21,7 +21,7 @@
 | `queue.join` | `{mode: 1..4, role}` | встать в очередь Quick Match |
 | `queue.leave` | — | выйти из очереди |
 | `room.create` | `{mode, arena}` | создать комнату, стать хостом |
-| `room.join` | `{code}` | войти по коду (`SNB-XXXX`, регистр и префикс не важны) |
+| `room.join` | `{code}` | войти по коду (четыре цифры `1234`; старый префикс `SNB-` отбрасывается) |
 | `room.slot` | `{team: "A"\|"B", index}` | занять слот команды |
 | `room.role` | `{role}` | выбрать бойца |
 | `room.config` | `{mode, arena}` | хост меняет режим/арену |

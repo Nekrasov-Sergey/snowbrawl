@@ -2,13 +2,14 @@ package room
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestJoinLeaveAndHostTransfer(t *testing.T) {
 	now := time.Now()
-	r := New("SNB-TEST", "h", "1.1.1.1", 2, 0, now)
+	r := New("1234", "h", "1.1.1.1", 2, 0, now)
 	if r.Capacity() != 4 {
 		t.Fatalf("capacity = %d", r.Capacity())
 	}
@@ -44,7 +45,7 @@ func TestJoinLeaveAndHostTransfer(t *testing.T) {
 
 func TestSlotsAndConfig(t *testing.T) {
 	now := time.Now()
-	r := New("SNB-TEST", "h", "1.1.1.1", 3, 0, now)
+	r := New("1234", "h", "1.1.1.1", 3, 0, now)
 	_ = r.Join("a")
 	if err := r.SetSlot("a", "A", 0); !errors.Is(err, ErrSlotTaken) {
 		t.Fatalf("expected ErrSlotTaken, got %v", err)
@@ -88,7 +89,7 @@ func TestGenerateCode(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
 		c := GenerateCode()
-		if len(c) != 8 || c[:4] != "SNB-" {
+		if len(c) != 4 || strings.Trim(c, "0123456789") != "" {
 			t.Fatalf("bad code %q", c)
 		}
 		seen[c] = true

@@ -23,13 +23,13 @@ func TestNormalizeNick(t *testing.T) {
 }
 
 func TestNormalizeRoomCode(t *testing.T) {
-	for _, in := range []string{"snb-96dj", "96DJ", " SNB-96DJ "} {
+	for _, in := range []string{"1234", " 1234 ", "snb-1234", "SNB-1234"} {
 		got, err := NormalizeRoomCode(in)
-		if err != nil || got != "SNB-96DJ" {
+		if err != nil || got != "1234" {
 			t.Errorf("NormalizeRoomCode(%q) = %q, %v", in, got, err)
 		}
 	}
-	for _, in := range []string{"SNB-96IJ", "SNB-9", "", "abc-1234"} {
+	for _, in := range []string{"12a4", "123", "12345", "", "abc-1234", "SNB-96DJ"} {
 		if _, err := NormalizeRoomCode(in); err == nil {
 			t.Errorf("NormalizeRoomCode(%q) must fail", in)
 		}

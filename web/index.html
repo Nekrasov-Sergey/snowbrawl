@@ -36,9 +36,10 @@
   <div id="screen-menu" class="panel" hidden>
     <div class="subtitle">Зашёл → выбрал бойца → нашёл соперников → бросай снежки → победи.</div>
     <div class="who">Вы: <b id="menuNick"></b> <button class="linkBtn" id="changeNick">сменить</button></div>
-    <button class="menuBtn primary" id="btnQuickMatch">QUICK MATCH</button>
-    <button class="menuBtn" id="btnCreateRoom">CREATE ROOM</button>
-    <button class="menuBtn" id="btnJoinRoom">JOIN ROOM</button>
+    <div class="who" id="onlineInfo">Игроков онлайн: —</div>
+    <button class="menuBtn primary" id="btnQuickMatch">БЫСТРЫЙ МАТЧ</button>
+    <button class="menuBtn" id="btnCreateRoom">СОЗДАТЬ КОМНАТУ</button>
+    <button class="menuBtn" id="btnJoinRoom">ВОЙТИ В КОМНАТУ</button>
     <button class="menuBtn ghost wide" id="btnOffline">Тренировка с ботами (оффлайн)</button>
     <button class="menuBtn ghost" id="btnSettings">Настройки</button>
   </div>
@@ -113,8 +114,8 @@
   <div id="screen-joinroom" class="panel" hidden>
     <div class="stub-box">
       <div>Введите код комнаты:</div>
-      <input type="text" id="joinCodeInput" placeholder="SNB-XXXX" maxlength="8" autocomplete="off">
-      <button class="menuBtn primary" id="btnJoinConfirm" style="width:100%">JOIN ROOM</button>
+      <input type="text" id="joinCodeInput" placeholder="1234" maxlength="4" inputmode="numeric" pattern="[0-9]*" autocomplete="off">
+      <button class="menuBtn primary" id="btnJoinConfirm" style="width:100%">ВОЙТИ В КОМНАТУ</button>
       <div class="stub-note" id="joinMsg"></div>
     </div>
     <button class="menuBtn ghost" id="backFromJoin">Назад</button>
@@ -123,8 +124,8 @@
   <!-- Лобби комнаты -->
   <div id="screen-lobby" class="panel" hidden>
     <div class="lobbyHead">
-      <div>Код комнаты: <span class="stub-code inline" id="lobbyCode">SNB-0000</span> <button class="linkBtn" id="copyCode">копировать</button></div>
-      <div class="subtitle">Друзья вводят этот код на экране JOIN ROOM.</div>
+      <div>Код комнаты: <span class="stub-code inline" id="lobbyCode">0000</span> <button class="linkBtn" id="copyCode">копировать</button></div>
+      <div class="subtitle">Друзья вводят этот код на экране «Войти в комнату».</div>
       <div id="lobbyResult" class="lobbyResult" hidden></div>
     </div>
     <div class="lobbyConfig">
