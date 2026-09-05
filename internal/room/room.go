@@ -1,4 +1,4 @@
-// Package room — комната с кодом SNB-XXXX и её лобби. Чистая структура данных без
+// Package room — комната с кодом из четырёх цифр и её лобби. Чистая структура данных без
 // блокировок: ею владеет hub.
 package room
 
@@ -222,9 +222,9 @@ func (r *Room) autoPlace(m *Member) {
 	}
 }
 
-const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789"
+const codeAlphabet = "0123456789"
 
-// GenerateCode возвращает код вида SNB-XXXX (без похожих символов I и O).
+// GenerateCode возвращает код из четырёх цифр (0000–9999); коллизии перегенерирует hub.
 func GenerateCode() string {
 	b := make([]byte, 4)
 	for i := range b {
@@ -234,5 +234,5 @@ func GenerateCode() string {
 		}
 		b[i] = codeAlphabet[n.Int64()]
 	}
-	return "SNB-" + string(b)
+	return string(b)
 }

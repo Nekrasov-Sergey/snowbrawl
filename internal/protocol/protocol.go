@@ -277,15 +277,14 @@ func NormalizeNick(nick string) (string, error) {
 	return nick, nil
 }
 
-// ValidRoomCode проверяет формат кода комнаты SNB-XXXX.
-var roomCodeRe = regexp.MustCompile(`^SNB-[A-HJ-NP-Z0-9]{4}$`)
+// roomCodeRe — формат кода комнаты: четыре цифры.
+var roomCodeRe = regexp.MustCompile(`^[0-9]{4}$`)
 
-// NormalizeRoomCode приводит код к каноническому виду (верхний регистр, префикс).
+// NormalizeRoomCode приводит код к каноническому виду: обрезает пробелы и
+// устаревший префикс SNB- (до 0.2.1 коды были вида SNB-XXXX).
 func NormalizeRoomCode(code string) (string, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
-	if len(code) == 4 {
-		code = "SNB-" + code
-	}
+	code = strings.TrimPrefix(code, "SNB-")
 	if !roomCodeRe.MatchString(code) {
 		return "", errors.New("bad room code")
 	}

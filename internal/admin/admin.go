@@ -1,4 +1,4 @@
-// Package admin — /healthz, /api/version и закрытая токеном админка /admin/*.
+// Package admin — /healthz, /api/version, /api/online и закрытая токеном админка /admin/*.
 package admin
 
 import (
@@ -26,6 +26,11 @@ func Register(r *gin.Engine, h *hub.Hub, info Info, token string, started time.T
 	r.GET("/api/version", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		c.JSON(http.StatusOK, info)
+	})
+	// Публичный счётчик онлайна для главного меню клиента.
+	r.GET("/api/online", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"online": h.Online()})
 	})
 	if token == "" {
 		return

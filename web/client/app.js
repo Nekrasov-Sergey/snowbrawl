@@ -37,10 +37,20 @@
     if (name === 'character') buildHeroGrid();
     if (name === 'map') buildMapGrid();
     if (name === 'createroom') buildCreateGrids();
-    if (name === 'menu') $('menuNick').textContent = app.nick;
+    if (name === 'menu') { $('menuNick').textContent = app.nick; refreshOnline(); }
+    else if (onlineTimer) { clearInterval(onlineTimer); onlineTimer = null; }
     if (name === 'settings') renderSettings();
     if (name !== 'game' && app.game) stopGame();
     document.documentElement.classList.toggle('ingame', name === 'game');
+  }
+  // Счётчик онлайна в меню: /api/online при входе и каждые 10 с, пока открыт экран меню.
+  var onlineTimer = null;
+  function refreshOnline() {
+    var el = $('onlineInfo');
+    fetch('/api/online', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) { if (app.screen === 'menu') el.textContent = 'Игроков онлайн: ' + d.online; })
+      .catch(function () { el.textContent = 'Игроков онлайн: —'; });
+    if (!onlineTimer) onlineTimer = setInterval(function () { if (app.screen === 'menu') refreshOnline(); }, 10000);
   }
   var toastTimer = null;
   function toast(msg) {
