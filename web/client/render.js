@@ -230,6 +230,17 @@ window.SBRender = (function () {
       c2.restore();
     }
 
+    // Препятствия арены плюс живые стены Щита в формате sim.js — для проверки луча прицела.
+    // Собирается только когда я замахиваюсь (один вызов за кадр).
+    function obstaclesOf(snap) {
+      var obs = Sim.ARENAS[snap.arena].obstacles.slice();
+      for (var i = 0; i < snap.walls.length; i++) {
+        var w = snap.walls[i];
+        obs.push({ type: 'rect', x: w.x, y: w.y, w: w.w, h: w.h, height: 20 });
+      }
+      return obs;
+    }
+
     function drawCharacter(snap, p, isMe, local) {
       var r = radiusOf(p), vx = p.x, vy = p.y;
       var charging = isMe && local && local.charging ? true : p.charging;
@@ -268,9 +279,18 @@ window.SBRender = (function () {
       ctx.restore();
 
       if (charging) {
-        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(aimX, aimY);
-        ctx.strokeStyle = p.special ? 'rgba(180,120,255,0.9)' : 'rgba(255, ' + Math.round(255 - power * 180) + ', 60, 0.8)';
-        ctx.lineWidth = 2; ctx.stroke();
+        if (isMe) {
+          // Луч только у себя: длина равна дальности полёта (140 + power·380), конец — место падения
+          // снежка; красный, если по дороге снежок упрётся в препятствие или стену.
+          var adx = aimX - p.x, ady = aimY - p.y, ad = Math.hypot(adx, ady) || 1;
+          var range = 140 + power * 380, ex = p.x + adx / ad * range, ey = p.y + ady / ad * range;
+          var blocked = !Sim.canHitTarget(obstaclesOf(snap), p, ex, ey, power);
+          var col = blocked ? 'rgba(255,80,80,0.9)' : (p.special ? 'rgba(180,120,255,0.9)' : 'rgba(255, ' + Math.round(255 - power * 180) + ', 60, 0.8)');
+          ctx.strokeStyle = col; ctx.fillStyle = col;
+          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey); ctx.lineWidth = 2; ctx.stroke();
+          ctx.beginPath(); ctx.arc(ex, ey, 12, 0, Math.PI * 2); ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.beginPath(); ctx.arc(ex, ey, 2.5, 0, Math.PI * 2); ctx.fill();
+        }
         var bw = 40;
         ctx.fillStyle = '#0b1622'; ctx.fillRect(p.x - bw / 2, p.y - r - 20, bw, 6);
         ctx.fillStyle = p.special ? '#b478ff' : (power > 0.7 ? '#ff5b5b' : '#ffd166');

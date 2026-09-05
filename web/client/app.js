@@ -134,6 +134,9 @@
       case 'snapshot':
         if (app.game && !app.game.offline) app.game.onSnapshot(d);
         break;
+      case 'pong':
+        if (app.game && app.game.onPong) app.game.onPong();
+        break;
       case 'match.end':
         if (app.game && !app.game.offline) app.game.onEnd(d);
         break;
@@ -169,7 +172,10 @@
     $('setAssist').checked = !!Settings.get('aimAssist');
     $('setHaptics').checked = !!Settings.get('haptics');
     $('setTouch').value = Settings.get('touch');
+    $('setPc').value = pcMode();
+    $('pcRow').hidden = Device.isTouch();
   }
+  $('setPc').onchange = function () { Settings.set('pcControls', $('setPc').value); };
   $('setAssist').onchange = function () { Settings.set('aimAssist', $('setAssist').checked); };
   $('setHaptics').onchange = function () { Settings.set('haptics', $('setHaptics').checked); };
   $('setTouch').onchange = function () { Settings.set('touch', $('setTouch').value); Device.apply(); };
@@ -372,17 +378,34 @@
   });
   var local = intent.local;
 
-  // ---- источник намерений: мышь (ПК) ----
-  // ЛКМ по бойцу — замах, отпустить снова над бойцом — отмена; ЛКМ мимо — идти в точку.
+  // ---- источник намерений: мышь и клавиатура (ПК) ----
+  // Режим wasd (по умолчанию): WASD/стрелки — движение, зажать ЛКМ в любой точке — замах в сторону
+  // курсора, отпустить — бросок, отпустить над своим бойцом — отмена; Q или ПКМ — способность.
+  // Режим classic: ЛКМ по бойцу — замах, отпустить снова над бойцом — отмена; ЛКМ мимо — идти в точку.
+  function pcMode() { return Settings.get('pcControls') === 'classic' ? 'classic' : 'wasd'; }
   var mouse = { dragging: false };
   canvas.addEventListener('mousedown', function (e) {
     if (Device.isTouch() || app.screen !== 'game' || !app.game || app.game.over) return;
     var pt = toLocal(e), me = myPlayer(app.game.lastSnap);
     lastMouse = pt;
     if (!canAct(me)) return;
-    if (overMe(pt, me)) intent.chargeStartAt(pt.x, pt.y);
+    if (e.button === 2) { if (pcMode() === 'wasd') intent.specialAt(pt.x, pt.y); return; }
+    if (e.button !== 0) return;
+    if (pcMode() === 'wasd' || overMe(pt, me)) intent.chargeStartAt(pt.x, pt.y);
     else { mouse.dragging = true; intent.moveTo(pt.x, pt.y, true); }
   });
+  // Клавиатура: набор зажатых клавиш → нормированное направление в intent.setMoveDir (как стик).
+  // По e.code, чтобы русская раскладка работала; повтор клавиши игнорируем.
+  var KEYDIR = { KeyW: [0, -1], KeyS: [0, 1], KeyA: [-1, 0], KeyD: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+  var keys = {};
+  function applyKeys() {
+    if (!app.game || Device.isTouch() || pcMode() !== 'wasd') { intent.setMoveDir(null); return; }
+    var x = 0, y = 0;
+    for (var k in keys) if (keys[k]) { x += KEYDIR[k][0]; y += KEYDIR[k][1]; }
+    intent.setMoveDir(x || y ? { x: x, y: y } : null);
+  }
+  window.addEventListener('keyup', function (e) { if (keys[e.code]) { keys[e.code] = false; applyKeys(); } });
+  window.addEventListener('blur', function () { keys = {}; applyKeys(); });
   canvas.addEventListener('mousemove', function (e) {
     var pt = toLocal(e); lastMouse = pt;
     if (Device.isTouch() || app.screen !== 'game' || !app.game) return;
@@ -400,6 +423,11 @@
   });
   window.addEventListener('keydown', function (e) {
     if (app.screen !== 'game' || !app.game) return;
+    if (KEYDIR[e.code]) {
+      e.preventDefault();
+      if (!e.repeat && !keys[e.code]) { keys[e.code] = true; applyKeys(); }
+      return;
+    }
     if (['q', 'Q', 'й', 'Й'].indexOf(e.key) >= 0) intent.specialAt(lastMouse.x, lastMouse.y);
   });
   abilityBtn.onclick = function () { if (app.game) intent.specialAt(lastMouse.x, lastMouse.y); };
@@ -511,7 +539,10 @@
     $('abilityHint').textContent = abilityHint;
     $('hint').textContent = isTouch
       ? 'Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.'
-      : 'ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.';
+      : (pcMode() === 'wasd'
+        ? 'WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.'
+        : 'ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.');
+    $('netStat').hidden = !!g.offline; $('netStat').textContent = ''; $('netStat').className = '';
     $('teamALabel').textContent = 'Команда A' + (g.myTeam === 'A' ? ' (вы)' : '');
     $('teamBLabel').textContent = 'Команда B' + (g.myTeam === 'B' ? ' (вы)' : '');
     $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
@@ -548,7 +579,7 @@
   function stopGame() {
     var g = app.game; if (!g) return;
     app.game = null;
-    intent.reset(); touch.reset(); mouse.dragging = false;
+    intent.reset(); touch.reset(); mouse.dragging = false; keys = {};
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (g.stop) g.stop();
   }
@@ -601,6 +632,22 @@
     var buffer = Net.snapshotBuffer(d.tickRate);
     var pending = [];
     var myTeam = 'A';
+    // Задержка: ping раз в 2 с (сервер отвечает pong) + джиттер снапшотов из буфера.
+    // Индикатор раз в секунду; если RTT > 200 мс или джиттер > 100 мс держатся 3 с — тост про VPN.
+    var net = { pingAt: 0, rtt: 0, badSince: 0, lastWarn: 0 };
+    var pingTimer = setInterval(function () { net.pingAt = performance.now(); app.net.send('ping'); }, 2000);
+    var statTimer = setInterval(function () {
+      if (g.over || app.screen !== 'game') return;
+      var jitter = buffer.jitter(), el = $('netStat'), now = performance.now();
+      var bad = net.rtt > 200 || jitter > 100;
+      if (!bad) net.badSince = 0; else if (!net.badSince) net.badSince = now;
+      el.textContent = net.rtt ? '⇄ ' + Math.round(net.rtt) + ' мс' : '';
+      el.className = bad ? 'bad' : '';
+      if (net.badSince && now - net.badSince >= 3000 && now - net.lastWarn > 60000) {
+        net.lastWarn = now;
+        toast('Высокая задержка сети. Если включён VPN, попробуйте его выключить.');
+      }
+    }, 1000);
     d.players.forEach(function (p) { if (p.id === d.yourId) myTeam = p.team; });
     var g = {
       offline: false, matchId: d.matchId, meId: d.yourId, players: d.players, myTeam: myTeam, roomCode: d.roomCode || '', over: false,
@@ -615,6 +662,11 @@
         buffer.push(s.s);
         if (s.e && s.e.length) pending = pending.concat(s.e);
       },
+      onPong: function () {
+        if (!net.pingAt) return;
+        var sample = performance.now() - net.pingAt;
+        net.rtt = net.rtt ? net.rtt * 0.5 + sample * 0.5 : sample;
+      },
       onEnd: function (e) {
         if (g.lastSnap == null && buffer.latest()) g.lastSnap = buffer.latest();
         showResult(e.winner, e.yourTeam || myTeam, e.reason);
@@ -626,7 +678,7 @@
         var ev = pending; pending = [];
         return { snap: snap, events: ev };
       },
-      stop: function () { buffer.clear(); }
+      stop: function () { buffer.clear(); clearInterval(pingTimer); clearInterval(statTimer); }
     };
     showGameScreen(g);
   }

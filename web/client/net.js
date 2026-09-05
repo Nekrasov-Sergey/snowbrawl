@@ -52,9 +52,15 @@ window.SBNet = (function () {
   function snapshotBuffer(tickRate) {
     var buf = [], delay = Math.round(2000 / (tickRate || 20));
     var latest = null;
+    // Джиттер: отклонение интервала между приходами снапшотов от номинала, максимум за 3 с.
+    var tickMs = 1000 / (tickRate || 20), jit = [];
     return {
       push: function (snap) {
         var now = performance.now();
+        if (latest) {
+          jit.push({ t: now, dev: Math.abs(now - latest.recvAt - tickMs) });
+          while (jit.length && now - jit[0].t > 3000) jit.shift();
+        }
         buf.push({ recvAt: now, snap: snap });
         latest = buf[buf.length - 1];
         // Оставляем ~1.5 с истории.
@@ -77,7 +83,9 @@ window.SBNet = (function () {
         }
         return buf[0].snap;
       },
-      clear: function () { buf = []; latest = null; }
+      /** Максимальный джиттер прихода снапшотов за последние 3 с, мс. */
+      jitter: function () { var m = 0; for (var i = 0; i < jit.length; i++) if (jit[i].dev > m) m = jit[i].dev; return m; },
+      clear: function () { buf = []; latest = null; jit = []; }
     };
   }
 

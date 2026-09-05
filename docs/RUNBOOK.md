@@ -82,7 +82,7 @@ cd /opt/snowbrawl && ./deploy.sh v0.2.0     # или ./deploy.sh для latest
 | `SNOWBRAWL_LOG_LEVEL` | info | debug/info/warn/error |
 | `SNOWBRAWL_LOG_PRETTY` | false | человекочитаемые логи |
 | `SNOWBRAWL_TRUST_PROXY` | false | брать IP из X-Forwarded-For (за Caddy — true) |
-| `SNOWBRAWL_QUEUE_WAIT` | 15s | ожидание живых игроков в Quick Match |
+| `SNOWBRAWL_QUEUE_WAIT` | 10s | ожидание живых игроков в Quick Match |
 | `SNOWBRAWL_RECONNECT_TTL` | 60s | сколько держать место за отключившимся |
 | `SNOWBRAWL_AFK_TIMEOUT` | 20s | бездействие до передачи бойца боту |
 | `SNOWBRAWL_ROOM_TTL` | 10m | жизнь пустой комнаты |

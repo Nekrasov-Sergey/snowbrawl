@@ -4,7 +4,8 @@ window.SBSettings = (function () {
   var DEFAULTS = {
     aimAssist: true,   // магнит прицела на сенсорном экране
     haptics: true,     // вибрация при попадании (где поддерживается)
-    touch: 'auto'      // сенсорное управление: auto | on | off
+    touch: 'auto',     // сенсорное управление: auto | on | off
+    pcControls: 'wasd' // ПК: wasd (WASD + бросок удержанием ЛКМ) | classic (мышь: клик — идти, ЛКМ на бойце — замах)
   };
   var cur = load();
 
