@@ -192,14 +192,27 @@ func (m *Match) Stop(reason string) {
 
 // Info — сводка для админки.
 type Info struct {
-	ID       string    `json:"id"`
-	RoomCode string    `json:"roomCode,omitempty"`
-	Mode     int       `json:"mode"`
-	Arena    int       `json:"arena"`
-	Tick     int       `json:"tick"`
-	Humans   int       `json:"humans"`
-	Online   int       `json:"online"`
-	Created  time.Time `json:"created"`
+	ID       string       `json:"id"`
+	RoomCode string       `json:"roomCode,omitempty"`
+	Mode     int          `json:"mode"`
+	Arena    int          `json:"arena"`
+	Tick     int          `json:"tick"`
+	Humans   int          `json:"humans"`
+	Online   int          `json:"online"`
+	Created  time.Time    `json:"created"`
+	Players  []PlayerInfo `json:"players"`
+}
+
+// PlayerInfo — участник матча для админки: кто это и кто им сейчас управляет.
+type PlayerInfo struct {
+	ID     string `json:"id"`
+	Nick   string `json:"nick"`
+	Team   string `json:"team"`
+	Role   string `json:"role"`
+	Bot    bool   `json:"bot"`              // бот с самого начала (добор до полного состава)
+	BotNow bool   `json:"botNow,omitempty"` // за человека сейчас играет бот: обрыв, AFK или уход
+	Online bool   `json:"online,omitempty"`
+	Left   bool   `json:"left,omitempty"` // вышел насовсем
 }
 
 // Info возвращает сводку.
@@ -207,6 +220,15 @@ func (m *Match) Info() Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	info := Info{ID: m.ID, RoomCode: m.RoomCode, Mode: m.Mode, Arena: m.Arena, Tick: m.tick, Created: m.Created}
+	for _, p := range m.Players {
+		pi := PlayerInfo{ID: p.ID, Nick: p.Nick, Team: p.Team, Role: p.Role, Bot: p.Bot}
+		if h := m.humans[p.ID]; h != nil {
+			pi.BotNow = h.bot
+			pi.Left = h.left
+			pi.Online = h.conn != nil && !h.conn.Closed()
+		}
+		info.Players = append(info.Players, pi)
+	}
 	for _, h := range m.humans {
 		if !h.left {
 			info.Humans++

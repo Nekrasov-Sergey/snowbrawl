@@ -417,3 +417,55 @@ func TestWelcomeCarriesOnline(t *testing.T) {
 		return
 	}
 }
+
+func TestStatsCarriesNicks(t *testing.T) {
+	s := newServer(t, nil)
+	host := s.connect(t, "Хозяин", "")
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+
+	st := s.hub.Stats()
+	var found *hub.PlayerStat
+	for i := range st.Sessions {
+		if st.Sessions[i].Nick == "Хозяин" {
+			found = &st.Sessions[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("сессия с ником не найдена: %+v", st.Sessions)
+	}
+	if found.Place != "room" || found.Where != rs.Code {
+		t.Fatalf("место игрока = %q/%q, ожидалось room/%s", found.Place, found.Where, rs.Code)
+	}
+	if !found.Online {
+		t.Fatal("игрок помечен как отключённый, хотя соединение живо")
+	}
+	if len(st.Rooms) != 1 || len(st.Rooms[0].Players) != 1 {
+		t.Fatalf("комнаты в сводке: %+v", st.Rooms)
+	}
+	m := st.Rooms[0].Players[0]
+	if m.Nick != "Хозяин" || !m.Host {
+		t.Fatalf("участник комнаты = %+v, ожидался хост с ником", m)
+	}
+
+	// В матче состав тоже с никами: человек и добранный бот.
+	host.send(protocol.CRoomStart, nil)
+	var ms protocol.MatchStart
+	host.expect(protocol.SMatchStart, &ms)
+	st = s.hub.Stats()
+	if len(st.Matches) != 1 {
+		t.Fatalf("матчей в сводке: %d", len(st.Matches))
+	}
+	nicks := map[string]bool{}
+	for _, p := range st.Matches[0].Players {
+		nicks[p.Nick] = p.Bot
+	}
+	if bot, ok := nicks["Хозяин"]; !ok || bot {
+		t.Fatalf("состав матча = %+v, человек не найден", st.Matches[0].Players)
+	}
+	if len(st.Matches[0].Players) != 2 {
+		t.Fatalf("в матче 1×1 ожидались двое, получено %+v", st.Matches[0].Players)
+	}
+	host.close()
+}
