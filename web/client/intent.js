@@ -49,7 +49,7 @@ window.SBIntent = (function () {
       },
       chargeStartAt: function (x, y) {
         var p = me();
-        if (!p || !o.canAct(p) || local.charging) return false;
+        if (!p || !o.canAct(p) || local.charging || p.rl > 0) return false; // p.rl — идёт перезарядка выстрела
         beginCharge(x, y);
         return true;
       },

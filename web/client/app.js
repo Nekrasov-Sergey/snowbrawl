@@ -21,7 +21,7 @@
     draining: false,
     flow: 'qm',               // qm | offline — куда ведёт экран выбора бойца
     qm: { mode: 3, role: null },
-    offline: { mode: 3, role: null, arena: 0 },
+    offline: { mode: 3, role: null, arena: 0, botLevel: 1 },
     create: { mode: 3, arena: 0 },
     room: null,               // последнее room.state
     game: null                // активный матч (см. startNetMatch / startOfflineMatch)
@@ -266,6 +266,17 @@
     Sim.ARENAS.forEach(function (_, i) {
       grid.appendChild(mapCard(i, app.offline.arena === i, function () { Audio_.uiClick(); app.offline.arena = i; buildMapGrid(); }));
     });
+    var sel = $('botLevelSel'); if (sel) {
+      sel.innerHTML = '';
+      (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).forEach(function (name, lvl) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'segBtn' + (app.offline.botLevel === lvl ? ' selected' : '');
+        b.textContent = name;
+        b.onclick = function () { Audio_.uiClick(); app.offline.botLevel = lvl; buildMapGrid(); };
+        sel.appendChild(b);
+      });
+    }
   }
   $('backFromMap').onclick = function () { Audio_.uiClick(); goto('character'); };
   $('startOfflineBtn').onclick = function () { Audio_.uiClick(); startOfflineMatch(); };
@@ -451,7 +462,7 @@
     layer: touchLayer, zoneL: $('zoneL'), zoneR: $('zoneR'), stickL: $('stickL'), stickR: $('stickR'),
     ability: touchAbility, stickS: $('stickS'), intent: intent,
     getMe: function () { return app.game ? myPlayer(app.game.lastSnap) : null; },
-    hasDirSpecial: function (role) { var sp = Sim.SPECIALS[role]; return !!sp && sp.type === 'wall'; }
+    hasDirSpecial: function (role) { var sp = Sim.SPECIALS[role]; return !!sp && !!sp.needsDir; }
   });
   var zonesHintTimer = null;
 
@@ -477,8 +488,8 @@
   }
 
   // HUD пишется в DOM только при изменении: сигнатура составов/HP, секунда таймера, состояние способности.
-  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '' };
-  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = ''; }
+  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', rl: '' };
+  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.rl = ''; }
   function updateHUD(snap) {
     var me = myPlayer(snap);
     function row(p, right) {
@@ -500,6 +511,15 @@
     }
     var tm = fmtTime(snap.timeLeft);
     if (tm !== hudCache.timer) { hudCache.timer = tm; $('matchTimer').textContent = tm; }
+
+    // Перезарядка выстрела (обновляется каждый кадр, вне кэша способности).
+    var rlMs = me ? (Sim.RELOAD_MS[me.role] || 900) : 0;
+    var rlSec = me && me.rl > 0.02 ? (me.rl * rlMs / 1000).toFixed(1) : '';
+    if (rlSec !== hudCache.rl) {
+      hudCache.rl = rlSec;
+      var rh = $('reloadHud');
+      if (rh) { rh.hidden = !rlSec; if (rlSec) rh.textContent = 'перезарядка ' + rlSec + ' с'; }
+    }
     if (!me) return;
     var hasSpec = !!Sim.SPECIALS[me.role];
     var abil = (hasSpec ? '1' : '0') + (me.special ? 's' : '-') + (me.cd > 0 ? me.cd.toFixed(1) : '0');
@@ -621,7 +641,7 @@
   // ------------------------------------------------------------
   function startOfflineMatch() {
     stopGame();
-    var drv = window.SBOffline.start({ mode: app.offline.mode, arena: app.offline.arena, role: app.offline.role });
+    var drv = window.SBOffline.start({ mode: app.offline.mode, arena: app.offline.arena, role: app.offline.role, botLevel: app.offline.botLevel });
     var g = {
       offline: true, meId: drv.meId, players: drv.players, myTeam: 'A', roomCode: '', over: false,
       input: function (kind, x, y, power) { if (!g.over) drv.input(kind, x, y, power); },

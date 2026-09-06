@@ -3,20 +3,21 @@
 window.SBOffline = (function () {
   var Sim = window.SnowBrawlSim;
 
-  function buildPlayers(mode, myRole, rng) {
+  function buildPlayers(mode, myRole, rng, botLevel) {
+    var lvl = botLevel == null ? 1 : (botLevel | 0);
     var players = [{ id: 'me', team: 'A', role: myRole, bot: false, nick: 'Вы' }];
     var pool = Sim.shuffle(rng, Sim.ALL_ROLES.filter(function (r) { return r !== myRole; }));
-    for (var i = 1; i < mode; i++) players.push({ id: 'a' + i, team: 'A', role: pool[(i - 1) % pool.length], bot: true, nick: 'Бот ' + i });
+    for (var i = 1; i < mode; i++) players.push({ id: 'a' + i, team: 'A', role: pool[(i - 1) % pool.length], bot: true, botLevel: lvl, nick: 'Бот ' + i });
     var poolB = Sim.shuffle(rng, Sim.ALL_ROLES.slice());
-    for (var j = 0; j < mode; j++) players.push({ id: 'b' + j, team: 'B', role: poolB[j % poolB.length], bot: true, nick: 'Бот ' + (mode + j) });
+    for (var j = 0; j < mode; j++) players.push({ id: 'b' + j, team: 'B', role: poolB[j % poolB.length], bot: true, botLevel: lvl, nick: 'Бот ' + (mode + j) });
     return players;
   }
 
-  /** start({mode, arena, role}) → драйвер с интерфейсом, совместимым с сетевым матчем. */
+  /** start({mode, arena, role, botLevel}) → драйвер с интерфейсом, совместимым с сетевым матчем. */
   function start(cfg) {
     var seed = (Math.random() * 0xffffffff) >>> 0;
     var rng = Sim.makeRng(seed);
-    var players = buildPlayers(cfg.mode, cfg.role, rng);
+    var players = buildPlayers(cfg.mode, cfg.role, rng, cfg.botLevel);
     var state = Sim.createMatch({ mode: cfg.mode, arenaIndex: cfg.arena, players: players }, seed);
     var lastT = performance.now();
     return {

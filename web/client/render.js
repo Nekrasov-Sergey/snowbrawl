@@ -30,8 +30,22 @@ window.SBRender = (function () {
       var bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#dfeeff'); bg.addColorStop(1, '#c3ddf7');
       c.fillStyle = bg; c.fillRect(0, 0, W, H);
       var arena = Sim.ARENAS[index] || Sim.ARENAS[0];
+      // «Река»: полоса льда по центру рисуется в кэш (статична).
+      if (arena.ice) {
+        var ig = c.createLinearGradient(0, arena.ice.y0, 0, arena.ice.y1);
+        ig.addColorStop(0, '#bfe6f5'); ig.addColorStop(0.5, '#d9f2fb'); ig.addColorStop(1, '#bfe6f5');
+        c.fillStyle = ig; c.fillRect(0, arena.ice.y0, W, arena.ice.y1 - arena.ice.y0);
+        c.strokeStyle = 'rgba(120,170,200,0.5)'; c.lineWidth = 1;
+        for (var il = 0; il < 7; il++) {
+          var iy = arena.ice.y0 + 6 + il * (arena.ice.y1 - arena.ice.y0 - 12) / 6;
+          c.beginPath(); c.moveTo(30 + il * 40, iy); c.lineTo(W - 40 + il * 12, iy - 6); c.stroke();
+        }
+        c.strokeStyle = 'rgba(90,150,190,0.6)'; c.lineWidth = 1.5;
+        c.strokeRect(0, arena.ice.y0, W, arena.ice.y1 - arena.ice.y0);
+      }
       for (var i = 0; i < arena.obstacles.length; i++) {
         var ob = arena.obstacles[i];
+        if (ob.hp != null) continue; // разрушаемые рисует drawArena по снапшоту
         if (ob.type === 'rect') {
           var grad = c.createLinearGradient(ob.x, ob.y - ob.h / 2, ob.x, ob.y + ob.h / 2);
           grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#c9deF5');
@@ -48,6 +62,38 @@ window.SBRender = (function () {
         }
       }
       arenaCache.index = index; arenaCache.canvas = oc;
+    }
+
+    // Разрушаемое укрытие: ящик/бочка из «дерева», трещины по мере урона.
+    function drawDestructible(d) {
+      var frac = d.maxHp ? d.hp / d.maxHp : 1;
+      ctx.save();
+      ctx.fillStyle = '#c58a4a'; ctx.strokeStyle = '#7c4a22'; ctx.lineWidth = 2;
+      if (d.type === 'circle') {
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = '#8f5c30'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.r * 0.62, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(d.x - d.r, d.y); ctx.lineTo(d.x + d.r, d.y); ctx.stroke();
+      } else {
+        var x0 = d.x - d.w / 2, y0 = d.y - d.h / 2;
+        ctx.fillRect(x0, y0, d.w, d.h); ctx.strokeRect(x0, y0, d.w, d.h);
+        ctx.strokeStyle = '#8f5c30'; ctx.lineWidth = 1.5;
+        for (var pl = 1; pl < 3; pl++) { ctx.beginPath(); ctx.moveTo(x0 + d.w * pl / 3, y0); ctx.lineTo(x0 + d.w * pl / 3, y0 + d.h); ctx.stroke(); }
+        ctx.beginPath(); ctx.moveTo(x0, d.y); ctx.lineTo(x0 + d.w, d.y); ctx.stroke();
+      }
+      if (frac < 0.999) { // трещины
+        ctx.strokeStyle = 'rgba(40,20,10,0.75)'; ctx.lineWidth = 1.5;
+        var cr = (d.type === 'circle' ? d.r : Math.min(d.w, d.h) / 2);
+        var n = frac < 0.4 ? 4 : 2;
+        for (var ci = 0; ci < n; ci++) {
+          var a = ci * 2.2 + 0.6;
+          ctx.beginPath();
+          ctx.moveTo(d.x + Math.cos(a) * cr * 0.2, d.y + Math.sin(a) * cr * 0.2);
+          ctx.lineTo(d.x + Math.cos(a + 0.5) * cr * 0.9, d.y + Math.sin(a + 0.5) * cr * 0.9);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
     }
 
     // Подписи бойцов (ник сверху, роль снизу) — спрайт на бойца, fillText со сменой шрифта
@@ -97,7 +143,24 @@ window.SBRender = (function () {
             audio.explosionBoom(); triggerShake(10, 250);
             explosions.push({ x: e.x, y: e.y, start: performance.now(), duration: 320, maxR: 58 });
             spawnParticles(e.x, e.y, '#ffb347', 16, 80, 200, 3, 6, 0.5); break;
-          case 'special': if (e.special === 'wall') audio.shieldThud(); break;
+          case 'special':
+            if (e.special === 'wall') audio.shieldThud();
+            else if (e.special === 'frost' || e.special === 'snipe') audio.uiClick();
+            break;
+          case 'dash': audio.throwWhoosh(e.kind === 'taram' ? 0.9 : 0.5); break;
+          case 'knockback':
+            audio.wallThud(); triggerShake(6, 160);
+            spawnParticles(e.x, e.y, '#dfeaff', 8, 50, 130, 2, 4, 0.4); break;
+          case 'bubblePop':
+            audio.shieldThud(); spawnParticles(e.x, e.y, '#bff0d0', 10, 40, 120, 2, 4, 0.4); break;
+          case 'bubbleReady': audio.freezeChime(); break;
+          case 'frost':
+            audio.freezeChime(); spawnParticles(e.x, e.y, '#c8f0ff', 10, 20, 90, 2, 4, 0.5); break;
+          case 'obstacleHit':
+            spawnParticles(e.x, e.y, '#c58a4a', 6, 30, 110, 2, 4, 0.35); break;
+          case 'obstacleBreak':
+            audio.wallThud(); triggerShake(6, 180);
+            spawnParticles(e.x, e.y, '#b5793e', 16, 50, 170, 2, 5, 0.55); break;
           default: break;
         }
       }
@@ -108,11 +171,31 @@ window.SBRender = (function () {
       // При тряске экрана края сдвигаются: подложка тем же фоном закрывает щели.
       ctx.fillStyle = '#c3ddf7'; ctx.fillRect(-12, -12, W + 24, H + 24);
       ctx.drawImage(arenaCache.canvas, 0, 0);
+      // Наледь Фризера на земле (под бойцами).
+      if (snap.fx) for (var f = 0; f < snap.fx.length; f++) {
+        var fx = snap.fx[f], fa = Math.min(1, fx.ttl / 700);
+        ctx.globalAlpha = 0.5 * fa;
+        var rg = ctx.createRadialGradient(fx.x, fx.y, 2, fx.x, fx.y, fx.r);
+        rg.addColorStop(0, '#eaffff'); rg.addColorStop(1, 'rgba(150,220,240,0)');
+        ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(fx.x, fx.y, fx.r, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 0.55 * fa; ctx.strokeStyle = '#bfe8f5'; ctx.lineWidth = 1;
+        for (var sp = 0; sp < 6; sp++) { var a = sp * Math.PI / 3; ctx.beginPath(); ctx.moveTo(fx.x, fx.y); ctx.lineTo(fx.x + Math.cos(a) * fx.r * 0.8, fx.y + Math.sin(a) * fx.r * 0.8); ctx.stroke(); }
+        ctx.globalAlpha = 1;
+      }
+      // Разрушаемые укрытия арены (не в кэше — меняются).
+      if (snap.destr) for (var d = 0; d < snap.destr.length; d++) { if (snap.destr[d].hp > 0) drawDestructible(snap.destr[d]); }
       for (var k = 0; k < snap.walls.length; k++) {
         var wl = snap.walls[k];
         ctx.globalAlpha = 0.5 + (wl.ttl / wl.life) * 0.5;
         ctx.fillStyle = wl.team === 'A' ? '#bfe0ff' : '#ffc9c9'; ctx.strokeStyle = '#5a7fa8';
         ctx.fillRect(wl.x - wl.w / 2, wl.y - wl.h / 2, wl.w, wl.h); ctx.strokeRect(wl.x - wl.w / 2, wl.y - wl.h / 2, wl.w, wl.h);
+        if (wl.maxHp && wl.hp < wl.maxHp) { // трещины по прочности
+          ctx.strokeStyle = 'rgba(50,70,90,0.7)'; ctx.lineWidth = 1;
+          for (var wc = 0; wc < (wl.maxHp - wl.hp); wc++) {
+            var wx = wl.x - wl.w / 2 + (wc + 1) * wl.w / (wl.maxHp + 1);
+            ctx.beginPath(); ctx.moveTo(wx, wl.y - wl.h / 2); ctx.lineTo(wx + 3, wl.y + wl.h / 2); ctx.stroke();
+          }
+        }
         ctx.globalAlpha = 1;
       }
     }
@@ -233,7 +316,13 @@ window.SBRender = (function () {
     // Препятствия арены плюс живые стены Щита в формате sim.js — для проверки луча прицела.
     // Собирается только когда я замахиваюсь (один вызов за кадр).
     function obstaclesOf(snap) {
-      var obs = Sim.ARENAS[snap.arena].obstacles.slice();
+      var obs = [];
+      var src = Sim.ARENAS[snap.arena].obstacles;
+      for (var j = 0; j < src.length; j++) if (src[j].hp == null) obs.push(src[j]); // неразрушимые — как есть
+      if (snap.destr) for (var d = 0; d < snap.destr.length; d++) {
+        var g = snap.destr[d];
+        if (g.hp > 0) obs.push({ type: g.type, x: g.x, y: g.y, w: g.w, h: g.h, r: g.r, height: 24 });
+      }
       for (var i = 0; i < snap.walls.length; i++) {
         var w = snap.walls[i];
         obs.push({ type: 'rect', x: w.x, y: w.y, w: w.w, h: w.h, height: 20 });
@@ -265,14 +354,54 @@ window.SBRender = (function () {
       ctx.beginPath(); ctx.ellipse(p.x, p.y + r * 0.6, r * 0.9, r * 0.35, 0, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fill();
 
+      var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
+
+      // Рывок/таран: призрачный след и приподнятая прозрачность корпуса.
+      if (p.dash || p.iframe) {
+        var bdx = Math.cos(faceAng), bdy = Math.sin(faceAng);
+        for (var gi = 1; gi <= 3; gi++) {
+          ctx.globalAlpha = 0.16 * (4 - gi);
+          ctx.beginPath(); ctx.arc(vx - bdx * gi * 6, vy - bdy * gi * 6, r * (1 - gi * 0.12), 0, Math.PI * 2);
+          ctx.fillStyle = color; ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.save();
+      if (p.iframe) ctx.globalAlpha *= 0.6;
       ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
       ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
       ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
+      if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.42)'; ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill(); }
+      ctx.restore();
 
-      var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
       drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
 
-      if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
+      // Заряженная способность: цветной ореол вокруг бойца.
+      if (p.armed) {
+        var ac = p.armed === 'explosive' ? '#ffb347' : (p.armed === 'frost' ? '#9fe8ff' : '#c9a6ff');
+        ctx.beginPath(); ctx.arc(vx, vy, r + 3.5, 0, Math.PI * 2);
+        ctx.strokeStyle = ac; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.85; ctx.stroke(); ctx.globalAlpha = 1;
+      }
+      // Щит: пассивный щитовой пузырь.
+      if (p.bubble) {
+        ctx.beginPath(); ctx.arc(vx, vy, r + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(150,240,190,0.9)'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(vx, vy, r + 4, -0.6, 0.5);
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+
+      if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 6.5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
+
+      // Перезарядка выстрела: убывающая дуга вокруг своего бойца (полная сразу после броска).
+      if (isMe && p.rl > 0) {
+        var rr = r + 10;
+        ctx.beginPath(); ctx.arc(vx, vy, rr, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3; ctx.stroke();
+        ctx.beginPath(); ctx.arc(vx, vy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p.rl);
+        ctx.strokeStyle = '#ffcf5b'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
+        ctx.lineCap = 'butt';
+      }
 
       var lb = labelOf(p, isMe, r);
       ctx.drawImage(lb.canvas, Math.round(vx - lb.w / 2), Math.round(vy - lb.top));
@@ -309,8 +438,13 @@ window.SBRender = (function () {
       ctx.globalAlpha = 1;
       var drawY = s.y - s.z;
       ctx.beginPath(); ctx.ellipse(s.x, s.y, 5, 2, 0, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.fill();
+      if (s.sn && tr.length >= 2) { // прицельный выстрел: короткий яркий след по направлению полёта
+        var t0 = tr[0], tdx = s.x - t0.x, tdy = s.y - t0.y, tl = Math.hypot(tdx, tdy) || 1;
+        ctx.strokeStyle = 'rgba(201,166,255,0.8)'; ctx.lineWidth = s.r * 1.4; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(s.x, drawY); ctx.lineTo(s.x - tdx / tl * 22, drawY - tdy / tl * 22); ctx.stroke();
+      }
       ctx.beginPath(); ctx.arc(s.x, drawY, s.r, 0, Math.PI * 2);
-      ctx.fillStyle = s.ex ? '#ffb347' : (s.fr ? '#9fe8ff' : '#ffffff'); ctx.fill();
+      ctx.fillStyle = s.ex ? '#ffb347' : (s.fr ? '#9fe8ff' : (s.sn ? '#e6d8ff' : '#ffffff')); ctx.fill();
       ctx.strokeStyle = '#a9c2e0'; ctx.stroke();
     }
     function drawExplosions(now) {
@@ -392,13 +526,14 @@ window.SBRender = (function () {
         o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
         o.anim = pa.anim + (pb.anim - pa.anim) * t;
         o.power = pa.power + (pb.power - pa.power) * t;
+        if (typeof pa.rl === 'number' && typeof pb.rl === 'number') o.rl = pa.rl + (pb.rl - pa.rl) * t;
       }
     }
     var balls = o2.balls; balls.length = b.balls.length;
     for (var j = 0; j < b.balls.length; j++) {
       var sb = b.balls[j], sa = findById(a.balls, sb.id, j);
       var s = balls[j] || (balls[j] = {});
-      s.id = sb.id; s.r = sb.r; s.team = sb.team; s.ex = sb.ex; s.fr = sb.fr;
+      s.id = sb.id; s.r = sb.r; s.team = sb.team; s.ex = sb.ex; s.fr = sb.fr; s.sn = sb.sn;
       if (sa) { s.x = sa.x + (sb.x - sa.x) * t; s.y = sa.y + (sb.y - sa.y) * t; s.z = sa.z + (sb.z - sa.z) * t; }
       else { s.x = sb.x; s.y = sb.y; s.z = sb.z; }
     }
