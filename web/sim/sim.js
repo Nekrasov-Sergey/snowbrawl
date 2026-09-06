@@ -42,6 +42,10 @@
   var TANK_STUN_FACTOR = 0.5;                                                   // Танк: пассив «Броня»
   var SNIPE_FLIGHT = 0.32, SNIPE_TRAVEL = 620;                                  // настильный быстрый выстрел
 
+  // Перезарядка выстрела: пауза после броска, пока нельзя начать новый замах.
+  // По ролям — Раннер частит, Снайпер бьёт редко.
+  var RELOAD_MS = { 'Раннер': 500, 'Танк': 900, 'Снайпер': 1600, 'Бомбер': 1000, 'Фризер': 900, 'Щит': 900 };
+
   // Актив на Q. needsDir — направленная (по прицелу), иначе «заряжает» следующий бросок.
   var ABILITIES = {
     'Раннер':  { active: { id: 'dash',      cooldown: DASH_CD,    needsDir: true  }, passive: 'lowhp_speed' },
@@ -194,7 +198,7 @@
       hp: 3, stunTimer: 0, koed: false, koAt: 0, hitAt: -1e9,
       moveTarget: { x: x, y: y }, isMoving: false, animPhase: 0,
       charging: false, chargeStart: 0, aimX: x, aimY: y,
-      specialCooldown: 0, pendingSpecialThrow: false, armedSpecial: null,
+      specialCooldown: 0, pendingSpecialThrow: false, armedSpecial: null, reloadUntil: 0,
       // способности: рывок/таран, неуязвимость, замедление, щитовой пузырь Щита
       dashUntil: 0, dashVX: 0, dashVY: 0, dashKind: null, taramHits: null,
       iframeUntil: 0, slowUntil: 0, slowMul: 1, lastDamagedAt: -1e9,
@@ -302,7 +306,7 @@
         p.moveTarget = { x: x, y: y };
         return true;
       case 'chargeStart':
-        if (p.stunTimer > 0 || p.charging) return false;
+        if (p.stunTimer > 0 || p.charging || state.time < p.reloadUntil) return false;
         p.charging = true; p.chargeStart = state.time; p.aimX = x; p.aimY = y;
         emit(state, { type: 'chargeStart', playerId: p.id });
         return true;
@@ -373,7 +377,9 @@
       explosive: armed === 'explosive', freeze: armed === 'frost', frost: armed === 'frost',
       flat: flat, sniped: armed === 'snipe'
     });
-    emit(state, { type: 'throw', playerId: p.id, power: power, special: armed });
+    var reload = RELOAD_MS[p.role] || 900;
+    p.reloadUntil = state.time + reload;
+    emit(state, { type: 'throw', playerId: p.id, power: power, special: armed, reload: reload });
   }
 
   // ============================================================
@@ -571,6 +577,7 @@
     var dist = Math.hypot(enemy.x - p.x, enemy.y - p.y);
     var lowHp = p.hp <= cfg.retreatHp;
     var canAbil = p.specialCooldown <= 0 && rng.next() < lvl.useAbility;
+    var canShoot = now >= p.reloadUntil; // перезарядка выстрела
 
     // Способности по ситуации: стена при опасности, таран для сближения, снайп издалека.
     if (spec.id === 'wall' && p.hp <= 2 && dist < 260 && p.specialCooldown <= 0) {
@@ -581,14 +588,14 @@
       useSpecial(state, p, enemy.x, enemy.y);
       p.ai.nextDecisionAt = now + 350; return;
     }
-    if (spec.id === 'snipe' && canAbil && dist > 300 && canHitTarget(obs, p, enemy.x, enemy.y, 1)) {
+    if (spec.id === 'snipe' && canAbil && canShoot && dist > 300 && canHitTarget(obs, p, enemy.x, enemy.y, 1)) {
       useSpecial(state, p, enemy.x, enemy.y);
       // после заряда — сразу замах
       p.charging = true; p.chargeStart = now; p.ai.chargeDuration = 0.9 + (rng.next() - 0.5) * lvl.chargeJitter;
       p.aimX = enemy.x; p.aimY = enemy.y; emit(state, { type: 'chargeStart', playerId: p.id });
       return;
     }
-    if (spec.id === 'frost' && canAbil && dist > 120 && dist < 320 && canHitTarget(obs, p, enemy.x, enemy.y, 0.6)) {
+    if (spec.id === 'frost' && canAbil && canShoot && dist > 120 && dist < 320 && canHitTarget(obs, p, enemy.x, enemy.y, 0.6)) {
       useSpecial(state, p, enemy.x, enemy.y);
       p.charging = true; p.chargeStart = now; p.ai.chargeDuration = 0.6 + (rng.next() - 0.5) * lvl.chargeJitter;
       p.aimX = enemy.x; p.aimY = enemy.y; emit(state, { type: 'chargeStart', playerId: p.id });
@@ -624,7 +631,7 @@
     // дальность полёта = 140 + power*380, окно попадания — последние ~50 px дуги.
     // (В прототипе бралось 0.35 + dist/500, и боты систематически перебрасывали цель.)
     var testPower = Math.min(1, Math.max(0, (dist + 20 - 140) / 380));
-    if (canHitTarget(obs, p, enemy.x, enemy.y, testPower)) {
+    if (canHitTarget(obs, p, enemy.x, enemy.y, testPower) && canShoot) {
       if (spec.id === 'explosive' && p.specialCooldown <= 0 && rng.next() < lvl.useAbility) {
         useSpecial(state, p, enemy.x, enemy.y);
       }
@@ -632,6 +639,11 @@
       p.ai.chargeDuration = Math.max(0.25, testPower * 1.2 + (rng.next() - 0.5) * lvl.chargeJitter);
       p.aimX = enemy.x; p.aimY = enemy.y;
       emit(state, { type: 'chargeStart', playerId: p.id });
+    } else if (!canShoot && canHitTarget(obs, p, enemy.x, enemy.y, testPower)) {
+      // на линии огня, но идёт перезарядка — короткий манёвр вбок, скоро повтор
+      var pr = Math.atan2(enemy.y - p.y, enemy.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
+      p.moveTarget = clampToArena(p.x + Math.cos(pr) * 40, p.y + Math.sin(pr) * 40, p.radius);
+      p.ai.nextDecisionAt = now + 180;
     } else {
       var perp = Math.atan2(enemy.y - p.y, enemy.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
       p.moveTarget = clampToArena(p.x + Math.cos(perp) * 90, p.y + Math.sin(perp) * 90, p.radius);
@@ -773,6 +785,7 @@
   function updateTimers(state, p, dt) {
     if (p.stunTimer > 0) p.stunTimer = Math.max(0, p.stunTimer - dt);
     if (p.specialCooldown > 0) p.specialCooldown = Math.max(0, p.specialCooldown - dt);
+    if (p.reloadUntil > 0 && state.time >= p.reloadUntil) { p.reloadUntil = 0; emit(state, { type: 'reloadDone', playerId: p.id }); }
     // Щит: пассив «Закалка» — пузырь восстанавливается, если 12 с не получал урона
     if (p.role === 'Щит' && !p.bubble && !p.koed && p.hp > 0 &&
         state.time >= p.bubbleReadyAt && (state.time - p.lastDamagedAt) >= BUBBLE_REGEN_MS) {
@@ -840,7 +853,9 @@
         iframe: state.time < p.iframeUntil,
         dash: state.time < p.dashUntil,
         bubble: !!p.bubble,
-        slow: speedMul(state, p) < 0.999
+        slow: speedMul(state, p) < 0.999,
+        // перезарядка выстрела: доля 0..1 (1 = только бросил, 0 = готов)
+        rl: p.reloadUntil > state.time ? round1((p.reloadUntil - state.time) / (RELOAD_MS[p.role] || 900) * 10) / 10 : 0
       });
     }
     var balls = [];
@@ -881,7 +896,8 @@
   return {
     SIM_VERSION: SIM_VERSION,
     W: W, H: H, GRAVITY: GRAVITY, CHARGE_FULL_MS: CHARGE_FULL_MS, KO_ANIM_MS: KO_ANIM_MS,
-    ARENAS: ARENAS, ROLE_STATS: ROLE_STATS, SPECIALS: SPECIALS, ABILITIES: ABILITIES, MODES: MODES,
+    ARENAS: ARENAS, ROLE_STATS: ROLE_STATS, SPECIALS: SPECIALS, ABILITIES: ABILITIES,
+    RELOAD_MS: RELOAD_MS, MODES: MODES,
     BOT_LEVEL_NAMES: ['Лёгкий', 'Обычный', 'Сложный'],
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,
     makeRng: makeRng, shuffle: shuffle,

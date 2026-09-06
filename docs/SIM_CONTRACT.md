@@ -62,6 +62,10 @@ SnowBrawlSim = {
 масштабируют разброс прицела, паузы решений, шанс уворота и использования способности.
 `BOT_LEVEL_NAMES` — подписи для UI. Уровень 1 сохраняет прежнее поведение ботов.
 
+Перезарядка выстрела: после броска `chargeStart` отклоняется, пока `state.time < p.reloadUntil`
+(и для ботов). Длительность по ролям — `RELOAD_MS` (Раннер 500 … Снайпер 1600 мс). В снапшоте
+`players[].rl` — доля 0..1 (1 сразу после броска, 0 — готов); событие `reloadDone`.
+
 Разрушаемые укрытия: у части препятствий `ARENAS[].obstacles[]` есть `hp` (снимается только
 взрывом Бомбера). Зона льда карты «Река»: `ARENAS[].ice = { y0, y1, slow }` — замедление в полосе.
 
@@ -118,7 +122,8 @@ config = {
 {type:'special', playerId, special}  {type:'wallPlaced', playerId}
 {type:'dash', playerId, kind:'dash'|'taram'}   {type:'knockback', targetId, x, y}   // с 1.2.0
 {type:'frost', x, y}   {type:'bubblePop', targetId, x, y}   {type:'bubbleReady', playerId}
-{type:'obstacleHit', x, y}   {type:'obstacleBreak', x, y}
+{type:'obstacleHit', x, y}   {type:'obstacleBreak', x, y}   {type:'reloadDone', playerId}
+{type:'throw', ..., reload}   // reload — мс перезарядки этого броска
 {type:'matchEnd', winner: 'A'|'B'|null}
 ```
 
@@ -133,7 +138,7 @@ config = {
 { v, tick, time, timeLeft, mode, arena, ice, over, winner,
   players: [{ id, team, role, nick, bot, x, y, hp, stun, koed, koAt, hitAt,
               moving, anim, charging, power, aimX, aimY, special, cd,
-              armed, iframe, dash, bubble, slow }],           // armed…slow — с 1.2.0
+              armed, iframe, dash, bubble, slow, rl }],        // armed…rl — с 1.2.0
   balls:   [{ id, x, y, z, r, team, ex, fr, sn }],
   walls:   [{ x, y, w, h, team, hp, maxHp, ttl, life }],
   destr:   [{ i, type, x, y, w, h, r, mat, hp, maxHp }],      // разрушаемые укрытия арены

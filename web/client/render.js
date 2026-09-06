@@ -393,6 +393,16 @@ window.SBRender = (function () {
 
       if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 6.5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
 
+      // Перезарядка выстрела: убывающая дуга вокруг своего бойца (полная сразу после броска).
+      if (isMe && p.rl > 0) {
+        var rr = r + 10;
+        ctx.beginPath(); ctx.arc(vx, vy, rr, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3; ctx.stroke();
+        ctx.beginPath(); ctx.arc(vx, vy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p.rl);
+        ctx.strokeStyle = '#ffcf5b'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
+        ctx.lineCap = 'butt';
+      }
+
       var lb = labelOf(p, isMe, r);
       ctx.drawImage(lb.canvas, Math.round(vx - lb.w / 2), Math.round(vy - lb.top));
       ctx.restore();
@@ -516,6 +526,7 @@ window.SBRender = (function () {
         o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
         o.anim = pa.anim + (pb.anim - pa.anim) * t;
         o.power = pa.power + (pb.power - pa.power) * t;
+        if (typeof pa.rl === 'number' && typeof pb.rl === 'number') o.rl = pa.rl + (pb.rl - pa.rl) * t;
       }
     }
     var balls = o2.balls; balls.length = b.balls.length;

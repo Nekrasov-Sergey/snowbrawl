@@ -152,6 +152,7 @@ canvas {
 #abilityBtn { padding: 8px 18px; font-size: 13px; border-radius: 8px; border: 1px solid #7a5cff; background: #2a2050; color: #e6d9ff; cursor: pointer; font-weight: 700; }
 #abilityBtn:disabled { opacity: 0.4; cursor: default; }
 #abilityCd { font-size: 11px; color: #b7a6ff; margin-top: 4px; }
+#reloadHud { font-size: 11px; color: #ffcf5b; margin-top: 2px; font-weight: 600; }
 
 /* сенсорное управление */
 #touchLayer { position: absolute; inset: 0; z-index: 4; touch-action: none; overflow: hidden; }
