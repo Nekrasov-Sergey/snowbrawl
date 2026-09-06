@@ -3,11 +3,12 @@
 window.SBOffline = (function () {
   var Sim = window.SnowBrawlSim;
 
-  function buildPlayers(mode, myRole, rng, botLevel) {
+  function buildPlayers(mode, myRole, rng, botLevel, pve) {
     var lvl = botLevel == null ? 1 : (botLevel | 0);
     var players = [{ id: 'me', team: 'A', role: myRole, bot: false, nick: 'Вы' }];
     var pool = Sim.shuffle(rng, Sim.ALL_ROLES.filter(function (r) { return r !== myRole; }));
-    for (var i = 1; i < mode; i++) players.push({ id: 'a' + i, team: 'A', role: pool[(i - 1) % pool.length], bot: true, botLevel: lvl, nick: 'Бот ' + i });
+    for (var i = 1; i < mode; i++) players.push({ id: 'a' + i, team: 'A', role: pool[(i - 1) % pool.length], bot: true, botLevel: lvl, nick: 'Союзник ' + i });
+    if (pve) return players; // врагов создаёт волновой планировщик sim.js
     var poolB = Sim.shuffle(rng, Sim.ALL_ROLES.slice());
     for (var j = 0; j < mode; j++) players.push({ id: 'b' + j, team: 'B', role: poolB[j % poolB.length], bot: true, botLevel: lvl, nick: 'Бот ' + (mode + j) });
     return players;
@@ -15,19 +16,23 @@ window.SBOffline = (function () {
 
   var COUNTDOWN_MS = 3000; // как на сервере: матч начинается после отсчёта
 
-  /** start({mode, arena, role, botLevel}) → драйвер с интерфейсом, совместимым с сетевым матчем. */
+  /** start({mode, arena, role, botLevel, gameMode, campaign, difficulty}) → драйвер, совместимый с сетевым матчем. */
   function start(cfg) {
     var seed = (Math.random() * 0xffffffff) >>> 0;
     var rng = Sim.makeRng(seed);
-    var players = buildPlayers(cfg.mode, cfg.role, rng, cfg.botLevel);
-    var state = Sim.createMatch({ mode: cfg.mode, arenaIndex: cfg.arena, players: players }, seed);
+    var gameMode = cfg.gameMode || 'pvp';
+    var pve = gameMode !== 'pvp';
+    var players = buildPlayers(cfg.mode, cfg.role, rng, pve ? cfg.difficulty : cfg.botLevel, pve);
+    var mcfg = { gameMode: gameMode, mode: cfg.mode, arenaIndex: cfg.arena, players: players };
+    if (pve) { mcfg.difficulty = cfg.difficulty == null ? 1 : (cfg.difficulty | 0); mcfg.campaign = cfg.campaign !== false; }
+    var state = Sim.createMatch(mcfg, seed);
     var lastT = performance.now();
     var startAt = lastT + COUNTDOWN_MS;
     return {
       offline: true,
       meId: 'me',
       players: players.map(function (p) { return { id: p.id, nick: p.nick, team: p.team, role: p.role, bot: p.bot }; }),
-      mode: cfg.mode, arena: cfg.arena,
+      mode: cfg.mode, arena: cfg.arena, gameMode: gameMode,
       input: function (kind, x, y, power) {
         if (performance.now() < startAt) return; // идёт отсчёт
         var inp = { kind: kind, x: x, y: y };
@@ -48,6 +53,7 @@ window.SBOffline = (function () {
       },
       isOver: function () { return Sim.isOver(state); },
       winner: function () { return Sim.winner(state); },
+      reason: function () { return Sim.reason ? Sim.reason(state) : ''; },
       stop: function () { }
     };
   }

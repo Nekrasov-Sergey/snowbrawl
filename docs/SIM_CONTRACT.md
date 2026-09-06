@@ -22,9 +22,11 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.2.0',                 // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.3.0',                 // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, CHARGE_FULL_MS, KO_ANIM_MS,
   ARENAS, ROLE_STATS, SPECIALS, ABILITIES, BOT_LEVEL_NAMES, MODES,
+  GAME_MODES: ['pvp','survival','defense'],   // с 1.3.0
+  PVE_LEVEL_COUNT: 3,                          // с 1.3.0
   HERO_DESCRIPTIONS, ABILITY_HINT_TEXT, ALL_ROLES,
   makeRng(seed), shuffle(rng, arr),
 
@@ -34,12 +36,14 @@ SnowBrawlSim = {
   step(state, dtSeconds) -> events[],
   snapshot(state) -> object,
   isOver(state) -> bool,
-  winner(state) -> 'A' | 'B' | null
+  winner(state) -> 'A' | 'B' | null,
+  reason(state) -> '' | 'ko' | 'timeout' | 'cleared' | 'wiped' | 'objective' | 'expired'  // с 1.3.0
 }
 ```
 
-Сервер обязательно использует: `SIM_VERSION`, `ARENAS.length`, `ALL_ROLES`, `createMatch`,
-`applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`. Остальное — для клиента,
+Сервер обязательно использует: `SIM_VERSION`, `ARENAS.length`, `ALL_ROLES`, `GAME_MODES`,
+`createMatch`, `applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`, `reason`.
+Остальное — для клиента,
 в том числе `canHitTarget(obstacles, shooter, x, y, power)` (с 1.1.1): упрётся ли снежок в
 препятствие — клиент красит луч прицела красным.
 
@@ -60,7 +64,29 @@ SnowBrawlSim = {
 
 Три уровня ботов: `config.players[].botLevel` (0 Лёгкий / 1 Обычный / 2 Сложный, по умолчанию 1)
 масштабируют разброс прицела, паузы решений, шанс уворота и использования способности.
-`BOT_LEVEL_NAMES` — подписи для UI. Уровень 1 сохраняет прежнее поведение ботов.
+`BOT_LEVEL_NAMES` — подписи для UI. С 1.3.0 уровни раздвинуты: «Лёгкий» заметно мажет и вяло
+реагирует, «Сложный» ослаблен относительно прежнего (был почти непобедим).
+
+### PvE-режим «Волны» (с 1.3.0)
+
+`config.gameMode` (`'pvp'` по умолчанию, `'survival'`, `'defense'`) переключает тип матча.
+В PvE вся пати — команда `A` (люди + союзные боты, `botLevel` из `config.difficulty` 0..2),
+команду `B` создаёт волновой планировщик внутри `step` по ходу матча. `config.campaign`
+(по умолчанию `true`) — кампания из `PVE_LEVEL_COUNT` уровней с боссами; `false` — сразу
+бесконечный эндлесс. `config.pve = { levels?, waves? }` урезает кампанию для тестов.
+
+- Врагов ≤ 24 одновременно; спавн от правого края, растянут во времени.
+- Жизни пати (`players[].lives`, старт 3) пополняются в начале волны, все возрождаются;
+  выбывший в бою возрождается через ~2.5 с, пока есть жизни.
+- Между волнами пауза 12 с (`pve.phase = 'between'`, `pve.nextInMs`).
+- Исход (`reason(state)` и событие `matchEnd`): `cleared` — кампания пройдена; `wiped` —
+  вся пати выбита без жизней; `objective` — в «Защите» разбит снеговик; `expired` —
+  абсолютный потолок 60 мин. В кампании `wiped`/`objective` не заканчивают матч, а
+  перезапускают уровень с первой волны; в эндлессе — заканчивают.
+- Типы врагов: `core` (снежколёт), `swarm`, `tank`, `roller` (урон контактом у `swarm`/`roller`),
+  `boss` (`golem` / `blizzard` / `yeti`, две фазы). События: `waveStart`, `waveCleared`,
+  `enemySpawn`, `bossPhase`, `contactHit`, `objectiveHit`, `levelStart`, `levelRestart`,
+  `partyDown`, `partyRespawn` — все опциональны, клиент игнорирует незнакомые.
 
 Перезарядка выстрела: после броска `chargeStart` отклоняется, пока `state.time < p.reloadUntil`
 (и для ботов). Длительность по ролям — `RELOAD_MS` (Раннер 500 … Снайпер 1600 мс). В снапшоте
@@ -73,12 +99,16 @@ SnowBrawlSim = {
 
 ```js
 config = {
-  mode: 1|2|3|4,                 // размер команды
-  arenaIndex: 0..ARENAS.length-1,
-  durationMs?: 300000,           // таймер матча; по умолчанию 5 минут, потом ничья
-  players: [                     // ровно 2*mode штук
+  gameMode?: 'pvp'|'survival'|'defense',   // по умолчанию 'pvp' (с 1.3.0)
+  mode: 1|2|3|4,                 // PvP — размер команды; PvE — размер пати
+  arenaIndex: 0..ARENAS.length-1, // PvP; в PvE арену задаёт уровень кампании
+  durationMs?: 300000,           // PvP — таймер матча (5 мин, потом ничья); PvE игнорируется
+  difficulty?: 0|1|2,            // PvE — ручка сложности (с 1.3.0)
+  campaign?: true,               // PvE — кампания (по умолч.) или эндлесс (с 1.3.0)
+  pve?: { levels?, waves? },     // PvE — урезание кампании для тестов (с 1.3.0)
+  players: [                     // PvP — ровно 2*mode; PvE — 1..4, все team 'A'
     { id: 'p1a2b3c4', team: 'A', role: 'Бомбер', bot: false, nick: 'Сергей' },
-    { id: 'bot1',     team: 'B', role: 'Танк',   bot: true,  nick: 'Бот 1' },
+    { id: 'bot1',     team: 'B', role: 'Танк',   bot: true,  nick: 'Бот 1', botLevel: 2 },
   ]
 }
 ```
@@ -124,7 +154,9 @@ config = {
 {type:'frost', x, y}   {type:'bubblePop', targetId, x, y}   {type:'bubbleReady', playerId}
 {type:'obstacleHit', x, y}   {type:'obstacleBreak', x, y}   {type:'reloadDone', playerId}
 {type:'throw', ..., reload}   // reload — мс перезарядки этого броска
-{type:'matchEnd', winner: 'A'|'B'|null}
+{type:'matchEnd', winner: 'A'|'B'|null, reason?}   // reason — с 1.3.0 (PvE)
+// PvE (с 1.3.0): waveStart, waveCleared, enemySpawn, bossPhase, contactHit,
+//                objectiveHit, levelStart, levelRestart, partyDown, partyRespawn
 ```
 
 События — единственный источник для звука и эффектов на клиенте. Новые события добавлять
@@ -136,13 +168,18 @@ config = {
 
 ```
 { v, tick, time, timeLeft, mode, arena, ice, over, winner,
+  gameMode, reason,                                           // с 1.3.0
   players: [{ id, team, role, nick, bot, x, y, hp, stun, koed, koAt, hitAt,
               moving, anim, charging, power, aimX, aimY, special, cd,
-              armed, iframe, dash, bubble, slow, rl }],        // armed…rl — с 1.2.0
+              armed, iframe, dash, bubble, slow, rl,           // armed…rl — с 1.2.0
+              lives?, et?, mhp?, bk?, bph? }],                 // PvE, с 1.3.0
   balls:   [{ id, x, y, z, r, team, ex, fr, sn }],
   walls:   [{ x, y, w, h, team, hp, maxHp, ttl, life }],
   destr:   [{ i, type, x, y, w, h, r, mat, hp, maxHp }],      // разрушаемые укрытия арены
-  fx:      [{ id, kind:'frost', x, y, r, team, ttl, life }] } // зоны на земле
+  fx:      [{ id, kind:'frost', x, y, r, team, ttl, life }],  // зоны на земле
+  pve?: {  objective, campaign, endless, level, levelCount, wave, waveCount,   // PvE, с 1.3.0
+           enemiesLeft, phase:'fighting'|'between', nextInMs, wavesSurvived,
+           bossHp, bossMax, objHp?, objMaxHp?, objX?, objY?, objR? } }
 ```
 
 Клиент интерполирует `players[].x/y/anim/power` и `balls[].x/y/z` по `id` между снапшотами —
@@ -151,8 +188,9 @@ config = {
 
 ## Обязательные правила для сервера
 
-- **Матч должен заканчиваться.** Таймер `durationMs` с ничьёй обязателен: без него
-  два спрятавшихся игрока держат матч и память сервера вечно.
+- **Матч должен заканчиваться.** В PvP таймер `durationMs` с ничьёй обязателен: без него
+  два спрятавшихся игрока держат матч и память сервера вечно. В PvE ту же роль играет
+  абсолютный потолок 60 мин (`reason = 'expired'`).
 - **Боты должны уметь играть сами**: сервер добирает ими команды и заменяет отключившихся.
 - `isOver`/`winner` должны соответствовать событию `matchEnd`.
 

@@ -70,6 +70,7 @@ const (
 	ErrBadMode      = "bad_mode"
 	ErrBadArena     = "bad_arena"
 	ErrBadRole      = "bad_role"
+	ErrBadGameMode  = "bad_gamemode"
 	ErrBadSlot      = "bad_slot"
 	ErrServerFull   = "server_full"
 	ErrInternal     = "internal"
@@ -137,6 +138,11 @@ type QueueStatus struct {
 type RoomCreate struct {
 	Mode  int `json:"mode"`
 	Arena int `json:"arena"`
+	// PvE: gameMode "" | "pvp" | "survival" | "defense"; campaign — кампания (иначе эндлесс);
+	// difficulty 0..2 (ручка сложности: боты пати + сдвиг врагов).
+	GameMode   string `json:"gameMode,omitempty"`
+	Campaign   bool   `json:"campaign,omitempty"`
+	Difficulty int    `json:"difficulty,omitempty"`
 }
 
 // RoomJoin — войти по коду.
@@ -157,8 +163,11 @@ type RoomRole struct {
 
 // RoomConfig — хост меняет режим/арену.
 type RoomConfig struct {
-	Mode  int `json:"mode"`
-	Arena int `json:"arena"`
+	Mode       int    `json:"mode"`
+	Arena      int    `json:"arena"`
+	GameMode   string `json:"gameMode,omitempty"`
+	Campaign   bool   `json:"campaign,omitempty"`
+	Difficulty int    `json:"difficulty,omitempty"`
 }
 
 // RoomKick — хост выгоняет игрока.
@@ -179,12 +188,15 @@ type RoomPlayer struct {
 
 // RoomState — полное состояние лобби, рассылается всем при любом изменении.
 type RoomState struct {
-	Code    string       `json:"code"`
-	HostID  string       `json:"hostId"`
-	Mode    int          `json:"mode"`
-	Arena   int          `json:"arena"`
-	Players []RoomPlayer `json:"players"`
-	InMatch bool         `json:"inMatch"`
+	Code       string       `json:"code"`
+	HostID     string       `json:"hostId"`
+	Mode       int          `json:"mode"`
+	Arena      int          `json:"arena"`
+	GameMode   string       `json:"gameMode,omitempty"`
+	Campaign   bool         `json:"campaign,omitempty"`
+	Difficulty int          `json:"difficulty,omitempty"`
+	Players    []RoomPlayer `json:"players"`
+	InMatch    bool         `json:"inMatch"`
 	// Результат последнего матча комнаты (для экрана лобби после боя).
 	LastWinner string `json:"lastWinner,omitempty"`
 }
@@ -203,6 +215,7 @@ type MatchStart struct {
 	MatchID  string        `json:"matchId"`
 	Mode     int           `json:"mode"`
 	Arena    int           `json:"arena"`
+	GameMode string        `json:"gameMode,omitempty"` // "" == "pvp"
 	Players  []MatchPlayer `json:"players"`
 	YourID   string        `json:"yourId"`
 	TickRate int           `json:"tickRate"`
@@ -222,7 +235,7 @@ type Snapshot struct {
 type MatchEnd struct {
 	Winner   string `json:"winner"` // "A" | "B" | "" (ничья)
 	YourTeam string `json:"yourTeam,omitempty"`
-	Reason   string `json:"reason"` // "ko" | "timeout" | "abandoned" | "shutdown"
+	Reason   string `json:"reason"` // PvP: "ko"|"timeout"|"abandoned"|"shutdown"; PvE: "cleared"|"wiped"|"objective"|"expired"
 	RoomCode string `json:"roomCode,omitempty"`
 }
 

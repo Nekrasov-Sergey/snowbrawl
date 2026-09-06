@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.2.0';
+  var SIM_VERSION = '1.3.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -28,6 +28,21 @@
   var WALL_HP = 3;                    // снежная стена Щита: столько попаданий держит (взрыв — сразу)
   var EXPLOSION_RADIUS = 58;
   var SUBSTEP_MAX = 1 / 60;           // максимальный подшаг физики, с
+
+  // --- PvE-режим «Волны» (gameMode: 'survival' | 'defense') ---
+  var GAME_MODES = ['pvp', 'survival', 'defense'];
+  var PVE_MATCH_CAP_MS = 60 * 60 * 1000; // абсолютный потолок PvE-матча (предохранитель)
+  var WAVE_BREAK_MS = 12000;             // пауза между волнами
+  var MAX_ENEMIES = 24;                  // потолок одновременно живых врагов (размер снапшота, стоимость goja)
+  var PVE_RESPAWN_MS = 2500;             // задержка возрождения члена пати, пока есть жизни
+  var PVE_LIVES = 3;                     // жизни на волну
+  var PVE_FIRST_WAVE_MS = 1500;          // первая волна через столько после старта
+  var SNOWMAN_HP = 40;
+  var SNOWMAN_R = 26;
+  var DEFENSE_AGGRO_R = 120;             // ближе — враг переключается со снеговика на игрока
+  var PVE_SPAWN_X0 = 760, PVE_SPAWN_X1 = 884; // полоса появления врагов у правого края
+  var CONTACT_DAMAGE_CD = 0.8;           // с, пауза контактного урона одного врага
+  var CONTACT_KNOCK = 34;
 
   // --- Способности (пассив + актив у каждой роли), константы игрового баланса ---
   var DASH_DIST = 118, DASH_MS = 170, DASH_IFRAME_MS = 250, DASH_CD = 8;        // Раннер: Рывок
@@ -154,6 +169,46 @@
   var MODES = [1, 2, 3, 4];
 
   // ============================================================
+  // PvE: типы врагов и таблица уровней кампании
+  // ============================================================
+  // role — базовая роль для ROLE_STATS/ROLE_AI/RELOAD_MS/ABILITIES и модели отрисовки.
+  // contact — контактный урон (−1 HP при касании), knockResist — доля гашения откида,
+  // scripted — прямолинейное движение (ком). role: '*' у core выбирается случайно при спавне.
+  var ENEMY_CORE_ROLES = ['Раннер', 'Снайпер', 'Бомбер', 'Фризер'];
+  var ENEMY_STATS = {
+    core:   { role: '*',       speed: 150, radius: 15, hp: 3, contact: 0, knockResist: 0 },
+    swarm:  { role: 'Раннер',  speed: 232, radius: 12, hp: 1, contact: 1, knockResist: 0 },
+    tank:   { role: 'Танк',    speed: 118, radius: 24, hp: 7, contact: 0, knockResist: 0.8 },
+    roller: { role: 'Танк',    speed: 300, radius: 20, hp: 3, contact: 1, knockResist: 1, scripted: true },
+    boss:   { role: 'Танк',    speed: 120, radius: 34, hp: 12, contact: 0, knockResist: 1 }
+  };
+  var BOSS_HP = { golem: 10, blizzard: 12, yeti: 16 };
+
+  // Кампания: 3 уровня, у каждого 4 обычные волны + босс-волна. arena — индекс ARENAS.
+  // types — состав волны по типам, botLevel — базовый уровень врагов (сдвигается ручкой
+  // сложности), spawnMs — окно, за которое волна выходит на арену.
+  var PVE_LEVELS = [
+    { arena: 0, boss: 'golem', waves: [
+      { types: { core: 4 },                     botLevel: 0, spawnMs: 2600 },
+      { types: { core: 6 },                     botLevel: 0, spawnMs: 3000 },
+      { types: { core: 5, swarm: 2 },           botLevel: 1, spawnMs: 3000 },
+      { types: { core: 5, swarm: 3, tank: 1 },  botLevel: 1, spawnMs: 3600 }
+    ] },
+    { arena: 1, boss: 'blizzard', waves: [
+      { types: { core: 6 },                     botLevel: 1, spawnMs: 2600 },
+      { types: { core: 5, swarm: 3 },           botLevel: 1, spawnMs: 3000 },
+      { types: { core: 5, tank: 2, roller: 2 }, botLevel: 1, spawnMs: 3200 },
+      { types: { core: 5, swarm: 4, tank: 2 },  botLevel: 2, spawnMs: 3600 }
+    ] },
+    { arena: 3, boss: 'yeti', waves: [
+      { types: { core: 6, swarm: 2 },                   botLevel: 1, spawnMs: 2600 },
+      { types: { core: 6, tank: 2, roller: 2 },         botLevel: 2, spawnMs: 3000 },
+      { types: { core: 6, swarm: 4, tank: 2 },          botLevel: 2, spawnMs: 3200 },
+      { types: { core: 6, swarm: 4, tank: 2, roller: 1 }, botLevel: 2, spawnMs: 3800 }
+    ] }
+  ];
+
+  // ============================================================
   // ДЕТЕРМИНИРОВАННЫЙ RNG (mulberry32)
   // ============================================================
   function makeRng(seed) {
@@ -189,41 +244,108 @@
     return ys;
   }
 
-  function makeChar(id, team, role, x, y, bot, nick, botLevel) {
+  function makeChar(id, team, role, x, y, bot, nick, botLevel, opts) {
     var stats = ROLE_STATS[role];
-    return {
+    opts = opts || {};
+    var et = opts.enemyType || null;
+    var es = et ? ENEMY_STATS[et] : null;
+    var hp0 = 3;
+    if (es) hp0 = et === 'boss' ? (BOSS_HP[opts.bossKind] || es.hp) : es.hp;
+    var c = {
       id: id, team: team, role: role, bot: !!bot, nick: nick || role,
       botLevel: botLevel == null ? 1 : (botLevel | 0),
-      x: x, y: y, radius: stats.radius, speed: stats.speed,
-      hp: 3, stunTimer: 0, koed: false, koAt: 0, hitAt: -1e9,
+      x: x, y: y, radius: es ? es.radius : stats.radius, speed: es ? es.speed : stats.speed,
+      hp: hp0, maxHp: hp0, stunTimer: 0, koed: false, koAt: 0, hitAt: -1e9,
       moveTarget: { x: x, y: y }, isMoving: false, animPhase: 0,
       charging: false, chargeStart: 0, aimX: x, aimY: y,
       specialCooldown: 0, pendingSpecialThrow: false, armedSpecial: null, reloadUntil: 0,
       // способности: рывок/таран, неуязвимость, замедление, щитовой пузырь Щита
       dashUntil: 0, dashVX: 0, dashVY: 0, dashKind: null, taramHits: null,
       iframeUntil: 0, slowUntil: 0, slowMul: 1, lastDamagedAt: -1e9,
-      bubble: role === 'Щит', bubbleReadyAt: 0,
+      bubble: role === 'Щит' && !es, bubbleReadyAt: 0,
+      // PvE
+      enemyType: et, bossKind: et === 'boss' ? (opts.bossKind || 'golem') : null,
+      bossPhase: et === 'boss' ? 1 : 0, bossTimer: 0,
+      contactDamage: es ? es.contact : 0, knockResist: es ? es.knockResist : 0,
+      scripted: !!(es && es.scripted), contactCdUntil: 0,
+      lives: null, respawnAt: 0,
       ai: { nextDecisionAt: 0, chargeDuration: 0, dodgeUntil: 0, lastAimX: 0, lastAimY: 0 }
+    };
+    return c;
+  }
+
+  function clampInt(v, lo, hi, dflt) {
+    v = (v == null || !isFinite(+v)) ? dflt : (+v | 0);
+    return v < lo ? lo : (v > hi ? hi : v);
+  }
+
+  /** Свежая копия препятствий арены: разрушаемым (hp) урон снимается по месту. */
+  function copyArenaObstacles(arenaIndex) {
+    var out = [], src = ARENAS[arenaIndex].obstacles;
+    for (var o = 0; o < src.length; o++) {
+      var so = src[o], co = {};
+      for (var kk in so) co[kk] = so[kk];
+      if (co.hp != null) co.maxHp = co.hp;
+      out.push(co);
+    }
+    return out;
+  }
+
+  function baseState(seed, rng, gameMode, n, arenaIndex, durationMs) {
+    return {
+      version: SIM_VERSION,
+      seed: seed >>> 0,
+      rng: rng,
+      time: 0,
+      tick: 0,
+      gameMode: gameMode,
+      mode: n,
+      arenaIndex: arenaIndex,
+      arenaObstacles: copyArenaObstacles(arenaIndex),
+      ice: ARENAS[arenaIndex].ice || null,
+      durationMs: durationMs,
+      players: [],
+      snowballs: [],
+      nextSnowballId: 1,
+      nextEnemyId: 1,
+      dynamicObstacles: [],
+      groundFx: [],
+      nextFxId: 1,
+      gameOver: false,
+      winner: null,          // 'A' | 'B' | null (ничья/не закончен)
+      endReason: '',          // '' | 'ko' | 'timeout' | PvE: 'cleared'|'wiped'|'objective'|'expired'
+      pve: null,
+      events: []
     };
   }
 
   /**
    * config = {
-   *   mode: 1..4,                       // размер команды
-   *   arenaIndex: 0..ARENAS.length-1,
-   *   durationMs?: number,              // таймер матча, по умолчанию 5 минут
-   *   players: [{ id, team: 'A'|'B', role, bot: bool, nick? }]  // ровно 2*mode штук
+   *   gameMode?: 'pvp' | 'survival' | 'defense',   // по умолчанию 'pvp'
+   *   mode: 1..4,                        // PvP — размер команды; PvE — размер пати
+   *   arenaIndex: 0..ARENAS.length-1,   // PvP; в PvE арену задаёт уровень кампании
+   *   durationMs?: number,              // PvP — таймер матча (5 мин); PvE игнорируется
+   *   difficulty?: 0|1|2,               // PvE — ручка сложности (боты пати + сдвиг врагов)
+   *   campaign?: bool,                  // PvE — true (кампания) или false (эндлесс сразу)
+   *   pve?: { levels?, waves? },        // PvE — урезание для тестов
+   *   players: [{ id, team, role, bot, nick?, botLevel? }]
    * }
+   * PvP: ровно 2*mode бойцов, команды A/B. PvE: 1..4 бойцов, все — команда A (люди + боты).
    */
   function createMatch(config, seed) {
     var rng = makeRng(seed);
+    var gameMode = config.gameMode || 'pvp';
+    if (GAME_MODES.indexOf(gameMode) < 0) throw new Error('sim: bad gameMode ' + gameMode);
     var n = config.mode;
     if (MODES.indexOf(n) < 0) throw new Error('sim: bad mode ' + n);
+    if (gameMode !== 'pvp') return createPveMatch(config, seed, rng, gameMode, n);
+
     var arenaIndex = config.arenaIndex | 0;
     if (!ARENAS[arenaIndex]) throw new Error('sim: bad arenaIndex ' + arenaIndex);
     if (!config.players || config.players.length !== 2 * n) throw new Error('sim: need ' + (2 * n) + ' players');
 
-    var players = [], countA = 0, countB = 0, ysA = spawnYs(n), ysB = spawnYs(n);
+    var state = baseState(seed, rng, 'pvp', n, arenaIndex, config.durationMs || DEFAULT_DURATION_MS);
+    var players = state.players, countA = 0, countB = 0, ysA = spawnYs(n), ysB = spawnYs(n);
     for (var i = 0; i < config.players.length; i++) {
       var pc = config.players[i];
       if (!ROLE_STATS[pc.role]) throw new Error('sim: bad role ' + pc.role);
@@ -236,38 +358,49 @@
       } else throw new Error('sim: bad team ' + pc.team);
     }
     for (var k = 0; k < players.length; k++) players[k].ai.nextDecisionAt = 500 + rng.next() * 600;
+    return state;
+  }
 
-    // Копия препятствий арены на матч: разрушаемым (hp) урон снимается по месту.
-    var arenaObstacles = [];
-    var srcObs = ARENAS[arenaIndex].obstacles;
-    for (var o = 0; o < srcObs.length; o++) {
-      var so = srcObs[o], co = {};
-      for (var kk in so) co[kk] = so[kk];
-      if (co.hp != null) co.maxHp = co.hp;
-      arenaObstacles.push(co);
+  /** PvE-матч: пати на команде A, враги волн приходят по ходу матча на команду B. */
+  function createPveMatch(config, seed, rng, gameMode, n) {
+    var list = config.players || [];
+    if (!list.length || list.length > 4) throw new Error('sim: pve needs 1..4 players');
+    var campaign = config.campaign !== false;
+    var difficulty = clampInt(config.difficulty, 0, 2, 1);
+    var levelCount = clampInt(config.pve && config.pve.levels, 1, PVE_LEVELS.length, PVE_LEVELS.length);
+    var wavesPerLevel = (config.pve && config.pve.waves) ? clampInt(config.pve.waves, 1, 8, 4) : 0;
+    var startArena = campaign ? PVE_LEVELS[0].arena : PVE_LEVELS[PVE_LEVELS.length - 1].arena;
+
+    var state = baseState(seed, rng, gameMode, n, startArena, PVE_MATCH_CAP_MS);
+    var ys = spawnYs(list.length), spawnX = gameMode === 'defense' ? 180 : 160;
+    for (var i = 0; i < list.length; i++) {
+      var pc = list[i];
+      if (!ROLE_STATS[pc.role]) throw new Error('sim: bad role ' + pc.role);
+      var ch = makeChar(String(pc.id), 'A', pc.role, spawnX, ys[i], pc.bot, pc.nick,
+        pc.bot ? difficulty : (pc.botLevel == null ? difficulty : pc.botLevel));
+      ch.lives = PVE_LIVES;
+      ch.ai.nextDecisionAt = 500 + rng.next() * 600;
+      state.players.push(ch);
     }
-
-    return {
-      version: SIM_VERSION,
-      seed: seed >>> 0,
-      rng: rng,
-      time: 0,
-      tick: 0,
-      mode: n,
-      arenaIndex: arenaIndex,
-      arenaObstacles: arenaObstacles,
-      ice: ARENAS[arenaIndex].ice || null,
-      durationMs: config.durationMs || DEFAULT_DURATION_MS,
-      players: players,
-      snowballs: [],
-      nextSnowballId: 1,
-      dynamicObstacles: [],
-      groundFx: [],
-      nextFxId: 1,
-      gameOver: false,
-      winner: null,          // 'A' | 'B' | null (ничья/не закончен)
-      events: []
+    state.pve = {
+      objective: gameMode,
+      campaign: campaign,
+      difficulty: difficulty,
+      levelCount: levelCount,
+      wavesPerLevel: wavesPerLevel,   // 0 = длина таблицы уровня
+      level: campaign ? 0 : PVE_LEVELS.length,
+      endlessIdx: 0,
+      wave: 0,                        // индекс волны внутри уровня; == waveCount → босс
+      phase: 'between',
+      nextEventAt: PVE_FIRST_WAVE_MS,
+      spawnQueue: [],
+      bossActive: false,
+      wavesSurvived: 0,
+      snowman: gameMode === 'defense'
+        ? { x: 92, y: H / 2, r: SNOWMAN_R, hp: SNOWMAN_HP, maxHp: SNOWMAN_HP }
+        : null
     };
+    return state;
   }
 
   function findPlayer(state, id) {
@@ -492,6 +625,9 @@
   // ============================================================
   // ИИ БОТОВ
   // ============================================================
+  function snowmanTarget(sm) {
+    return { x: sm.x, y: sm.y, hp: 1, koed: false, radius: sm.r, team: 'A', role: 'Танк', _snowman: true };
+  }
   function findNearestEnemy(state, p) {
     var best = null, bestD = Infinity;
     for (var i = 0; i < state.players.length; i++) {
@@ -500,14 +636,20 @@
       var d = Math.hypot(q.x - p.x, q.y - p.y);
       if (d < bestD) { bestD = d; best = q; }
     }
+    // PvE «защита»: рядовой враг команды B идёт на снеговика, пока рядом нет игрока
+    if (state.pve && state.pve.objective === 'defense' && p.team === 'B' && p.enemyType !== 'boss'
+        && state.pve.snowman && state.pve.snowman.hp > 0 && (!best || bestD > DEFENSE_AGGRO_R)) {
+      return snowmanTarget(state.pve.snowman);
+    }
     return best;
   }
-  // Три уровня сложности бота. «Обычный» (1) повторяет прежнее поведение.
-  // Множители: разброс прицела, пауза реакции/решений, вероятность уворота и способности.
+  // Три уровня сложности бота. Множители: разброс прицела, пауза реакции/решений,
+  // вероятность уворота и способности, дрожь силы броска, упреждение.
+  // «Лёгкий» заметно мажет и вяло реагирует; «Сложный» силён, но обыгрываем.
   var BOT_LEVELS = [
-    { aimNoise: 2.4, decision: 1.4,  dodge: 0.28, useAbility: 0.12, chargeJitter: 0.24, lead: 0.4 }, // Лёгкий
-    { aimNoise: 1.0, decision: 1.0,  dodge: 0.9,  useAbility: 0.5,  chargeJitter: 0.12, lead: 1.0 }, // Обычный
-    { aimNoise: 0.32, decision: 0.72, dodge: 1.0, useAbility: 0.9,  chargeJitter: 0.05, lead: 1.15 } // Сложный
+    { aimNoise: 3.8, decision: 2.1,  dodge: 0.10, useAbility: 0.04, chargeJitter: 0.36, lead: 0.15 }, // Лёгкий
+    { aimNoise: 1.35, decision: 1.1, dodge: 0.62, useAbility: 0.34, chargeJitter: 0.16, lead: 0.85 }, // Обычный
+    { aimNoise: 0.62, decision: 0.85, dodge: 0.9, useAbility: 0.7,  chargeJitter: 0.09, lead: 1.05 }  // Сложный
   ];
   function botLvl(p) { return BOT_LEVELS[p.botLevel] || BOT_LEVELS[1]; }
 
@@ -676,24 +818,36 @@
       if (q.team === p.team || !alive(q) || (p.taramHits && p.taramHits[q.id])) continue;
       if (Math.hypot(q.x - p.x, q.y - p.y) <= p.radius + q.radius + 5) {
         var dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy) || 1;
-        var kc = clampToArena(q.x + (dx / d) * TARAM_KNOCK, q.y + (dy / d) * TARAM_KNOCK, q.radius);
+        var kres = 1 - (q.knockResist || 0);
+        var kc = clampToArena(q.x + (dx / d) * TARAM_KNOCK * kres, q.y + (dy / d) * TARAM_KNOCK * kres, q.radius);
         q.x = kc.x; q.y = kc.y;
-        q.stunTimer = Math.max(q.stunTimer, TARAM_STUN);
-        q.charging = false; q.dashUntil = 0;
+        q.stunTimer = Math.max(q.stunTimer, TARAM_STUN * kres);
+        q.charging = false; if (!q.scripted) q.dashUntil = 0;
         if (p.taramHits) p.taramHits[q.id] = 1;
         emit(state, { type: 'knockback', targetId: q.id, x: q.x, y: q.y });
       }
     }
   }
   function moveCharacter(state, obs, p, dt) {
-    if (!alive(p) || p.stunTimer > 0) { p.isMoving = false; p.dashUntil = 0; return; }
-    // Рывок/таран: скриптованное движение вместо хода к цели.
+    var rolling = p.dashKind === 'roll' && state.time < p.dashUntil;
+    if (!alive(p) || (p.stunTimer > 0 && !rolling)) { p.isMoving = false; if (!rolling) p.dashUntil = 0; return; }
+    // Рывок/таран/ком: скриптованное движение вместо хода к цели.
     if (state.time < p.dashUntil) {
       p.isMoving = true;
+      var px0 = p.x, py0 = p.y;
+      var want = Math.hypot(p.dashVX, p.dashVY) * dt;
       var c0 = clampToArena(p.x + p.dashVX * dt, p.y + p.dashVY * dt, p.radius); p.x = c0.x; p.y = c0.y;
       p.animPhase += dt * 12;
       resolveObstacleCollisions(obs, p);
       if (p.dashKind === 'taram') applyTaram(state, p);
+      if (p.dashKind === 'roll' || p.dashKind === 'bossroll') {
+        var moved = Math.hypot(p.x - px0, p.y - py0);
+        if (want > 0.1 && moved < want * 0.5) {
+          // упёрлись в стену/край
+          p.dashUntil = 0;
+          if (p.enemyType === 'roller') { p.koed = true; p.hp = 0; emit(state, { type: 'ko', targetId: p.id, x: p.x, y: p.y }); }
+        }
+      }
       return;
     }
     var dx = p.moveTarget.x - p.x, dy = p.moveTarget.y - p.y, dist = Math.hypot(dx, dy);
@@ -742,6 +896,13 @@
           if (p.team === s.team || !alive(p) || state.time < p.iframeUntil) continue;
           if (Math.hypot(p.x - s.x, p.y - s.y) <= p.radius + s.radius) {
             applyHit(state, p, s.freeze ? 1.0 : 0, s.x, s.y); dead = true; directHit = true; break;
+          }
+        }
+        // защита объекта: вражеский снежок бьёт снеговика
+        if (!dead && s.team === 'B' && state.pve && state.pve.snowman && state.pve.snowman.hp > 0) {
+          var sm = state.pve.snowman;
+          if (Math.hypot(sm.x - s.x, sm.y - s.y) <= sm.r + s.radius) {
+            damageSnowman(state, 1, s.x, s.y); dead = true; directHit = true;
           }
         }
       }
@@ -795,12 +956,386 @@
   }
   function checkWin(state) {
     if (state.gameOver) return;
+    if (state.pve) return;                 // исход PvE — в checkPveWin (зовётся из updatePve)
     var aAlive = teamAlive(state, 'A').length, bAlive = teamAlive(state, 'B').length;
-    if (bAlive === 0 && aAlive === 0) { state.gameOver = true; state.winner = null; }
-    else if (bAlive === 0) { state.gameOver = true; state.winner = 'A'; }
-    else if (aAlive === 0) { state.gameOver = true; state.winner = 'B'; }
-    else if (state.time >= state.durationMs) { state.gameOver = true; state.winner = null; }
+    if (bAlive === 0 && aAlive === 0) { state.gameOver = true; state.winner = null; state.endReason = 'timeout'; }
+    else if (bAlive === 0) { state.gameOver = true; state.winner = 'A'; state.endReason = 'ko'; }
+    else if (aAlive === 0) { state.gameOver = true; state.winner = 'B'; state.endReason = 'ko'; }
+    else if (state.time >= state.durationMs) { state.gameOver = true; state.winner = null; state.endReason = 'timeout'; }
     if (state.gameOver) emit(state, { type: 'matchEnd', winner: state.winner });
+  }
+
+  // ============================================================
+  // PvE: волны, спецтипы врагов, боссы, объект-снеговик
+  // ============================================================
+  function pveWaveCount(state) {
+    var pve = state.pve;
+    if (pve.wavesPerLevel) return pve.wavesPerLevel;
+    return PVE_LEVELS[pve.level].waves.length;
+  }
+  function pveIsCampaignLevel(state) {
+    return state.pve.campaign && state.pve.level < PVE_LEVELS.length;
+  }
+  function pveLevelArena(state) {
+    return pveIsCampaignLevel(state) ? PVE_LEVELS[state.pve.level].arena
+                                     : PVE_LEVELS[PVE_LEVELS.length - 1].arena;
+  }
+  function pveSpawnPoint(state, idx) {
+    var team = teamMembers(state, 'A');
+    var ys = spawnYs(team.length || 1);
+    var x = state.pve.objective === 'defense' ? 180 : 160;
+    return { x: x, y: ys[Math.min(idx, ys.length - 1)] };
+  }
+  function teamMembers(state, team) {
+    var r = [];
+    for (var i = 0; i < state.players.length; i++) if (state.players[i].team === team) r.push(state.players[i]);
+    return r;
+  }
+  function aliveEnemies(state) {
+    var c = 0;
+    for (var i = 0; i < state.players.length; i++) { var p = state.players[i]; if (p.team === 'B' && alive(p)) c++; }
+    return c;
+  }
+  function removeEnemies(state) {
+    for (var i = state.players.length - 1; i >= 0; i--) if (state.players[i].team === 'B') state.players.splice(i, 1);
+    state.snowballs = [];
+    for (var w = state.dynamicObstacles.length - 1; w >= 0; w--) {
+      if (state.dynamicObstacles[w].team === 'B') state.dynamicObstacles.splice(w, 1);
+    }
+  }
+  function pveSwitchArena(state, arenaIndex) {
+    state.arenaIndex = arenaIndex;
+    state.arenaObstacles = copyArenaObstacles(arenaIndex);
+    state.ice = ARENAS[arenaIndex].ice || null;
+    state.dynamicObstacles = [];
+    state.groundFx = [];
+  }
+  function respawnParty(state) {
+    var team = teamMembers(state, 'A');
+    for (var i = 0; i < team.length; i++) {
+      var p = team[i], sp = pveSpawnPoint(state, i);
+      p.hp = 3; p.koed = false; p.stunTimer = 0; p.charging = false; p.lives = PVE_LIVES;
+      p.respawnAt = 0; p.dashUntil = 0; p.armedSpecial = null; p.pendingSpecialThrow = false;
+      p.reloadUntil = 0; p.iframeUntil = 0; p.bubble = p.role === 'Щит';
+      p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y };
+    }
+  }
+  function damageSnowman(state, amount, x, y) {
+    var sm = state.pve && state.pve.snowman;
+    if (!sm || sm.hp <= 0) return;
+    sm.hp -= amount;
+    emit(state, { type: 'objectiveHit', x: x, y: y, hp: Math.max(0, sm.hp) });
+    if (sm.hp <= 0) sm.hp = 0;
+  }
+
+  /** Состав текущей волны с учётом ручки сложности. */
+  function pveCurrentWave(state) {
+    var pve = state.pve;
+    if (pveIsCampaignLevel(state)) {
+      var lvl = PVE_LEVELS[pve.level], cnt = pveWaveCount(state);
+      if (pve.wave >= cnt) return { boss: lvl.boss };
+      var def = lvl.waves[Math.min(pve.wave, lvl.waves.length - 1)];
+      return {
+        types: def.types,
+        botLevel: clampInt(def.botLevel + (pve.difficulty - 1), 0, 2, def.botLevel),
+        spawnMs: def.spawnMs
+      };
+    }
+    // эндлесс: смешанные волны с нарастающим количеством и долей спецтипов
+    var idx = pve.endlessIdx;
+    var total = Math.min(MAX_ENEMIES, 8 + idx * 2);
+    var swarm = Math.min(total - 2, 2 + Math.floor(idx * 0.8));
+    var tank = Math.floor(idx / 2);
+    var roller = idx >= 3 ? Math.floor((idx - 1) / 3) : 0;
+    var core = Math.max(2, total - swarm - tank - roller);
+    return { types: { core: core, swarm: swarm, tank: tank, roller: roller }, botLevel: 2, spawnMs: 3600 };
+  }
+
+  function pveStartWave(state) {
+    var pve = state.pve;
+    pve.phase = 'fighting';
+    pve.spawnQueue = [];
+    pve.bossActive = false;
+    respawnParty(state);
+
+    var w = pveCurrentWave(state), q = [];
+    if (w.boss) {
+      q.push({ enemyType: 'boss', bossKind: w.boss, botLevel: 2, at: 0 });
+      for (var e = 0; e < 3; e++) q.push({ enemyType: 'core', botLevel: pve.difficulty, at: 900 + e * 800 });
+      pve.bossActive = true;
+    } else {
+      var order = [];
+      for (var t in w.types) for (var c = 0; c < w.types[t]; c++) order.push(t);
+      order = shuffle(state.rng, order);
+      var span = order.length ? Math.max(2000, Math.min(4200, order.length * 460)) : 0;
+      for (var k = 0; k < order.length; k++) {
+        var jitter = (state.rng.next() - 0.5) * (span / Math.max(1, order.length));
+        q.push({ enemyType: order[k], botLevel: w.botLevel, at: k * span / Math.max(1, order.length) + jitter });
+      }
+    }
+    for (var j = 0; j < q.length; j++) q[j].spawnAt = state.time + Math.max(0, q[j].at);
+    pve.spawnQueue = q;
+    emit(state, { type: 'waveStart', level: pve.level, wave: pve.wave, boss: w.boss || null });
+  }
+
+  function pveSpawnEnemy(state, spec) {
+    var pve = state.pve, rng = state.rng;
+    var es = ENEMY_STATS[spec.enemyType];
+    var role = es.role === '*' ? ENEMY_CORE_ROLES[Math.floor(rng.next() * ENEMY_CORE_ROLES.length)] : es.role;
+    var y = 90 + rng.next() * (H - 180);
+    var x = PVE_SPAWN_X0 + rng.next() * (PVE_SPAWN_X1 - PVE_SPAWN_X0);
+    var id = 'e' + (state.nextEnemyId++);
+    var nick = spec.enemyType === 'boss' ? bossName(spec.bossKind) : enemyName(spec.enemyType);
+    var ch = makeChar(id, 'B', role, x, y, true, nick, clampInt(spec.botLevel, 0, 2, 1),
+      { enemyType: spec.enemyType, bossKind: spec.bossKind });
+    ch.ai.nextDecisionAt = state.time + 200 + rng.next() * 300;
+    if (ch.scripted) {
+      // ком: катится по прямой к ближайшей цели, живёт до стены/попаданий
+      var tgt = pveEnemyTarget(state, ch) || { x: 120, y: ch.y };
+      var dx = tgt.x - ch.x, dy = tgt.y - ch.y, d = Math.hypot(dx, dy) || 1;
+      ch.dashVX = (dx / d) * es.speed; ch.dashVY = (dy / d) * es.speed;
+      ch.dashUntil = state.time + 999999; ch.dashKind = 'roll';
+    }
+    state.players.push(ch);
+    emit(state, { type: 'enemySpawn', id: id, enemyType: spec.enemyType, x: x, y: y });
+    return ch;
+  }
+  function enemyName(t) {
+    return t === 'swarm' ? 'Рой' : t === 'tank' ? 'Йети' : t === 'roller' ? 'Ком' : 'Снежколёт';
+  }
+  function bossName(k) {
+    return k === 'blizzard' ? 'Вьюга' : k === 'yeti' ? 'Йети-вожак' : 'Снеговик-голем';
+  }
+
+  function updatePve(state) {
+    var pve = state.pve;
+    if (state.gameOver) return;
+
+    // возрождение членов пати, пока есть жизни
+    var team = teamMembers(state, 'A');
+    for (var i = 0; i < team.length; i++) {
+      var p = team[i];
+      if (p.koed && p.respawnAt === 0 && p.lives > 0 && pve.phase === 'fighting') {
+        // только что слёг: списать жизнь
+        p.lives -= 1;
+        if (p.lives > 0) p.respawnAt = state.time + PVE_RESPAWN_MS;
+        emit(state, { type: 'partyDown', id: p.id, lives: p.lives });
+      }
+      if (p.koed && p.respawnAt > 0 && state.time >= p.respawnAt) {
+        var sp = pveSpawnPoint(state, i);
+        p.hp = 3; p.koed = false; p.stunTimer = 0; p.respawnAt = 0; p.iframeUntil = state.time + 1200;
+        p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y }; p.bubble = p.role === 'Щит';
+        emit(state, { type: 'partyRespawn', id: p.id });
+      }
+    }
+
+    if (pve.phase === 'between') {
+      if (state.time >= pve.nextEventAt) pveStartWave(state);
+      checkPveWin(state);
+      return;
+    }
+
+    // fighting: выпускаем врагов из очереди по таймингу и потолку
+    for (var s = pve.spawnQueue.length - 1; s >= 0; s--) {
+      if (aliveEnemies(state) >= MAX_ENEMIES) break;
+      if (state.time >= pve.spawnQueue[s].spawnAt) {
+        pveSpawnEnemy(state, pve.spawnQueue[s]);
+        pve.spawnQueue.splice(s, 1);
+      }
+    }
+
+    // волна зачищена?
+    if (pve.spawnQueue.length === 0 && aliveEnemies(state) === 0) {
+      pve.wavesSurvived += 1;
+      pve.bossActive = false;
+      emit(state, { type: 'waveCleared', level: pve.level, wave: pve.wave });
+      pve.wave += 1;
+      if (pveIsCampaignLevel(state) && pve.wave > pveWaveCount(state)) {
+        // босс уровня повержен
+        if (pve.level + 1 >= pve.levelCount) {
+          pveEnd(state, 'cleared');
+          return;
+        }
+        pve.level += 1; pve.wave = 0;
+        pveSwitchArena(state, pveLevelArena(state));
+        emit(state, { type: 'levelStart', level: pve.level });
+      } else if (!pveIsCampaignLevel(state)) {
+        pve.endlessIdx += 1;
+      }
+      pve.phase = 'between';
+      pve.nextEventAt = state.time + WAVE_BREAK_MS;
+      removeStrayBalls(state);
+    }
+    checkPveWin(state);
+  }
+  function removeStrayBalls(state) { state.snowballs = []; }
+
+  function checkPveWin(state) {
+    var pve = state.pve;
+    if (state.gameOver) return;
+    if (state.time >= state.durationMs) { pveEnd(state, 'expired'); return; }
+    if (pve.objective === 'defense' && pve.snowman && pve.snowman.hp <= 0) { pveFail(state, 'objective'); return; }
+    // вайп: все члены пати слегли и жизней не осталось
+    var anyUp = false, anyLife = false;
+    var team = teamMembers(state, 'A');
+    for (var i = 0; i < team.length; i++) {
+      if (alive(team[i])) anyUp = true;
+      if (team[i].lives > 0) anyLife = true;
+    }
+    if (!anyUp && !anyLife) pveFail(state, 'wiped');
+  }
+  function pveEnd(state, reason) {
+    state.gameOver = true; state.winner = null; state.endReason = reason;
+    emit(state, { type: 'matchEnd', winner: null, reason: reason });
+  }
+  function pveFail(state, reason) {
+    var pve = state.pve;
+    if (pveIsCampaignLevel(state)) {
+      // рестарт текущего уровня с первой волны
+      removeEnemies(state);
+      if (pve.snowman) pve.snowman.hp = pve.snowman.maxHp;
+      pveSwitchArena(state, pveLevelArena(state));
+      respawnParty(state);
+      pve.wave = 0; pve.phase = 'between';
+      pve.nextEventAt = state.time + WAVE_BREAK_MS;
+      pve.spawnQueue = []; pve.bossActive = false;
+      emit(state, { type: 'levelRestart', level: pve.level, reason: reason });
+    } else {
+      pveEnd(state, reason);
+    }
+  }
+
+  // --- ИИ спецтипов и боссов ---
+  // Цель врага: findNearestEnemy уже знает про снеговика в режиме «защита».
+  function pveEnemyTarget(state, p) { return findNearestEnemy(state, p); }
+  function updateSwarmAI(state, obs, p) {
+    if (!alive(p) || p.stunTimer > 0) { p.isMoving = false; return; }
+    var t = pveEnemyTarget(state, p);
+    if (!t) return;
+    p.moveTarget = clampToArena(t.x, t.y, p.radius);
+    p.aimX = t.x; p.aimY = t.y;
+  }
+  function updateBossAI(state, obs, p) {
+    if (!alive(p)) return;
+    var now = state.time, rng = state.rng;
+    var half = p.maxHp / 2;
+    if (p.bossPhase === 1 && p.hp <= half) {
+      p.bossPhase = 2;
+      if (p.bossKind === 'yeti') { p.speed *= 1.3; p.contactDamage = 1; }
+      emit(state, { type: 'bossPhase', id: p.id, phase: 2, kind: p.bossKind });
+    }
+    if (p.stunTimer > 0) { p.charging = false; return; }
+    var t = findNearestEnemy(state, p);
+    if (!t && state.pve.objective === 'defense' && state.pve.snowman && state.pve.snowman.hp > 0) {
+      t = snowmanTarget(state.pve.snowman);
+    }
+    if (!t) return;
+    var dist = Math.hypot(t.x - p.x, t.y - p.y);
+
+    // движение: держим среднюю дистанцию
+    if (now >= p.ai.nextDecisionAt && now >= p.dashUntil) {
+      if (dist > 320) {
+        var tw = Math.atan2(t.y - p.y, t.x - p.x);
+        p.moveTarget = clampToArena(p.x + Math.cos(tw) * 120, p.y + Math.sin(tw) * 120, p.radius);
+      } else if (dist < 150) {
+        var aw = Math.atan2(p.y - t.y, p.x - t.x);
+        p.moveTarget = clampToArena(p.x + Math.cos(aw) * 90, p.y + Math.sin(aw) * 90, p.radius);
+      } else {
+        var pr = Math.atan2(t.y - p.y, t.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
+        p.moveTarget = clampToArena(p.x + Math.cos(pr) * 80, p.y + Math.sin(pr) * 80, p.radius);
+      }
+      p.ai.nextDecisionAt = now + 520;
+    }
+
+    // атаки по таймеру фазы
+    if (now < p.bossTimer) return;
+    if (p.charging) return;
+    var cadence = p.bossPhase === 2 ? 700 : 1050;
+
+    if (p.bossKind === 'golem') {
+      // веер из 3 снежков
+      bossSpreadThrow(state, p, t, 3, 0.16);
+      if (p.bossPhase === 2 && rng.next() < 0.4 && now >= p.dashUntil) {
+        var d = Math.hypot(t.x - p.x, t.y - p.y) || 1;
+        p.dashVX = (t.x - p.x) / d * 320; p.dashVY = (t.y - p.y) / d * 320;
+        p.dashUntil = now + 520; p.dashKind = 'bossroll';
+        emit(state, { type: 'dash', playerId: p.id, kind: 'bossroll' });
+      }
+    } else if (p.bossKind === 'blizzard') {
+      p.armedSpecial = 'frost';
+      bossSpreadThrow(state, p, t, p.bossPhase === 2 ? 2 : 1, 0.12);
+      if (rng.next() < (p.bossPhase === 2 ? 0.5 : 0.3)) bossIceWall(state, p, t);
+      if (p.bossPhase === 2 && aliveEnemies(state) < MAX_ENEMIES && rng.next() < 0.6) {
+        pveSpawnEnemy(state, { enemyType: 'swarm', botLevel: 2 });
+      }
+    } else { // yeti
+      if (dist > 110 && dist < TARAM_DIST + 90 && now >= p.dashUntil) {
+        var dd = Math.hypot(t.x - p.x, t.y - p.y) || 1;
+        p.dashVX = (t.x - p.x) / dd * (TARAM_DIST / (TARAM_MS / 1000));
+        p.dashVY = (t.y - p.y) / dd * (TARAM_DIST / (TARAM_MS / 1000));
+        p.dashUntil = now + TARAM_MS; p.dashKind = 'taram'; p.taramHits = {};
+        emit(state, { type: 'dash', playerId: p.id, kind: 'taram' });
+      } else {
+        p.armedSpecial = 'frost';
+        bossSpreadThrow(state, p, t, 1, 0);
+      }
+      if (p.bossPhase === 2 && !p._summoned) {
+        p._summoned = true;
+        for (var s2 = 0; s2 < 2 && aliveEnemies(state) < MAX_ENEMIES; s2++) {
+          pveSpawnEnemy(state, { enemyType: 'tank', botLevel: 2 });
+        }
+      }
+    }
+    p.bossTimer = now + cadence;
+  }
+  function bossSpreadThrow(state, p, t, count, spreadRad) {
+    var base = Math.atan2(t.y - p.y, t.x - p.x);
+    var start = -(count - 1) / 2 * spreadRad;
+    for (var i = 0; i < count; i++) {
+      var a = base + start + i * spreadRad;
+      throwSnowball(state, p, p.x + Math.cos(a) * 200, p.y + Math.sin(a) * 200, 0.85);
+    }
+    emit(state, { type: 'chargeStart', playerId: p.id });
+  }
+  function bossIceWall(state, p, t) {
+    var dx = t.x - p.x, dy = t.y - p.y, d = Math.hypot(dx, dy) || 1;
+    state.dynamicObstacles.push({ type: 'rect', x: p.x + dx / d * 70, y: p.y + dy / d * 70,
+      w: 70, h: 16, height: 22, expiresAt: state.time + WALL_LIFETIME_MS, team: 'B',
+      hp: WALL_HP, maxHp: WALL_HP, mat: 'ice' });
+    emit(state, { type: 'wallPlaced', playerId: p.id });
+  }
+
+  /** Контактный урон: враги с флагом contactDamage бьют пати и снеговика касанием. */
+  function updateContactDamage(state) {
+    if (!state.pve) return;
+    for (var i = 0; i < state.players.length; i++) {
+      var e = state.players[i];
+      if (e.team !== 'B' || !alive(e) || !e.contactDamage || state.time < e.contactCdUntil) continue;
+      var hitSomething = false;
+      for (var k = 0; k < state.players.length; k++) {
+        var q = state.players[k];
+        if (q.team !== 'A' || !alive(q) || state.time < q.iframeUntil) continue;
+        if (Math.hypot(q.x - e.x, q.y - e.y) <= e.radius + q.radius) {
+          var dx = q.x - e.x, dy = q.y - e.y, d = Math.hypot(dx, dy) || 1;
+          var kc = clampToArena(q.x + dx / d * CONTACT_KNOCK, q.y + dy / d * CONTACT_KNOCK, q.radius);
+          q.x = kc.x; q.y = kc.y;
+          applyHit(state, q, 0, e.x, e.y);
+          emit(state, { type: 'contactHit', id: e.id, targetId: q.id, x: e.x, y: e.y });
+          hitSomething = true;
+          break;
+        }
+      }
+      if (!hitSomething && state.pve.snowman && state.pve.snowman.hp > 0) {
+        var sm = state.pve.snowman;
+        if (Math.hypot(sm.x - e.x, sm.y - e.y) <= e.radius + sm.r) {
+          damageSnowman(state, 1, e.x, e.y); hitSomething = true;
+        }
+      }
+      if (hitSomething) {
+        e.contactCdUntil = state.time + CONTACT_DAMAGE_CD;
+        if (e.enemyType === 'roller') { e.koed = true; e.hp = 0; e.dashUntil = 0; emit(state, { type: 'ko', targetId: e.id, x: e.x, y: e.y }); }
+      }
+    }
   }
 
   /**
@@ -823,10 +1358,15 @@
       for (var i = 0; i < state.players.length; i++) {
         var p = state.players[i];
         updateTimers(state, p, sdt);
-        if (p.bot) updateAI(state, obs, p);
+        if (p.bot) {
+          if (p.enemyType === 'boss') updateBossAI(state, obs, p);
+          else if (p.enemyType === 'swarm' || p.enemyType === 'roller') updateSwarmAI(state, obs, p);
+          else updateAI(state, obs, p);
+        }
         moveCharacter(state, obs, p, sdt);
       }
       updateSnowballs(state, obs, sdt);
+      if (state.pve) { updateContactDamage(state); updatePve(state); }
       checkWin(state);
     }
     return state.events;
@@ -840,7 +1380,7 @@
     var players = [];
     for (var i = 0; i < state.players.length; i++) {
       var p = state.players[i];
-      players.push({
+      var pe = {
         id: p.id, team: p.team, role: p.role, nick: p.nick, bot: p.bot,
         x: round1(p.x), y: round1(p.y), hp: p.hp,
         stun: round1(p.stunTimer), koed: p.koed, koAt: p.koAt, hitAt: p.hitAt,
@@ -856,7 +1396,12 @@
         slow: speedMul(state, p) < 0.999,
         // перезарядка выстрела: доля 0..1 (1 = только бросил, 0 = готов)
         rl: p.reloadUntil > state.time ? round1((p.reloadUntil - state.time) / (RELOAD_MS[p.role] || 900) * 10) / 10 : 0
-      });
+      };
+      // PvE: жизни пати, тип врага, фаза босса
+      if (p.lives != null) pe.lives = p.lives;
+      if (p.enemyType) { pe.et = p.enemyType; pe.mhp = p.maxHp; }
+      if (p.enemyType === 'boss') { pe.bk = p.bossKind; pe.bph = p.bossPhase; }
+      players.push(pe);
     }
     var balls = [];
     for (var k = 0; k < state.snowballs.length; k++) {
@@ -884,20 +1429,49 @@
       fx.push({ id: q.id, kind: q.kind, x: q.x, y: q.y, r: q.r, team: q.team,
         ttl: Math.max(0, q.expiresAt - state.time), life: FROST_MS });
     }
-    return {
+    var snap = {
       v: SIM_VERSION, tick: state.tick, time: Math.round(state.time),
       timeLeft: Math.max(0, Math.round(state.durationMs - state.time)),
       mode: state.mode, arena: state.arenaIndex, ice: state.ice || null,
-      over: state.gameOver, winner: state.winner,
+      gameMode: state.gameMode, over: state.gameOver, winner: state.winner,
+      reason: state.endReason || null,
       players: players, balls: balls, walls: walls, destr: destr, fx: fx
     };
+    if (state.pve) snap.pve = pveSnapshot(state);
+    return snap;
+  }
+  function pveSnapshot(state) {
+    var pve = state.pve, enemiesLeft = pve.spawnQueue.length, bossHp = 0, bossMax = 0;
+    for (var i = 0; i < state.players.length; i++) {
+      var p = state.players[i];
+      if (p.team === 'B' && alive(p)) {
+        enemiesLeft++;
+        if (p.enemyType === 'boss') { bossHp = p.hp; bossMax = p.maxHp; }
+      }
+    }
+    var campaignLvl = pve.campaign && pve.level < PVE_LEVELS.length;
+    var o = {
+      objective: pve.objective, campaign: pve.campaign, endless: !campaignLvl,
+      level: campaignLvl ? pve.level : PVE_LEVELS.length, levelCount: pve.levelCount,
+      wave: campaignLvl ? pve.wave : pve.endlessIdx,
+      waveCount: campaignLvl ? pveWaveCount(state) + 1 : 0,
+      enemiesLeft: enemiesLeft, phase: pve.phase,
+      nextInMs: pve.phase === 'between' ? Math.max(0, Math.round(pve.nextEventAt - state.time)) : 0,
+      wavesSurvived: pve.wavesSurvived, bossHp: round1(bossHp), bossMax: bossMax
+    };
+    if (pve.snowman) {
+      o.objHp = Math.max(0, Math.round(pve.snowman.hp)); o.objMaxHp = pve.snowman.maxHp;
+      o.objX = pve.snowman.x; o.objY = pve.snowman.y; o.objR = pve.snowman.r;
+    }
+    return o;
   }
 
   return {
     SIM_VERSION: SIM_VERSION,
     W: W, H: H, GRAVITY: GRAVITY, CHARGE_FULL_MS: CHARGE_FULL_MS, KO_ANIM_MS: KO_ANIM_MS,
     ARENAS: ARENAS, ROLE_STATS: ROLE_STATS, SPECIALS: SPECIALS, ABILITIES: ABILITIES,
-    RELOAD_MS: RELOAD_MS, MODES: MODES,
+    RELOAD_MS: RELOAD_MS, MODES: MODES, GAME_MODES: GAME_MODES,
+    PVE_LEVEL_COUNT: PVE_LEVELS.length,
     BOT_LEVEL_NAMES: ['Лёгкий', 'Обычный', 'Сложный'],
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,
     makeRng: makeRng, shuffle: shuffle,
@@ -908,6 +1482,7 @@
     step: step,
     snapshot: snapshot,
     isOver: function (state) { return state.gameOver; },
-    winner: function (state) { return state.winner; }
+    winner: function (state) { return state.winner; },
+    reason: function (state) { return state.endReason || ''; }
   };
 });

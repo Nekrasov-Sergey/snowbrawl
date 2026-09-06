@@ -25,6 +25,9 @@ type Room struct {
 	HostIP     string
 	Mode       int
 	Arena      int
+	GameMode   string // "" | "pvp" | "survival" | "defense"
+	Campaign   bool   // PvE: кампания (иначе эндлесс)
+	Difficulty int    // PvE: 0..2
 	Members    []*Member
 	InMatch    bool
 	MatchID    string
@@ -32,6 +35,9 @@ type Room struct {
 	CreatedAt  time.Time
 	EmptySince time.Time // с какого момента комната пуста (нулевое — не пуста)
 }
+
+// IsPvE — комната играет кооперативный PvE (не PvP).
+func (r *Room) IsPvE() bool { return r.GameMode != "" && r.GameMode != "pvp" }
 
 // Ошибки операций с комнатой.
 var (
@@ -47,14 +53,21 @@ var (
 )
 
 // New создаёт комнату с хостом внутри.
-func New(code, hostID, hostIP string, mode, arena int, now time.Time) *Room {
-	r := &Room{Code: code, HostID: hostID, HostIP: hostIP, Mode: mode, Arena: arena, CreatedAt: now}
+func New(code, hostID, hostIP string, mode, arena int, gameMode string, campaign bool, difficulty int, now time.Time) *Room {
+	r := &Room{Code: code, HostID: hostID, HostIP: hostIP, Mode: mode, Arena: arena,
+		GameMode: gameMode, Campaign: campaign, Difficulty: difficulty, CreatedAt: now}
 	r.Members = append(r.Members, &Member{ID: hostID, Team: "A", Index: 0})
 	return r
 }
 
-// Capacity — число мест в комнате.
-func (r *Room) Capacity() int { return 2 * r.Mode }
+// Capacity — число мест в комнате: PvE — пати из Mode игроков (только команда A),
+// PvP — две команды по Mode.
+func (r *Room) Capacity() int {
+	if r.IsPvE() {
+		return r.Mode
+	}
+	return 2 * r.Mode
+}
 
 // Member возвращает участника по id.
 func (r *Room) Member(id string) *Member {
@@ -109,7 +122,13 @@ func (r *Room) SetSlot(id, team string, index int) error {
 	if m == nil {
 		return ErrNotMember
 	}
-	if (team != "A" && team != "B") || index < 0 || index >= r.Mode {
+	if team != "A" && team != "B" {
+		return ErrBadSlot
+	}
+	if r.IsPvE() && team != "A" {
+		return ErrBadSlot
+	}
+	if index < 0 || index >= r.Mode {
 		return ErrBadSlot
 	}
 	if o := r.slotOwner(team, index); o != nil && o != m {
@@ -129,27 +148,33 @@ func (r *Room) SetRole(id, role string) error {
 	return nil
 }
 
-// SetConfig меняет режим и арену (только хост, не в матче).
-func (r *Room) SetConfig(hostID string, mode, arena, arenaCount int) error {
+// SetConfig меняет режим игры, размер, арену и настройки PvE (только хост, не в матче).
+func (r *Room) SetConfig(hostID string, cfg Config, arenaCount int) error {
 	if hostID != r.HostID {
 		return ErrNotHost
 	}
 	if r.InMatch {
 		return ErrInMatch
 	}
-	if mode < 1 || mode > 4 {
+	if cfg.Mode < 1 || cfg.Mode > 4 {
 		return ErrBadMode
 	}
-	if arena < 0 || arena >= arenaCount {
+	if cfg.Arena < 0 || cfg.Arena >= arenaCount {
 		return ErrBadArena
 	}
-	if len(r.Members) > 2*mode {
+	pve := cfg.GameMode != "" && cfg.GameMode != "pvp"
+	maxN := 2 * cfg.Mode
+	if pve {
+		maxN = cfg.Mode
+	}
+	if len(r.Members) > maxN {
 		return ErrTooMany
 	}
-	r.Mode, r.Arena = mode, arena
-	// Слоты за пределами нового режима освобождаем и расставляем заново.
+	r.Mode, r.Arena = cfg.Mode, cfg.Arena
+	r.GameMode, r.Campaign, r.Difficulty = cfg.GameMode, cfg.Campaign, cfg.Difficulty
+	// Слоты за пределами нового режима (или команда B в PvE) освобождаем и расставляем заново.
 	for _, m := range r.Members {
-		if m.Index >= mode {
+		if m.Index >= cfg.Mode || (pve && m.Team == "B") {
 			m.Team, m.Index = "", 0
 		}
 	}
@@ -159,6 +184,15 @@ func (r *Room) SetConfig(hostID string, mode, arena, arenaCount int) error {
 		}
 	}
 	return nil
+}
+
+// Config — параметры комнаты, задаваемые хостом.
+type Config struct {
+	Mode       int
+	Arena      int
+	GameMode   string
+	Campaign   bool
+	Difficulty int
 }
 
 // Kick выгоняет игрока (только хост, не себя).
@@ -195,6 +229,7 @@ func (r *Room) slotOwner(team string, index int) *Member {
 }
 
 // autoPlace ставит в первый свободный слот, чередуя команды для баланса.
+// В PvE вся пати — команда A.
 func (r *Room) autoPlace(m *Member) {
 	countA, countB := 0, 0
 	for _, o := range r.Members {
@@ -209,7 +244,9 @@ func (r *Room) autoPlace(m *Member) {
 		}
 	}
 	order := []string{"A", "B"}
-	if countB < countA {
+	if r.IsPvE() {
+		order = []string{"A"}
+	} else if countB < countA {
 		order = []string{"B", "A"}
 	}
 	for _, team := range order {

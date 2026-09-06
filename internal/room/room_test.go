@@ -9,7 +9,7 @@ import (
 
 func TestJoinLeaveAndHostTransfer(t *testing.T) {
 	now := time.Now()
-	r := New("1234", "h", "1.1.1.1", 2, 0, now)
+	r := New("1234", "h", "1.1.1.1", 2, 0, "pvp", false, 0, now)
 	if r.Capacity() != 4 {
 		t.Fatalf("capacity = %d", r.Capacity())
 	}
@@ -45,7 +45,7 @@ func TestJoinLeaveAndHostTransfer(t *testing.T) {
 
 func TestSlotsAndConfig(t *testing.T) {
 	now := time.Now()
-	r := New("1234", "h", "1.1.1.1", 3, 0, now)
+	r := New("1234", "h", "1.1.1.1", 3, 0, "pvp", false, 0, now)
 	_ = r.Join("a")
 	if err := r.SetSlot("a", "A", 0); !errors.Is(err, ErrSlotTaken) {
 		t.Fatalf("expected ErrSlotTaken, got %v", err)
@@ -56,14 +56,14 @@ func TestSlotsAndConfig(t *testing.T) {
 	if err := r.SetSlot("a", "C", 0); !errors.Is(err, ErrBadSlot) {
 		t.Fatalf("expected ErrBadSlot, got %v", err)
 	}
-	if err := r.SetConfig("a", 1, 0, 3); !errors.Is(err, ErrNotHost) {
+	if err := r.SetConfig("a", Config{Mode: 1, Arena: 0, GameMode: "pvp"}, 3); !errors.Is(err, ErrNotHost) {
 		t.Fatalf("expected ErrNotHost, got %v", err)
 	}
-	if err := r.SetConfig("h", 1, 5, 3); !errors.Is(err, ErrBadArena) {
+	if err := r.SetConfig("h", Config{Mode: 1, Arena: 5, GameMode: "pvp"}, 3); !errors.Is(err, ErrBadArena) {
 		t.Fatalf("expected ErrBadArena, got %v", err)
 	}
 	// Уменьшаем режим до 1×1: a сидел в A2, должен быть переставлен в свободный слот B0.
-	if err := r.SetConfig("h", 1, 1, 3); err != nil {
+	if err := r.SetConfig("h", Config{Mode: 1, Arena: 1, GameMode: "pvp"}, 3); err != nil {
 		t.Fatal(err)
 	}
 	a := r.Member("a")
@@ -82,6 +82,37 @@ func TestSlotsAndConfig(t *testing.T) {
 	}
 	if r.Member("a") != nil {
 		t.Fatal("a must be kicked")
+	}
+}
+
+func TestPveRoomCapacityAndPlacement(t *testing.T) {
+	now := time.Now()
+	r := New("1234", "h", "1.1.1.1", 4, 0, "survival", true, 2, now)
+	if !r.IsPvE() || r.Capacity() != 4 { // пати из 4, только команда A
+		t.Fatalf("pve capacity = %d, isPvE = %v", r.Capacity(), r.IsPvE())
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		if err := r.Join(id); err != nil {
+			t.Fatalf("join %s: %v", id, err)
+		}
+	}
+	if err := r.Join("d"); !errors.Is(err, ErrFull) {
+		t.Fatalf("5th member into party of 4 must fail, got %v", err)
+	}
+	for _, m := range r.Members {
+		if m.Team != "A" {
+			t.Fatalf("pve member %s placed on team %q, want A", m.ID, m.Team)
+		}
+	}
+	if err := r.SetSlot("a", "B", 0); !errors.Is(err, ErrBadSlot) {
+		t.Fatalf("team B slot must be rejected in pve, got %v", err)
+	}
+	// Переключение обратно в PvP освобождает лишние слоты и раскидывает по A/B.
+	if err := r.SetConfig("h", Config{Mode: 2, Arena: 0, GameMode: "pvp"}, 5); err != nil {
+		t.Fatalf("switch to pvp 2x2: %v", err)
+	}
+	if r.IsPvE() || r.Capacity() != 4 {
+		t.Fatalf("after switch: isPvE=%v cap=%d", r.IsPvE(), r.Capacity())
 	}
 }
 

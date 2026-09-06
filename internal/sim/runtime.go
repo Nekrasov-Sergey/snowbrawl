@@ -14,10 +14,11 @@ import (
 
 // Program — скомпилированный sim.js, разделяемый всеми матчами (компиляция один раз).
 type Program struct {
-	prog    *goja.Program
-	version string
-	arenas  int
-	roles   []string
+	prog      *goja.Program
+	version   string
+	arenas    int
+	roles     []string
+	gameModes []string
 }
 
 // Compile компилирует исходник sim.js и проверяет, что модуль экспортирует нужный контракт.
@@ -37,7 +38,7 @@ func Compile(src []byte) (*Program, error) {
 		return nil, errors.New("sim.js: global SnowBrawlSim is not defined")
 	}
 	obj := simObj.ToObject(vm)
-	for _, fn := range []string{"createMatch", "applyInput", "step", "snapshot", "setBot"} {
+	for _, fn := range []string{"createMatch", "applyInput", "step", "snapshot", "setBot", "reason"} {
 		if _, ok := goja.AssertFunction(obj.Get(fn)); !ok {
 			return nil, errors.Errorf("sim.js: export %q is not a function", fn)
 		}
@@ -53,8 +54,15 @@ func Compile(src []byte) (*Program, error) {
 		}
 		p.roles = list
 	}
-	if p.arenas == 0 || len(p.roles) == 0 {
-		return nil, errors.New("sim.js: ARENAS or ALL_ROLES is empty")
+	if gm := obj.Get("GAME_MODES"); gm != nil && !goja.IsUndefined(gm) {
+		var list []string
+		if err := vm.ExportTo(gm, &list); err != nil {
+			return nil, errors.Wrap(err, "sim.js: GAME_MODES")
+		}
+		p.gameModes = list
+	}
+	if p.arenas == 0 || len(p.roles) == 0 || len(p.gameModes) == 0 {
+		return nil, errors.New("sim.js: ARENAS, ALL_ROLES or GAME_MODES is empty")
 	}
 	return p, nil
 }
@@ -78,6 +86,19 @@ func (p *Program) HasRole(role string) bool {
 	return false
 }
 
+// GameModes возвращает список режимов игры (pvp, survival, defense).
+func (p *Program) GameModes() []string { return append([]string(nil), p.gameModes...) }
+
+// HasGameMode проверяет, что режим известен модулю.
+func (p *Program) HasGameMode(mode string) bool {
+	for _, m := range p.gameModes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Program) newVM() (*goja.Runtime, error) {
 	vm := goja.New()
 	vm.SetFieldNameMapper(goja.TagFieldNameMapper("json", true))
@@ -89,18 +110,29 @@ func (p *Program) newVM() (*goja.Runtime, error) {
 
 // PlayerConfig — участник матча в конфигурации sim.js.
 type PlayerConfig struct {
-	ID   string `json:"id"`
-	Team string `json:"team"`
-	Role string `json:"role"`
-	Bot  bool   `json:"bot"`
-	Nick string `json:"nick,omitempty"`
+	ID       string `json:"id"`
+	Team     string `json:"team"`
+	Role     string `json:"role"`
+	Bot      bool   `json:"bot"`
+	Nick     string `json:"nick,omitempty"`
+	BotLevel *int   `json:"botLevel,omitempty"`
+}
+
+// PveConfig — урезание PvE-кампании (только для тестов).
+type PveConfig struct {
+	Levels int `json:"levels,omitempty"`
+	Waves  int `json:"waves,omitempty"`
 }
 
 // MatchConfig — конфигурация матча для createMatch.
 type MatchConfig struct {
+	GameMode   string         `json:"gameMode,omitempty"`
 	Mode       int            `json:"mode"`
 	ArenaIndex int            `json:"arenaIndex"`
 	DurationMs int64          `json:"durationMs,omitempty"`
+	Difficulty int            `json:"difficulty,omitempty"`
+	Campaign   *bool          `json:"campaign,omitempty"`
+	Pve        *PveConfig     `json:"pve,omitempty"`
 	Players    []PlayerConfig `json:"players"`
 }
 
@@ -114,6 +146,7 @@ type Match struct {
 	setBot     goja.Callable
 	isOver     goja.Callable
 	winner     goja.Callable
+	reason     goja.Callable
 	stringify  goja.Callable
 	parse      goja.Callable
 }
@@ -139,7 +172,7 @@ func (p *Program) NewMatch(cfg MatchConfig, seed uint32) (*Match, error) {
 	}
 	for name, dst := range map[string]*goja.Callable{
 		"applyInput": &m.applyInput, "step": &m.step, "snapshot": &m.snapshot,
-		"setBot": &m.setBot, "isOver": &m.isOver, "winner": &m.winner,
+		"setBot": &m.setBot, "isOver": &m.isOver, "winner": &m.winner, "reason": &m.reason,
 	} {
 		fn, err := get(name)
 		if err != nil {
@@ -223,6 +256,19 @@ func (m *Match) IsOver() bool {
 // Winner возвращает "A", "B" или "" (ничья / не закончен).
 func (m *Match) Winner() string {
 	v, err := m.winner(goja.Undefined(), m.state)
+	if err != nil || v == nil || goja.IsNull(v) || goja.IsUndefined(v) {
+		return ""
+	}
+	return v.String()
+}
+
+// Reason возвращает причину завершения из симуляции:
+// "" | "ko" | "timeout" (PvP) | "cleared" | "wiped" | "objective" | "expired" (PvE).
+func (m *Match) Reason() string {
+	if m.reason == nil {
+		return ""
+	}
+	v, err := m.reason(goja.Undefined(), m.state)
 	if err != nil || v == nil || goja.IsNull(v) || goja.IsUndefined(v) {
 		return ""
 	}
