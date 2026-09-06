@@ -10,7 +10,7 @@
 #   1. Включает дренаж на работающем сервере: новые матчи не стартуют, игроки видят баннер.
 #   2. Ждёт, пока текущие матчи закончатся (не дольше DRAIN_TIMEOUT секунд, по умолчанию 180).
 #   3. Скачивает новый образ и перезапускает контейнеры.
-#   4. Проверяет /healthz.
+#   4. Проверяет /healthz; если сервер не поднялся — возвращает предыдущий образ.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -54,18 +54,49 @@ else
   echo "==> Сервер не отвечает, дренаж пропущен"
 fi
 
+# Образ, который работает прямо сейчас: если новая сборка не поднимется, вернём его.
+PREV_IMAGE=""
+CID=$(docker compose "${COMPOSE_FILES[@]}" "${PROFILE[@]}" ps -q server 2>/dev/null | head -1 || true)
+if [[ -n "$CID" ]]; then
+  PREV_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CID" 2>/dev/null || true)
+fi
+
 echo "==> Скачиваю образ и перезапускаю"
 docker compose "${COMPOSE_FILES[@]}" "${PROFILE[@]}" pull
 docker compose "${COMPOSE_FILES[@]}" "${PROFILE[@]}" up -d --remove-orphans
 
+wait_healthy() {
+  for _ in $(seq 1 20); do
+    if out=$(curl -fsS "$BASE_URL/healthz" 2>/dev/null); then
+      echo "$out"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 echo "==> Проверяю здоровье"
-for _ in $(seq 1 20); do
-  if out=$(curl -fsS "$BASE_URL/healthz" 2>/dev/null); then
-    echo "==> OK: $out"
-    docker image prune -f >/dev/null 2>&1 || true
-    exit 0
+if out=$(wait_healthy); then
+  echo "==> OK: $out"
+  docker image prune -f >/dev/null 2>&1 || true
+  exit 0
+fi
+
+# Новая сборка не отвечает. Контейнер уже заменён, поэтому без возврата игра лежит до следующего
+# успешного деплоя. Поднимаем обратно предыдущий образ и всё равно выходим с ошибкой, чтобы шаг
+# деплоя в Actions остался красным.
+echo "!!! Сервер не поднялся на $SNOWBRAWL_IMAGE" >&2
+if [[ -n "$PREV_IMAGE" && "$PREV_IMAGE" != "$SNOWBRAWL_IMAGE" ]]; then
+  echo "!!! Возвращаю предыдущий образ: $PREV_IMAGE" >&2
+  export SNOWBRAWL_IMAGE="$PREV_IMAGE"
+  docker compose "${COMPOSE_FILES[@]}" "${PROFILE[@]}" up -d --remove-orphans
+  if out=$(wait_healthy); then
+    echo "!!! Откат выполнен, игра работает на прежней версии: $out" >&2
+  else
+    echo "!!! Откат не помог, смотрите: docker compose logs server" >&2
   fi
-  sleep 1
-done
-echo "!!! Сервер не поднялся, смотрите: docker compose logs server" >&2
+else
+  echo "!!! Предыдущий образ неизвестен, смотрите: docker compose logs server" >&2
+fi
 exit 1
