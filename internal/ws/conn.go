@@ -24,12 +24,20 @@ type Handler interface {
 	OnClose(c *Conn)
 }
 
+// Значения по умолчанию для heartbeat.
+const (
+	defaultPingPeriod  = 25 * time.Second // как часто пинговать простаивающее соединение
+	defaultPongTimeout = 10 * time.Second // столько ждём pong, иначе считаем соединение мёртвым
+)
+
 // Options — параметры сервера соединений.
 type Options struct {
-	MaxConns   int
-	MsgRate    int  // сообщений в секунду на соединение
-	TrustProxy bool // брать IP из X-Forwarded-For
-	Log        zerolog.Logger
+	MaxConns    int
+	MsgRate     int           // сообщений в секунду на соединение
+	TrustProxy  bool          // брать IP из X-Forwarded-For
+	PingPeriod  time.Duration // heartbeat: период пинга (0 — значение по умолчанию)
+	PongTimeout time.Duration // сколько ждать pong на пинг (0 — значение по умолчанию)
+	Log         zerolog.Logger
 }
 
 // Server принимает WebSocket-соединения и раздаёт их Handler-у.
@@ -45,6 +53,12 @@ type Server struct {
 func NewServer(opts Options, h Handler) *Server {
 	if opts.MsgRate <= 0 {
 		opts.MsgRate = 30
+	}
+	if opts.PingPeriod <= 0 {
+		opts.PingPeriod = defaultPingPeriod
+	}
+	if opts.PongTimeout <= 0 {
+		opts.PongTimeout = defaultPongTimeout
 	}
 	return &Server{opts: opts, handler: h}
 }
@@ -85,7 +99,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer s.wg.Done()
 		defer s.conns.Add(-1)
-		c.run(s.handler, s.opts.Log)
+		c.run(s.handler, s.opts.Log, s.opts.PingPeriod, s.opts.PongTimeout)
 	}()
 }
 
@@ -101,6 +115,7 @@ type Conn struct {
 	closed    chan struct{}
 	closeCode websocket.StatusCode
 	closeText string
+	closeHard bool // не ждать close-handshake: собеседник уже не отвечает
 
 	// Session — произвольные данные владельца (hub хранит здесь ссылку на игрока).
 	Session any
@@ -128,6 +143,15 @@ func (c *Conn) Close(code websocket.StatusCode, reason string) {
 	})
 }
 
+// CloseNow закрывает соединение, не дожидаясь ответного close-фрейма. Для случаев, когда
+// собеседник заведомо молчит (не ответил на ping): обычный Close ждал бы его несколько секунд.
+func (c *Conn) CloseNow(reason string) {
+	c.closeOnce.Do(func() {
+		c.closeCode, c.closeText, c.closeHard = websocket.StatusGoingAway, reason, true
+		close(c.closed)
+	})
+}
+
 // Closed сообщает, закрыто ли соединение.
 func (c *Conn) Closed() bool {
 	select {
@@ -138,7 +162,7 @@ func (c *Conn) Closed() bool {
 	}
 }
 
-func (c *Conn) run(h Handler, log zerolog.Logger) {
+func (c *Conn) run(h Handler, log zerolog.Logger, pingPeriod, pongTimeout time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -178,6 +202,29 @@ func (c *Conn) run(h Handler, log zerolog.Logger) {
 		}
 	}()
 
+	// Heartbeat. В меню и лобби по сокету не идёт ни байта, а простаивающее TCP-соединение
+	// тихо закрывает NAT провайдера или мобильной сети: сервер продолжает считать игрока
+	// подключённым, а игрок узнаёт об обрыве только при попытке сыграть. Пинг держит канал
+	// живым и обнаруживает мёртвых. Клиенту менять нечего: браузер отвечает на ping сам.
+	go func() {
+		t := time.NewTicker(pingPeriod)
+		defer t.Stop()
+		for {
+			select {
+			case <-c.closed:
+				return
+			case <-t.C:
+				pctx, pcancel := context.WithTimeout(ctx, pongTimeout)
+				err := c.ws.Ping(pctx)
+				pcancel()
+				if err != nil {
+					c.CloseNow("ping timeout")
+					return
+				}
+			}
+		}
+	}()
+
 	// Читатель (в текущей горутине).
 	readDone := make(chan struct{})
 	go func() {
@@ -207,7 +254,11 @@ func (c *Conn) run(h Handler, log zerolog.Logger) {
 	if code == 0 {
 		code = websocket.StatusNormalClosure
 	}
-	_ = c.ws.Close(code, text)
+	if c.closeHard {
+		_ = c.ws.CloseNow()
+	} else {
+		_ = c.ws.Close(code, text)
+	}
 	cancel()
 	<-readDone
 	h.OnClose(c)

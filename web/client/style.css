@@ -238,3 +238,24 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
 #drainBanner { background: #3a2f10; border: 1px solid #ffd166; color: #ffd166; border-radius: 8px; padding: 8px 14px; font-size: 13px; margin-bottom: 12px; text-align: center; }
 #toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: #16283f; border: 1px solid #ff5b5b; color: #ffd6d6; padding: 10px 18px; border-radius: 8px; font-size: 14px; z-index: 10; max-width: 80vw; text-align: center; }
 .footer { margin-top: auto; padding-top: 24px; font-size: 11px; color: #4b6a8a; }
+
+/* Отсчёт перед стартом матча: крупная цифра поверх арены, кликов не перехватывает. */
+#countdown {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 6;
+  font-size: clamp(64px, 18vmin, 160px);
+  font-weight: 800;
+  color: #ffe066;
+  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+  animation: cdPulse 1s ease-out infinite;
+}
+@keyframes cdPulse {
+  0% { transform: scale(1.25); opacity: 0.2; }
+  35% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}

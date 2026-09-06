@@ -31,14 +31,14 @@
 cmd/snowbrawl-server   main: конфиг, логгер, gin-роутер, graceful shutdown
 internal/config        флаги + переменные окружения SNOWBRAWL_*
 internal/protocol      типы сообщений, версия протокола, валидация ника и кода комнаты
-internal/ws            WebSocket-соединение: лимит частоты, очередь отправки, учёт соединений
+internal/ws            WebSocket-соединение: лимит частоты, очередь отправки, heartbeat, учёт соединений
 internal/session       Player: токен, ник, где находится (menu/queue/room/match)
 internal/room          комната с кодом из 4 цифр и лобби (чистые данные)
 internal/matchmaking   очереди Quick Match по режимам (чистые данные)
 internal/sim           goja-раннер: Compile(sim.js) → Program, Program.NewMatch → Match
 internal/match         цикл матча: тик, ввод → sim, снапшоты → игрокам, AFK/дисконнект → бот
 internal/hub           всё вместе под одним мьютексом + фоновые таймауты + дренаж + Stats
-internal/admin         /healthz, /api/version, /api/online (счётчик онлайна для меню), /admin/* (token)
+internal/admin         /healthz, /api/version, /api/online (для мониторинга), /admin/* (token)
 internal/web           отдача клиента: embed или --web-dir, подстановка __BUILD__ в index.html
 web.go                 go:embed web  (корень модуля, потому что embed не ходит наверх)
 ```

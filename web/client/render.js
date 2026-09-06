@@ -394,12 +394,14 @@ window.SBRender = (function () {
       if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 6.5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
 
       // Перезарядка выстрела: убывающая дуга вокруг своего бойца (полная сразу после броска).
+      // Зелёная — выстрел уже поставлен в очередь: замах начнётся сам, как только дуга исчезнет.
       if (isMe && p.rl > 0) {
         var rr = r + 10;
         ctx.beginPath(); ctx.arc(vx, vy, rr, 0, Math.PI * 2);
         ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3; ctx.stroke();
         ctx.beginPath(); ctx.arc(vx, vy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p.rl);
-        ctx.strokeStyle = '#ffcf5b'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
+        ctx.strokeStyle = local && local.pending ? '#7CFFB2' : '#ffcf5b';
+        ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
         ctx.lineCap = 'butt';
       }
 

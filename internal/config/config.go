@@ -24,6 +24,7 @@ type Config struct {
 	QueueWait    time.Duration // ожидание живых игроков в Quick Match до добора ботами
 	ReconnectTTL time.Duration // сколько держим место за отключившимся игроком
 	AFKTimeout   time.Duration // без ввода столько — бойца ведёт бот
+	Countdown    time.Duration // отсчёт перед стартом матча
 	RoomTTL      time.Duration // пустая комната живёт столько
 	RoomsPerIP   int           // живых комнат на один IP
 	MsgRate      int           // сообщений в секунду на соединение
@@ -42,6 +43,7 @@ func Defaults() Config {
 		QueueWait:    10 * time.Second,
 		ReconnectTTL: 60 * time.Second,
 		AFKTimeout:   20 * time.Second,
+		Countdown:    3 * time.Second,
 		RoomTTL:      10 * time.Minute,
 		RoomsPerIP:   3,
 		MsgRate:      30,
@@ -81,6 +83,7 @@ func Load(args []string, buildVersion string) (Config, error) {
 		{&c.QueueWait, "SNOWBRAWL_QUEUE_WAIT"},
 		{&c.ReconnectTTL, "SNOWBRAWL_RECONNECT_TTL"},
 		{&c.AFKTimeout, "SNOWBRAWL_AFK_TIMEOUT"},
+		{&c.Countdown, "SNOWBRAWL_COUNTDOWN"},
 		{&c.RoomTTL, "SNOWBRAWL_ROOM_TTL"},
 		{&c.DrainTimeout, "SNOWBRAWL_DRAIN_TIMEOUT"},
 	} {
@@ -100,6 +103,7 @@ func Load(args []string, buildVersion string) (Config, error) {
 	fs.DurationVar(&c.QueueWait, "queue-wait", c.QueueWait, "ожидание игроков в Quick Match")
 	fs.DurationVar(&c.ReconnectTTL, "reconnect-ttl", c.ReconnectTTL, "время на переподключение")
 	fs.DurationVar(&c.AFKTimeout, "afk-timeout", c.AFKTimeout, "таймаут бездействия")
+	fs.DurationVar(&c.Countdown, "countdown", c.Countdown, "отсчёт перед стартом матча")
 	if err := fs.Parse(args); err != nil {
 		return c, errors.Wrap(err, "parse flags")
 	}

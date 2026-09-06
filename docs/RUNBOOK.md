@@ -87,6 +87,7 @@ cd /opt/snowbrawl && ./deploy.sh v0.2.0     # или ./deploy.sh для latest
 | `SNOWBRAWL_QUEUE_WAIT` | 10s | ожидание живых игроков в Quick Match |
 | `SNOWBRAWL_RECONNECT_TTL` | 60s | сколько держать место за отключившимся |
 | `SNOWBRAWL_AFK_TIMEOUT` | 20s | бездействие до передачи бойца боту |
+| `SNOWBRAWL_COUNTDOWN` | 3s | отсчёт перед началом матча (0 — сразу в бой) |
 | `SNOWBRAWL_ROOM_TTL` | 10m | жизнь пустой комнаты |
 | `SNOWBRAWL_ROOMS_PER_IP` | 3 | живых комнат на IP |
 | `SNOWBRAWL_MSG_RATE` | 30 | сообщений/с на соединение |

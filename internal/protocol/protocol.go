@@ -50,6 +50,7 @@ const (
 	SSnapshot    = "snapshot"
 	SMatchEnd    = "match.end"
 	SDrain       = "drain"
+	SOnline      = "online"
 	SReload      = "reload"
 	SPong        = "pong"
 )
@@ -90,8 +91,15 @@ type Welcome struct {
 	SimVersion string `json:"sim"`
 	Proto      int    `json:"proto"`
 	Draining   bool   `json:"draining,omitempty"`
+	Online     int    `json:"online"` // сколько игроков сейчас на сервере, включая этого
 	// Куда клиент должен вернуться после реконнекта: "menu" | "queue" | "room" | "match".
 	Resume string `json:"resume"`
+}
+
+// Online — число игроков на сервере. Приходит в welcome и дальше при каждом изменении:
+// счётчик привязан к тому же соединению, что и игра, поэтому не врёт при обрыве.
+type Online struct {
+	N int `json:"n"`
 }
 
 // Error — ошибка обработки сообщения.
@@ -192,10 +200,12 @@ type MatchStart struct {
 }
 
 // Snapshot — состояние симуляции за тик. State — снапшот sim.js как есть, Events — события шага.
+// Countdown > 0 — идёт отсчёт перед стартом: симуляция стоит, ввод сервером не принимается.
 type Snapshot struct {
-	Tick   int             `json:"tick"`
-	State  json.RawMessage `json:"s"`
-	Events json.RawMessage `json:"e,omitempty"`
+	Tick      int             `json:"tick"`
+	State     json.RawMessage `json:"s"`
+	Events    json.RawMessage `json:"e,omitempty"`
+	Countdown int             `json:"cd,omitempty"` // мс до старта матча
 }
 
 // MatchEnd — матч завершён.

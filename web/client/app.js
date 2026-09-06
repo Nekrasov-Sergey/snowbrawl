@@ -37,21 +37,20 @@
     if (name === 'character') buildHeroGrid();
     if (name === 'map') buildMapGrid();
     if (name === 'createroom') buildCreateGrids();
-    if (name === 'menu') { $('menuNick').textContent = app.nick; refreshOnline(); }
-    else if (onlineTimer) { clearInterval(onlineTimer); onlineTimer = null; }
+    if (name === 'menu') { $('menuNick').textContent = app.nick; renderOnline(); }
     if (name === 'settings') renderSettings();
     if (name !== 'game' && app.game) stopGame();
     document.documentElement.classList.toggle('ingame', name === 'game');
   }
-  // Счётчик онлайна в меню: /api/online при входе и каждые 10 с, пока открыт экран меню.
-  var onlineTimer = null;
-  function refreshOnline() {
-    var el = $('onlineInfo');
-    fetch('/api/online', { cache: 'no-store' }).then(function (r) { return r.json(); })
-      .then(function (d) { if (app.screen === 'menu') el.textContent = 'Игроков онлайн: ' + d.online; })
-      .catch(function () { el.textContent = 'Игроков онлайн: —'; });
-    if (!onlineTimer) onlineTimer = setInterval(function () { if (app.screen === 'menu') refreshOnline(); }, 10000);
+  // Счётчик онлайна: число приходит по игровому сокету — в welcome и потом при каждом изменении.
+  // Раньше оно бралось отдельным запросом /api/online, и тот успевал ответить раньше, чем сервер
+  // регистрировал самого игрока: одинокий игрок видел «0». Пока связи нет, показываем прочерк.
+  var onlineCount = null;
+  function renderOnline() {
+    var known = app.connected && onlineCount != null;
+    $('onlineInfo').textContent = 'Игроков онлайн: ' + (known ? onlineCount : '—');
   }
+  function setOnline(n) { onlineCount = n; renderOnline(); }
   var toastTimer = null;
   function toast(msg) {
     var t = $('toast'); t.textContent = msg; t.hidden = false;
@@ -84,6 +83,7 @@
       hello: function () { return { token: app.token, nick: app.nick, build: BUILD }; },
       onState: function (state) {
         app.connected = (state === 'open');
+        renderOnline();
         var el = $('connState');
         el.className = state === 'open' ? 'on' : (state === 'closed' ? 'off' : '');
         el.title = state === 'open' ? 'Соединение установлено' : 'Нет соединения с сервером';
@@ -101,6 +101,7 @@
         app.token = d.token; store.set('sb.token', d.token);
         app.me = d.playerId; app.nick = d.nick; store.set('sb.nick', d.nick);
         $('verSim').textContent = d.sim; $('menuNick').textContent = d.nick;
+        setOnline(d.online);
         setDrain(!!d.draining);
         // Восстановление места после переподключения.
         if (d.resume === 'queue') { if (app.screen !== 'search') goto('search'); }
@@ -112,6 +113,9 @@
         toast(ERR_TEXT[d.code] || ('Ошибка: ' + (d.msg || d.code)));
         if (d.code === 'bad_nick') goto('nick');
         if (d.code === 'room_not_found' || d.code === 'room_full') $('joinMsg').textContent = ERR_TEXT[d.code];
+        break;
+      case 'online':
+        setOnline(d.n);
         break;
       case 'reload':
         location.reload();
@@ -371,6 +375,7 @@
   // Матч: общая часть (ввод, HUD, рендер)
   // ------------------------------------------------------------
   var canvas = $('c'), overlay = $('overlay'), overlayText = $('overlayText'), overlaySub = $('overlaySub');
+  var countdownEl = $('countdown');
   var abilityBtn = $('abilityBtn'), abilityCd = $('abilityCd');
   var touchAbility = $('touchAbility'), touchAbilityCd = $('touchAbilityCd'), touchLayer = $('touchLayer');
   var render = window.SBRender.create(canvas);
@@ -397,6 +402,7 @@
     getGame: function () { return app.game; },
     getMe: myPlayer,
     canAct: canAct,
+    blocked: function () { return !!(app.game && app.game.countdown > 0); }, // идёт отсчёт перед стартом
     onChargeStart: function () { chargeAudioStop = Audio_.chargeLoopStart(function () { return intent.local.power; }); },
     onChargeEnd: function () { if (chargeAudioStop) { chargeAudioStop(); chargeAudioStop = null; } }
   });
@@ -544,6 +550,25 @@
     }
   }
 
+  // Отсчёт перед стартом матча: 3 — 2 — 1 — «БОЙ!». Миллисекунды приходят в снапшоте (поле cd),
+  // в оффлайне — из драйвера. Пока идёт отсчёт, симуляция стоит и ввод не принимается.
+  var cd = { shown: null, goUntil: 0 };
+  function resetCountdown() { cd.shown = null; cd.goUntil = 0; countdownEl.hidden = true; }
+  function updateCountdown(ms) {
+    var now = performance.now();
+    if (ms > 0) {
+      var n = Math.max(1, Math.ceil(ms / 1000));
+      if (cd.shown !== n) { cd.shown = n; countdownEl.textContent = n; Audio_.countBeep(); }
+      cd.goUntil = now + 700;
+      countdownEl.hidden = false;
+      return;
+    }
+    if (cd.shown === null) return; // отсчёта не было (переподключение к идущему матчу)
+    if (cd.shown !== 'go') { cd.shown = 'go'; countdownEl.textContent = 'БОЙ!'; Audio_.goBeep(); }
+    if (now >= cd.goUntil) { countdownEl.hidden = true; cd.shown = null; return; }
+    countdownEl.hidden = false;
+  }
+
   function loop() {
     rafId = requestAnimationFrame(loop);
     renderOnce();
@@ -556,12 +581,14 @@
     intent.tick(); // сила замаха, сброс при оглушении, переотправка цели движения по стику
     render.frame(fr.snap, g.meId, local);
     updateHUD(fr.snap);
+    updateCountdown(g.countdown || 0);
     return fr;
   }
 
   function showGameScreen(g) {
     app.game = g;
     render.reset();
+    resetCountdown();
     overlay.style.display = 'none';
     $('reconnectOverlay').hidden = true;
     var myRole = null;
@@ -643,11 +670,11 @@
     stopGame();
     var drv = window.SBOffline.start({ mode: app.offline.mode, arena: app.offline.arena, role: app.offline.role, botLevel: app.offline.botLevel });
     var g = {
-      offline: true, meId: drv.meId, players: drv.players, myTeam: 'A', roomCode: '', over: false,
+      offline: true, meId: drv.meId, players: drv.players, myTeam: 'A', roomCode: '', over: false, countdown: 0,
       input: function (kind, x, y, power) { if (!g.over) drv.input(kind, x, y, power); },
       frame: function () {
         if (g.over) return { snap: g.lastSnap, events: [] };
-        var fr = drv.frame(); g.lastSnap = fr.snap;
+        var fr = drv.frame(); g.lastSnap = fr.snap; g.countdown = fr.countdown || 0;
         if (drv.isOver()) showResult(drv.winner(), 'A', drv.winner() ? 'ko' : 'timeout');
         return fr;
       },
@@ -684,7 +711,7 @@
     d.players.forEach(function (p) { if (p.id === d.yourId) myTeam = p.team; });
     var g = {
       offline: false, matchId: d.matchId, meId: d.yourId, players: d.players, myTeam: myTeam, roomCode: d.roomCode || '', over: false,
-      lastSnap: null,
+      lastSnap: null, countdown: 0,
       input: function (kind, x, y, power) {
         if (g.over) return;
         var inp = { kind: kind, x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 };
@@ -692,6 +719,7 @@
         app.net.send('input', inp);
       },
       onSnapshot: function (s) {
+        g.countdown = s.cd || 0;
         buffer.push(s.s);
         if (s.e && s.e.length) pending = pending.concat(s.e);
       },
