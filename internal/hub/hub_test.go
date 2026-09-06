@@ -244,6 +244,77 @@ func TestHumanInputAndMatchEnd(t *testing.T) {
 	}
 }
 
+// TestPveRoomMatch — комната переключается в PvE, хост стартует: match.start несёт
+// gameMode, состав — только пати (команда A, пустые слоты добиты ботами, команды B нет),
+// снапшоты несут блок pve, и первая волна выпускает врагов на команду B.
+func TestPveRoomMatch(t *testing.T) {
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+
+	host.send(protocol.CRoomConfig, protocol.RoomConfig{
+		Mode: 2, Arena: 0, GameMode: "survival", Campaign: true, Difficulty: 1,
+	})
+	host.expect(protocol.SRoomState, &rs)
+	if rs.GameMode != "survival" || !rs.Campaign {
+		t.Fatalf("room config not applied: %+v", rs)
+	}
+
+	host.send(protocol.CRoomStart, nil)
+	var ms protocol.MatchStart
+	host.expect(protocol.SMatchStart, &ms)
+	if ms.GameMode != "survival" {
+		t.Fatalf("match.start gameMode = %q", ms.GameMode)
+	}
+	if len(ms.Players) != 2 { // пати из 2, без команды B
+		t.Fatalf("pve roster should be party of 2, got %+v", ms.Players)
+	}
+	for _, p := range ms.Players {
+		if p.Team != "A" {
+			t.Fatalf("pve match player on team %q, want A: %+v", p.Team, p)
+		}
+	}
+
+	type pveSnap struct {
+		Players []struct {
+			Team string `json:"team"`
+			ET   string `json:"et"`
+		} `json:"players"`
+		Pve *struct {
+			Phase string `json:"phase"`
+			Wave  int    `json:"wave"`
+		} `json:"pve"`
+	}
+	sawPveBlock, sawEnemy := false, false
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && (!sawPveBlock || !sawEnemy) {
+		var snap protocol.Snapshot
+		host.expect(protocol.SSnapshot, &snap)
+		var ss pveSnap
+		if err := json.Unmarshal(snap.State, &ss); err != nil {
+			t.Fatalf("snapshot state: %v", err)
+		}
+		if ss.Pve != nil {
+			sawPveBlock = true
+		}
+		for _, p := range ss.Players {
+			if p.Team == "B" && p.ET != "" {
+				sawEnemy = true
+			}
+		}
+	}
+	if !sawPveBlock || !sawEnemy {
+		t.Fatalf("pve match: sawPveBlock=%v sawEnemy=%v", sawPveBlock, sawEnemy)
+	}
+
+	host.send(protocol.CMatchLeave, nil)
+	host.expect(protocol.SRoomLeft, nil)
+	host.close()
+}
+
 func TestReconnectIntoMatch(t *testing.T) {
 	s := newServer(t, nil)
 	p := s.connect(t, "Игрок", "")

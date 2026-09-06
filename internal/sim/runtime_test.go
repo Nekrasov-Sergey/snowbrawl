@@ -196,6 +196,108 @@ func TestHumanInputAndBotToggle(t *testing.T) {
 	}
 }
 
+// pveConfig — PvE-матч: пати из ботов на команде A, урезанная кампания.
+func pveConfig(gameMode string, party int, roles []string) sim.MatchConfig {
+	cfg := sim.MatchConfig{GameMode: gameMode, Mode: party, Difficulty: 1,
+		Pve: &sim.PveConfig{Levels: 1, Waves: 2}}
+	for i := 0; i < party; i++ {
+		cfg.Players = append(cfg.Players, sim.PlayerConfig{
+			ID: "a" + string(rune('0'+i)), Team: "A", Role: roles[i%len(roles)], Bot: true})
+	}
+	return cfg
+}
+
+type pveSnap struct {
+	Over    bool   `json:"over"`
+	Reason  string `json:"reason"`
+	Players []struct {
+		ID    string `json:"id"`
+		Team  string `json:"team"`
+		ET    string `json:"et"`
+		Lives *int   `json:"lives"`
+	} `json:"players"`
+	Pve *struct {
+		Objective string `json:"objective"`
+		Level     int    `json:"level"`
+		Wave      int    `json:"wave"`
+		Phase     string `json:"phase"`
+		Enemies   int    `json:"enemiesLeft"`
+	} `json:"pve"`
+}
+
+// TestPveWaveMode — PvE-матч создаётся, идут волны, враги появляются на команде B,
+// снапшот несёт блок pve, матч завершается с PvE-причиной в пределах потолка.
+func TestPveWaveMode(t *testing.T) {
+	p := loadProgram(t)
+	m, err := p.NewMatch(pveConfig("survival", 2, p.Roles()), 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawEnemy, sawFighting, sawPve := false, false, false
+	const dt = 1.0 / 20
+	for i := 0; i < 20*600 && !m.IsOver(); i++ {
+		if _, err := m.Step(dt); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		if i%20 != 0 {
+			continue
+		}
+		raw, _ := m.Snapshot()
+		var s pveSnap
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if s.Pve == nil {
+			t.Fatal("snapshot has no pve block")
+		}
+		sawPve = true
+		if s.Pve.Phase == "fighting" {
+			sawFighting = true
+		}
+		for _, pl := range s.Players {
+			if pl.Team == "B" {
+				sawEnemy = true
+			}
+			if pl.Team == "A" && pl.Lives == nil {
+				t.Fatalf("party member %s has no lives field", pl.ID)
+			}
+		}
+	}
+	if !sawPve || !sawFighting || !sawEnemy {
+		t.Fatalf("pve=%v fighting=%v enemy=%v", sawPve, sawFighting, sawEnemy)
+	}
+	if !m.IsOver() {
+		t.Fatal("pve match did not finish within 10 minutes")
+	}
+	switch m.Reason() {
+	case "cleared", "wiped", "objective", "expired":
+	default:
+		t.Fatalf("unexpected pve end reason %q", m.Reason())
+	}
+}
+
+// TestPveDeterministic — один сид + урезанная кампания дают байт-идентичный снапшот.
+func TestPveDeterministic(t *testing.T) {
+	p := loadProgram(t)
+	run := func() string {
+		m, err := p.NewMatch(pveConfig("defense", 3, p.Roles()), 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 20*45; i++ {
+			if _, err := m.Step(1.0 / 20); err != nil {
+				t.Fatal(err)
+			}
+		}
+		raw, _ := m.Snapshot()
+		return string(raw)
+	}
+	first, second := run(), run()
+	if first != second {
+		t.Fatal("same seed produced different pve snapshots")
+	}
+}
+
 // BenchmarkFullLoad — целевая нагрузка: 17 матчей 4×4 (136 бойцов) при 20 тиках/с.
 // Один «раунд» бенчмарка = одна игровая секунда всех матчей (17 × 20 шагов + снапшоты).
 func BenchmarkFullLoad(b *testing.B) {

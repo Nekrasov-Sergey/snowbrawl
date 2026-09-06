@@ -28,6 +28,11 @@ const (
 	ReasonTimeout   = "timeout"
 	ReasonAbandoned = "abandoned"
 	ReasonShutdown  = "shutdown"
+	// PvE (приходят из sim.reason()).
+	ReasonCleared   = "cleared"
+	ReasonWiped     = "wiped"
+	ReasonObjective = "objective"
+	ReasonExpired   = "expired"
 )
 
 // Result — итог матча.
@@ -43,6 +48,11 @@ type Options struct {
 	Countdown  time.Duration // отсчёт перед стартом: симуляция стоит, снапшоты идут
 	Log        zerolog.Logger
 	Now        func() time.Time
+	// PvE: пусто/"pvp" — обычный матч; иначе кооперативные волны.
+	GameMode   string
+	Campaign   bool
+	Difficulty int
+	Pve        *sim.PveConfig
 }
 
 type human struct {
@@ -60,6 +70,7 @@ type Match struct {
 	RoomCode string
 	Mode     int
 	Arena    int
+	GameMode string
 	Players  []protocol.MatchPlayer
 	Created  time.Time
 	StartsAt time.Time // до этого момента идёт отсчёт, симуляция стоит
@@ -85,9 +96,14 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	cfg := sim.MatchConfig{Mode: mode, ArenaIndex: arena}
+	cfg := sim.MatchConfig{Mode: mode, ArenaIndex: arena, GameMode: opts.GameMode, Difficulty: opts.Difficulty, Pve: opts.Pve}
+	if opts.GameMode != "" && opts.GameMode != "pvp" {
+		campaign := opts.Campaign
+		cfg.Campaign = &campaign
+	}
 	for _, p := range players {
-		cfg.Players = append(cfg.Players, sim.PlayerConfig{ID: p.ID, Team: p.Team, Role: p.Role, Bot: p.Bot, Nick: p.Nick})
+		pc := sim.PlayerConfig{ID: p.ID, Team: p.Team, Role: p.Role, Bot: p.Bot, Nick: p.Nick}
+		cfg.Players = append(cfg.Players, pc)
 	}
 	var seedBytes [4]byte
 	if _, err := rand.Read(seedBytes[:]); err != nil {
@@ -99,7 +115,8 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 	}
 	now := opts.Now()
 	m := &Match{
-		ID: "m" + randomHex(4), RoomCode: roomCode, Mode: mode, Arena: arena, Players: players, Created: now,
+		ID: "m" + randomHex(4), RoomCode: roomCode, Mode: mode, Arena: arena, GameMode: opts.GameMode,
+		Players: players, Created: now,
 		StartsAt: now.Add(opts.Countdown),
 		opts:     opts, onEnd: onEnd, sim: s, humans: map[string]*human{}, stopCh: make(chan struct{}),
 	}
@@ -117,7 +134,7 @@ func (m *Match) Start() { go m.loop() }
 // StartMessage — сообщение match.start для конкретного игрока.
 func (m *Match) StartMessage(playerID string) []byte {
 	return protocol.MustEncode(protocol.SMatchStart, protocol.MatchStart{
-		MatchID: m.ID, Mode: m.Mode, Arena: m.Arena, Players: m.Players, YourID: playerID,
+		MatchID: m.ID, Mode: m.Mode, Arena: m.Arena, GameMode: m.GameMode, Players: m.Players, YourID: playerID,
 		TickRate: m.opts.TickRate, RoomCode: m.RoomCode,
 	})
 }
@@ -347,9 +364,13 @@ func (m *Match) step(dt float64) bool {
 	if m.sim.IsOver() {
 		m.done = true
 		winner := m.sim.Winner()
-		reason := ReasonKO
-		if winner == "" {
-			reason = ReasonTimeout
+		// Причину даёт сама симуляция (PvP: ko/timeout; PvE: cleared/wiped/objective/expired).
+		reason := m.sim.Reason()
+		if reason == "" {
+			reason = ReasonKO
+			if winner == "" {
+				reason = ReasonTimeout
+			}
 		}
 		m.result = Result{Winner: winner, Reason: reason}
 		return true

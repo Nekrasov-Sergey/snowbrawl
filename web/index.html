@@ -80,9 +80,13 @@
 
   <!-- Оффлайн: арена -->
   <div id="screen-map" class="panel" hidden>
-    <div class="subtitle">Выберите арену</div>
+    <div class="subtitle">Режим игры</div>
+    <div class="segRow" id="gameModeSel"></div>
+    <div class="subtitle" id="pveCampaignLabel" hidden>Прохождение</div>
+    <div class="segRow" id="pveCampaignSel" hidden></div>
+    <div class="subtitle" id="mapArenaLabel">Выберите арену</div>
     <div class="cardGrid" id="mapGrid"></div>
-    <div class="subtitle">Сложность ботов</div>
+    <div class="subtitle" id="botLevelLabel">Сложность ботов</div>
     <div class="segRow" id="botLevelSel"></div>
     <div class="navRow">
       <button class="menuBtn ghost" id="backFromMap">Назад</button>
@@ -131,13 +135,16 @@
       <div id="lobbyResult" class="lobbyResult" hidden></div>
     </div>
     <div class="lobbyConfig">
-      <label>Режим <select id="lobbyMode"></select></label>
-      <label>Арена <select id="lobbyArena"></select></label>
+      <label>Игра <select id="lobbyGameMode"></select></label>
+      <label>Размер <select id="lobbyMode"></select></label>
+      <label id="lobbyArenaWrap">Арена <select id="lobbyArena"></select></label>
+      <label id="lobbyCampaignWrap" hidden>Ход <select id="lobbyCampaign"></select></label>
+      <label id="lobbyDifficultyWrap" hidden>Сложность <select id="lobbyDifficulty"></select></label>
       <span class="subtitle" id="lobbyConfigHint"></span>
     </div>
     <div class="teamsGrid">
-      <div class="teamCol"><div class="teamlabel a">Команда A</div><div id="slotsA" class="slots"></div></div>
-      <div class="teamCol"><div class="teamlabel b">Команда B</div><div id="slotsB" class="slots"></div></div>
+      <div class="teamCol"><div class="teamlabel a" id="slotsALabel">Команда A</div><div id="slotsA" class="slots"></div></div>
+      <div class="teamCol" id="slotsBCol"><div class="teamlabel b">Команда B</div><div id="slotsB" class="slots"></div></div>
     </div>
     <div class="subtitle">Ваш боец (кликните, чтобы сменить):</div>
     <div class="cardGrid" id="lobbyHeroGrid"></div>
@@ -155,6 +162,7 @@
       <button id="btnToMenu">← Выйти</button>
       <div id="hint" style="margin:0">ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.</div>
       <span id="netStat" title="Задержка сети" hidden></span>
+      <div id="pveInfo" hidden></div>
       <div id="matchTimer">5:00</div>
       <button id="fsBtn" title="Во весь экран" hidden>⛶</button>
     </div>

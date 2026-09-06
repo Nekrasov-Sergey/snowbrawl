@@ -161,6 +161,25 @@ window.SBRender = (function () {
           case 'obstacleBreak':
             audio.wallThud(); triggerShake(6, 180);
             spawnParticles(e.x, e.y, '#b5793e', 16, 50, 170, 2, 5, 0.55); break;
+          // --- PvE ---
+          case 'enemySpawn':
+            spawnParticles(e.x, e.y, '#ffd1dc', 8, 30, 110, 2, 4, 0.35); break;
+          case 'waveStart':
+            audio.goBeep && audio.goBeep(); triggerShake(5, 160); break;
+          case 'waveCleared':
+            audio.freezeChime && audio.freezeChime(); break;
+          case 'bossPhase':
+            audio.explosionBoom && audio.explosionBoom(); triggerShake(12, 320); break;
+          case 'contactHit':
+            audio.hitPoof && audio.hitPoof(); triggerShake(5, 130);
+            spawnParticles(e.x, e.y, '#ffd1dc', 8, 40, 120, 2, 4, 0.4); break;
+          case 'objectiveHit':
+            audio.wallThud && audio.wallThud(); triggerShake(6, 150);
+            spawnParticles(e.x, e.y, '#eaf4ff', 9, 40, 120, 2, 4, 0.45); break;
+          case 'levelStart':
+            audio.goBeep && audio.goBeep(); break;
+          case 'levelRestart':
+            audio.defeatChord && audio.defeatChord(); triggerShake(8, 220); break;
           default: break;
         }
       }
@@ -198,6 +217,40 @@ window.SBRender = (function () {
         }
         ctx.globalAlpha = 1;
       }
+      // Режим «Защита»: снеговик-объект.
+      var pv = snap.pve;
+      if (pv && pv.objX != null) {
+        var ox = pv.objX, oy = pv.objY, orr = pv.objR || 26;
+        var frac = pv.objMaxHp ? Math.max(0, pv.objHp / pv.objMaxHp) : 1;
+        ctx.save();
+        ctx.beginPath(); ctx.ellipse(ox, oy + orr * 0.9, orr * 1.1, orr * 0.35, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fill();
+        ctx.fillStyle = frac > 0.33 ? '#ffffff' : '#e6eef5';
+        ctx.strokeStyle = '#5a7fa8'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(ox, oy + orr * 0.7, orr * 0.9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(ox, oy - orr * 0.2, orr * 0.62, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(ox, oy - orr, orr * 0.42, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#0b1622';
+        ctx.beginPath(); ctx.arc(ox - 5, oy - orr - 2, 2, 0, Math.PI * 2); ctx.arc(ox + 5, oy - orr - 2, 2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#ff8c3b';
+        ctx.beginPath(); ctx.moveTo(ox, oy - orr + 2); ctx.lineTo(ox + 12, oy - orr + 5); ctx.lineTo(ox, oy - orr + 8); ctx.closePath(); ctx.fill();
+        if (frac < 1) { // трещины по урону
+          ctx.strokeStyle = 'rgba(40,60,80,0.7)'; ctx.lineWidth = 1.5;
+          var cracks = Math.round((1 - frac) * 6);
+          for (var ci = 0; ci < cracks; ci++) {
+            var ca = ci * 1.7;
+            ctx.beginPath(); ctx.moveTo(ox, oy);
+            ctx.lineTo(ox + Math.cos(ca) * orr * 0.9, oy + Math.sin(ca) * orr * 0.9);
+            ctx.stroke();
+          }
+        }
+        // полоса HP над снеговиком
+        var hbw = orr * 2.4;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(ox - hbw / 2, oy - orr * 2, hbw, 5);
+        ctx.fillStyle = frac > 0.33 ? '#7CFFB2' : '#ff5b5b';
+        ctx.fillRect(ox - hbw / 2, oy - orr * 2, hbw * frac, 5);
+        ctx.restore();
+      }
     }
     function drawSnowflakes(dt) {
       for (var i = 0; i < snowflakes.length; i++) {
@@ -218,7 +271,12 @@ window.SBRender = (function () {
       }
       ctx.globalAlpha = 1;
     }
-    function radiusOf(p) { return (Sim.ROLE_STATS[p.role] || { radius: 15 }).radius; }
+    var ENEMY_RADII = { core: 15, swarm: 12, tank: 24, roller: 20, boss: 34 };
+    var ENEMY_COLORS = { core: '#ff5b5b', swarm: '#ff9ec4', tank: '#b5793e', roller: '#cfe6ff', boss: '#c0263a' };
+    function radiusOf(p) {
+      if (p.et && ENEMY_RADII[p.et] != null) return ENEMY_RADII[p.et];
+      return (Sim.ROLE_STATS[p.role] || { radius: 15 }).radius;
+    }
 
     // Кастомная «модель» под роль поверх круга-тела: силуэтные метки и иконки способностей,
     // чтобы бойцы отличались друг от друга, а не только цветом команды. Всё векторное и мелкое
@@ -342,7 +400,7 @@ window.SBRender = (function () {
         var dx = aimX - p.x, dy = aimY - p.y, d = Math.hypot(dx, dy) || 1;
         vx -= (dx / d) * power * 4; vy -= (dy / d) * power * 4;
       }
-      var color = p.team === 'A' ? '#4aa8ff' : '#ff5b5b';
+      var color = p.team === 'A' ? '#4aa8ff' : (p.et && ENEMY_COLORS[p.et] ? ENEMY_COLORS[p.et] : '#ff5b5b');
       var flashing = (snap.time - p.hitAt) < 150;
 
       ctx.save();
@@ -376,6 +434,32 @@ window.SBRender = (function () {
       ctx.restore();
 
       drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
+
+      // PvE-враги: босс — корона и аура ярости; танк/босс — полоска HP.
+      if (p.et === 'boss') {
+        ctx.save();
+        ctx.translate(vx, vy);
+        ctx.fillStyle = '#ffd24a'; ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (var sp2 = 0; sp2 < 5; sp2++) {
+          var aa = -Math.PI / 2 + sp2 * (Math.PI * 2 / 5);
+          ctx.lineTo(Math.cos(aa) * (r + 6), Math.sin(aa) * (r + 6));
+          ctx.lineTo(Math.cos(aa + Math.PI / 5) * (r + 1), Math.sin(aa + Math.PI / 5) * (r + 1));
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        if (p.bph === 2) {
+          ctx.globalAlpha = 0.35 + 0.15 * Math.sin(snap.time / 90);
+          ctx.beginPath(); ctx.arc(0, 0, r + 12, 0, Math.PI * 2);
+          ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
+        }
+        ctx.restore();
+      }
+      if (p.team === 'B' && p.mhp && p.hp < p.mhp && alive) {
+        var bw2 = Math.max(24, r * 1.6), bh2 = 4, by2 = vy - r - 10;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(vx - bw2 / 2, by2, bw2, bh2);
+        ctx.fillStyle = p.et === 'boss' ? '#ff5b5b' : '#ffd166';
+        ctx.fillRect(vx - bw2 / 2, by2, bw2 * Math.max(0, p.hp / p.mhp), bh2);
+      }
 
       // Заряженная способность: цветной ореол вокруг бойца.
       if (p.armed) {

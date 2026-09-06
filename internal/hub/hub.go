@@ -347,7 +347,7 @@ func (h *Hub) startQuickMatch(q *matchmaking.Queue) {
 		players = append(players, protocol.MatchPlayer{ID: p.ID, Nick: p.Nick, Team: team, Role: e.Role})
 	}
 	arena := h.rng.IntN(h.prog.ArenaCount())
-	h.launchMatch("", q.Mode, arena, players)
+	h.launchMatch("", q.Mode, arena, "pvp", false, 0, players)
 }
 
 // ---- Комнаты ----
@@ -370,6 +370,12 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 		h.sendErrP(p, protocol.ErrBadArena, "unknown arena")
 		return
 	}
+	gameMode := normGameMode(req.GameMode)
+	if !h.prog.HasGameMode(gameMode) {
+		h.sendErrP(p, protocol.ErrBadGameMode, "unknown game mode")
+		return
+	}
+	difficulty := clampDifficulty(req.Difficulty)
 	live := 0
 	for _, r := range h.rooms {
 		if r.HostIP == p.IP && !r.IsEmpty() {
@@ -384,11 +390,11 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 	for h.rooms[code] != nil {
 		code = room.GenerateCode()
 	}
-	r := room.New(code, p.ID, p.IP, req.Mode, req.Arena, h.now())
+	r := room.New(code, p.ID, p.IP, req.Mode, req.Arena, gameMode, req.Campaign, difficulty, h.now())
 	h.rooms[code] = r
 	p.Training = false
 	p.Place, p.RoomCode = session.InRoom, code
-	h.log.Info().Str("room", code).Str("host", p.ID).Int("mode", req.Mode).Msg("room created")
+	h.log.Info().Str("room", code).Str("host", p.ID).Int("mode", req.Mode).Str("gameMode", gameMode).Msg("room created")
 	h.broadcastRoom(r)
 }
 
@@ -484,7 +490,14 @@ func (h *Hub) handleRoomConfig(p *session.Player, data json.RawMessage) {
 	if r == nil {
 		return
 	}
-	if err := r.SetConfig(p.ID, req.Mode, req.Arena, h.prog.ArenaCount()); err != nil {
+	gameMode := normGameMode(req.GameMode)
+	if !h.prog.HasGameMode(gameMode) {
+		h.sendErrP(p, protocol.ErrBadGameMode, "unknown game mode")
+		return
+	}
+	cfg := room.Config{Mode: req.Mode, Arena: req.Arena, GameMode: gameMode,
+		Campaign: req.Campaign, Difficulty: clampDifficulty(req.Difficulty)}
+	if err := r.SetConfig(p.ID, cfg, h.prog.ArenaCount()); err != nil {
 		h.sendErrP(p, protocol.ErrNotAllowed, err.Error())
 		return
 	}
@@ -560,7 +573,7 @@ func (h *Hub) handleRoomStart(p *session.Player) {
 		}
 		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Role: m.Role})
 	}
-	m := h.launchMatch(r.Code, r.Mode, r.Arena, players)
+	m := h.launchMatch(r.Code, r.Mode, r.Arena, r.GameMode, r.Campaign, r.Difficulty, players)
 	if m == nil {
 		return
 	}
@@ -568,8 +581,26 @@ func (h *Hub) handleRoomStart(p *session.Player) {
 	h.broadcastRoom(r)
 }
 
+// normGameMode приводит пустой режим к "pvp".
+func normGameMode(gm string) string {
+	if gm == "" {
+		return "pvp"
+	}
+	return gm
+}
+
+// clampDifficulty ограничивает ручку сложности диапазоном 0..2 (по умолчанию 1).
+func clampDifficulty(d int) int {
+	if d < 0 || d > 2 {
+		return 1
+	}
+	return d
+}
+
 func (h *Hub) roomState(r *room.Room) protocol.RoomState {
-	st := protocol.RoomState{Code: r.Code, HostID: r.HostID, Mode: r.Mode, Arena: r.Arena, InMatch: r.InMatch, LastWinner: r.LastWinner}
+	st := protocol.RoomState{Code: r.Code, HostID: r.HostID, Mode: r.Mode, Arena: r.Arena,
+		GameMode: r.GameMode, Campaign: r.Campaign, Difficulty: r.Difficulty,
+		InMatch: r.InMatch, LastWinner: r.LastWinner}
 	for _, m := range r.Members {
 		p := h.byID[m.ID]
 		rp := protocol.RoomPlayer{ID: m.ID, Team: m.Team, Index: m.Index, Role: m.Role, Host: m.ID == r.HostID}
@@ -596,10 +627,11 @@ func (h *Hub) broadcastRoom(r *room.Room) {
 // ---- Матчи ----
 
 // launchMatch дополняет состав ботами, создаёт матч и переводит игроков в него.
-func (h *Hub) launchMatch(roomCode string, mode, arena int, humans []protocol.MatchPlayer) *match.Match {
-	players := h.fillTeams(mode, humans)
+func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, campaign bool, difficulty int, humans []protocol.MatchPlayer) *match.Match {
+	players := h.fillTeams(mode, gameMode, humans)
 	m, err := match.New(h.prog, roomCode, mode, arena, players, match.Options{
 		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Countdown: h.cfg.Countdown, Log: h.log, Now: h.now,
+		GameMode: gameMode, Campaign: campaign, Difficulty: difficulty,
 	}, h.onMatchEnd)
 	if err != nil {
 		h.log.Error().Err(err).Msg("create match")
@@ -628,9 +660,12 @@ func (h *Hub) launchMatch(roomCode string, mode, arena int, humans []protocol.Ma
 	return m
 }
 
-// fillTeams назначает роли не выбравшим, дополняет команды ботами и убирает дубли ников.
-func (h *Hub) fillTeams(mode int, humans []protocol.MatchPlayer) []protocol.MatchPlayer {
+// fillTeams назначает роли не выбравшим, дополняет состав ботами и убирает дубли ников.
+// PvP: обе команды добиваются до mode. PvE: добивается только пати (команда A) —
+// врагов создаёт волновой планировщик в sim.js.
+func (h *Hub) fillTeams(mode int, gameMode string, humans []protocol.MatchPlayer) []protocol.MatchPlayer {
 	roles := h.prog.Roles()
+	pve := gameMode != "" && gameMode != "pvp"
 	players := make([]protocol.MatchPlayer, 0, 2*mode)
 	count := map[string]int{"A": 0, "B": 0}
 	nicks := map[string]int{}
@@ -645,14 +680,22 @@ func (h *Hub) fillTeams(mode int, humans []protocol.MatchPlayer) []protocol.Matc
 		count[hp.Team]++
 		players = append(players, hp)
 	}
+	teams := []string{"A", "B"}
+	if pve {
+		teams = []string{"A"}
+	}
 	botN := 0
-	for _, team := range []string{"A", "B"} {
+	for _, team := range teams {
 		for count[team] < mode {
 			botN++
-			players = append(players, protocol.MatchPlayer{
+			bp := protocol.MatchPlayer{
 				ID: fmt.Sprintf("bot%d", botN), Nick: fmt.Sprintf("Бот %d", botN), Team: team,
 				Role: roles[h.rng.IntN(len(roles))], Bot: true,
-			})
+			}
+			if pve {
+				bp.Nick = fmt.Sprintf("Союзник %d", botN)
+			}
+			players = append(players, bp)
 			count[team]++
 		}
 	}
@@ -679,9 +722,12 @@ func (h *Hub) onMatchEnd(m *match.Match, res match.Result) {
 	}
 	if r != nil {
 		r.InMatch, r.MatchID = false, ""
-		if res.Winner != "" {
+		switch {
+		case r.IsPvE():
+			r.LastWinner = res.Reason // cleared | wiped | objective | expired
+		case res.Winner != "":
 			r.LastWinner = res.Winner
-		} else {
+		default:
 			r.LastWinner = "draw"
 		}
 		if r.IsEmpty() {

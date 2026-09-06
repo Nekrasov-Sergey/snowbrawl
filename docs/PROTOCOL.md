@@ -20,11 +20,11 @@
 | `ping` | — | по желанию, сервер ответит `pong` |
 | `queue.join` | `{mode: 1..4, role}` | встать в очередь Quick Match |
 | `queue.leave` | — | выйти из очереди |
-| `room.create` | `{mode, arena}` | создать комнату, стать хостом |
+| `room.create` | `{mode, arena, gameMode?, campaign?, difficulty?}` | создать комнату, стать хостом |
 | `room.join` | `{code}` | войти по коду (четыре цифры `1234`; старый префикс `SNB-` отбрасывается) |
-| `room.slot` | `{team: "A"\|"B", index}` | занять слот команды |
+| `room.slot` | `{team: "A"\|"B", index}` | занять слот команды (в PvE только `"A"`) |
 | `room.role` | `{role}` | выбрать бойца |
-| `room.config` | `{mode, arena}` | хост меняет режим/арену |
+| `room.config` | `{mode, arena, gameMode?, campaign?, difficulty?}` | хост меняет режим/арену/PvE-настройки |
 | `room.kick` | `{playerId}` | хост выгоняет |
 | `room.start` | — | хост стартует матч, пустые слоты займут боты |
 | `room.leave` | — | выйти из комнаты |
@@ -46,11 +46,11 @@
 | `reload` | — | клиент устарел (другая сборка или протокол): `location.reload()` |
 | `drain` | `{active, inSeconds?}` | сервер готовится к перезапуску (баннер) |
 | `queue.status` | `{inQueue, mode, players, needed, waitLeft}` | состояние очереди, обновляется ~2 раза/с |
-| `room.state` | `{code, hostId, mode, arena, players[], inMatch, lastWinner?}` | полное состояние лобби при любом изменении |
+| `room.state` | `{code, hostId, mode, arena, gameMode?, campaign?, difficulty?, players[], inMatch, lastWinner?}` | полное состояние лобби при любом изменении |
 | `room.left` | `{code?: "kicked"}` | вы вышли/вас выгнали |
-| `match.start` | `{matchId, mode, arena, players[], yourId, tickRate, roomCode?}` | матч начался или вы переподключились к идущему |
+| `match.start` | `{matchId, mode, arena, gameMode?, players[], yourId, tickRate, roomCode?}` | матч начался или вы переподключились к идущему |
 | `snapshot` | `{tick, s: <снапшот sim.js>, e?: [события шага], cd?: мс до старта}` | каждый тик (20/с) |
-| `match.end` | `{winner: "A"\|"B"\|"", yourTeam, reason, roomCode?}` | `reason` ∈ `ko\|timeout\|abandoned\|shutdown` |
+| `match.end` | `{winner: "A"\|"B"\|"", yourTeam, reason, roomCode?}` | `reason` PvP ∈ `ko\|timeout\|abandoned\|shutdown`, PvE ∈ `cleared\|wiped\|objective\|expired` |
 | `pong` | — | ответ на `ping` |
 | `online` | `{n}` | число игроков на сервере; шлётся при каждом изменении |
 
@@ -67,7 +67,7 @@
 
 `bad_message`, `bad_version`, `not_allowed`, `bad_nick`, `room_not_found`, `room_full`,
 `room_limit`, `busy` (сначала выйдите из комнаты/матча), `draining`, `bad_mode`,
-`bad_arena`, `bad_role`, `bad_slot`, `server_full`, `internal`.
+`bad_arena`, `bad_role`, `bad_gamemode`, `bad_slot`, `server_full`, `internal`.
 
 ## Сессия и переподключение
 

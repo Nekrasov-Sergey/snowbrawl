@@ -21,7 +21,7 @@
     draining: false,
     flow: 'qm',               // qm | offline — куда ведёт экран выбора бойца
     qm: { mode: 3, role: null },
-    offline: { mode: 3, role: null, arena: 0, botLevel: 1 },
+    offline: { mode: 3, role: null, arena: 0, botLevel: 1, gameMode: 'pvp', campaign: true },
     create: { mode: 3, arena: 0 },
     room: null,               // последнее room.state
     game: null                // активный матч (см. startNetMatch / startOfflineMatch)
@@ -275,22 +275,51 @@
     card.onclick = onClick;
     return card;
   }
-  function buildMapGrid() {
-    var grid = $('mapGrid'); grid.innerHTML = '';
-    Sim.ARENAS.forEach(function (_, i) {
-      grid.appendChild(mapCard(i, app.offline.arena === i, function () { Audio_.uiClick(); app.offline.arena = i; buildMapGrid(); }));
+  var GAME_MODE_NAMES = { pvp: 'Дуэли (PvP)', survival: 'Волны', defense: 'Защита' };
+  function isPve(gm) { return gm && gm !== 'pvp'; }
+  function pveResultText(r) {
+    return { cleared: 'Прошлый забег: кампания пройдена 🏆', wiped: 'Прошлый забег: пати повержена',
+      objective: 'Прошлый забег: снеговик разбит', expired: 'Прошлый забег: время вышло' }[r] || '';
+  }
+  function segRow(el, items, current, onPick) {
+    if (!el) return;
+    el.innerHTML = '';
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'segBtn' + (it.value === current ? ' selected' : '');
+      b.textContent = it.label;
+      b.onclick = function () { Audio_.uiClick(); onPick(it.value); };
+      el.appendChild(b);
     });
-    var sel = $('botLevelSel'); if (sel) {
-      sel.innerHTML = '';
-      (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).forEach(function (name, lvl) {
-        var b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'segBtn' + (app.offline.botLevel === lvl ? ' selected' : '');
-        b.textContent = name;
-        b.onclick = function () { Audio_.uiClick(); app.offline.botLevel = lvl; buildMapGrid(); };
-        sel.appendChild(b);
+  }
+  function buildMapGrid() {
+    var o = app.offline, pve = isPve(o.gameMode);
+    segRow($('gameModeSel'), (Sim.GAME_MODES || ['pvp', 'survival', 'defense']).map(function (gm) {
+      return { value: gm, label: GAME_MODE_NAMES[gm] || gm };
+    }), o.gameMode, function (v) { o.gameMode = v; buildMapGrid(); });
+
+    $('pveCampaignLabel').hidden = !pve;
+    $('pveCampaignSel').hidden = !pve;
+    if (pve) {
+      segRow($('pveCampaignSel'), [{ value: true, label: 'Кампания' }, { value: false, label: 'Эндлесс' }],
+        o.campaign, function (v) { o.campaign = v; buildMapGrid(); });
+    }
+
+    // В PvE арену задаёт таблица уровней — выбор арены показываем только для PvP.
+    var showArena = !pve;
+    $('mapArenaLabel').hidden = !showArena;
+    var grid = $('mapGrid'); grid.hidden = !showArena; grid.innerHTML = '';
+    if (showArena) {
+      Sim.ARENAS.forEach(function (_, i) {
+        grid.appendChild(mapCard(i, o.arena === i, function () { Audio_.uiClick(); o.arena = i; buildMapGrid(); }));
       });
     }
+
+    $('botLevelLabel').textContent = pve ? 'Сложность' : 'Сложность ботов';
+    segRow($('botLevelSel'), (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).map(function (name, lvl) {
+      return { value: lvl, label: name };
+    }), o.botLevel, function (v) { o.botLevel = v; buildMapGrid(); });
   }
   $('backFromMap').onclick = function () { Audio_.uiClick(); goto('character'); };
   $('startOfflineBtn').onclick = function () { Audio_.uiClick(); startOfflineMatch(); };
@@ -329,27 +358,54 @@
   };
   $('leaveLobby').onclick = function () { Audio_.uiClick(); send('room.leave'); app.room = null; goto('menu'); };
   $('startRoomBtn').onclick = function () { Audio_.uiClick(); send('room.start'); };
-  $('lobbyMode').onchange = function () { send('room.config', { mode: +$('lobbyMode').value, arena: +$('lobbyArena').value }); };
-  $('lobbyArena').onchange = $('lobbyMode').onchange;
+  function sendLobbyConfig() {
+    var gm = $('lobbyGameMode').value || 'pvp';
+    send('room.config', {
+      mode: +$('lobbyMode').value, arena: +$('lobbyArena').value,
+      gameMode: gm, campaign: $('lobbyCampaign').value === '1',
+      difficulty: +$('lobbyDifficulty').value
+    });
+  }
+  ['lobbyGameMode', 'lobbyMode', 'lobbyArena', 'lobbyCampaign', 'lobbyDifficulty'].forEach(function (id) {
+    $(id).onchange = sendLobbyConfig;
+  });
 
   function renderLobby() {
     var r = app.room; if (!r) return;
     var isHost = r.hostId === app.me;
+    var gm = r.gameMode || 'pvp', pve = gm !== 'pvp';
     $('lobbyCode').textContent = r.code;
-    var modeSel = $('lobbyMode'), arenaSel = $('lobbyArena');
-    modeSel.innerHTML = Sim.MODES.map(function (n) { return '<option value="' + n + '"' + (n === r.mode ? ' selected' : '') + '>' + n + '×' + n + '</option>'; }).join('');
+    var gmSel = $('lobbyGameMode'), modeSel = $('lobbyMode'), arenaSel = $('lobbyArena');
+    var campSel = $('lobbyCampaign'), difSel = $('lobbyDifficulty');
+    gmSel.innerHTML = (Sim.GAME_MODES || ['pvp', 'survival', 'defense']).map(function (m) {
+      return '<option value="' + m + '"' + (m === gm ? ' selected' : '') + '>' + (GAME_MODE_NAMES[m] || m) + '</option>';
+    }).join('');
+    modeSel.innerHTML = Sim.MODES.map(function (n) { return '<option value="' + n + '"' + (n === r.mode ? ' selected' : '') + '>' + (pve ? n + ' игр.' : n + '×' + n) + '</option>'; }).join('');
     arenaSel.innerHTML = Sim.ARENAS.map(function (a, i) { return '<option value="' + i + '"' + (i === r.arena ? ' selected' : '') + '>' + a.name + '</option>'; }).join('');
-    modeSel.disabled = !isHost; arenaSel.disabled = !isHost;
-    $('lobbyConfigHint').textContent = isHost ? 'Вы хост: меняйте режим и арену, выгоняйте игроков, запускайте матч.' : 'Режим и арену меняет хост.';
+    campSel.innerHTML = '<option value="1"' + (r.campaign ? ' selected' : '') + '>Кампания</option><option value="0"' + (!r.campaign ? ' selected' : '') + '>Эндлесс</option>';
+    difSel.innerHTML = (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).map(function (name, lvl) {
+      return '<option value="' + lvl + '"' + (lvl === (r.difficulty || 0) ? ' selected' : '') + '>' + name + '</option>';
+    }).join('');
+    [gmSel, modeSel, arenaSel, campSel, difSel].forEach(function (s) { s.disabled = !isHost; });
+    $('lobbyArenaWrap').hidden = pve;   // в PvE арену задаёт уровень
+    $('lobbyCampaignWrap').hidden = !pve;
+    $('lobbyDifficultyWrap').hidden = !pve;
+    $('lobbyConfigHint').textContent = isHost
+      ? (pve ? 'Вы хост: пустые слоты займут союзные боты. Запускайте, когда готовы.' : 'Вы хост: меняйте режим и арену, выгоняйте игроков, запускайте матч.')
+      : 'Настройки комнаты меняет хост.';
     var res = $('lobbyResult');
     if (r.lastWinner) {
       res.hidden = false;
-      res.textContent = r.lastWinner === 'draw' ? 'Прошлый матч: ничья' : 'Прошлый матч выиграла команда ' + r.lastWinner;
+      res.textContent = pveResultText(r.lastWinner) ||
+        (r.lastWinner === 'draw' ? 'Прошлый матч: ничья' : 'Прошлый матч выиграла команда ' + r.lastWinner);
     } else res.hidden = true;
 
+    $('slotsBCol').hidden = pve;
+    $('slotsALabel').textContent = pve ? 'Пати' : 'Команда A';
+    var teams = pve ? ['A'] : ['A', 'B'];
     var byTeam = { A: {}, B: {} };
     r.players.forEach(function (p) { if (p.team) byTeam[p.team][p.index] = p; });
-    ['A', 'B'].forEach(function (team) {
+    teams.forEach(function (team) {
       var col = $('slots' + team); col.innerHTML = '';
       for (var i = 0; i < r.mode; i++) {
         var p = byTeam[team][i];
@@ -504,27 +560,32 @@
   }
 
   // HUD пишется в DOM только при изменении: сигнатура составов/HP, секунда таймера, состояние способности.
-  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', rl: '' };
-  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.rl = ''; }
+  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', rl: '', pve: '' };
+  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.rl = hudCache.pve = ''; }
   function updateHUD(snap) {
     var me = myPlayer(snap);
+    var pve = snap.pve || null;
     function row(p, right) {
       var pips = '';
       for (var i = 0; i < 3; i++) pips += '<span class="pip ' + (i < p.hp ? 'on ' + p.team.toLowerCase() : '') + '"></span>';
       var cls = 'charname' + (p.id === app.game.meId ? ' me' : '') + (p.bot ? ' bot' : '');
-      var name = escapeHtml(p.nick) + ' · ' + p.role + (p.id === app.game.meId ? ' (вы)' : '');
+      var lives = (pve && p.team === 'A' && p.lives != null) ? ' <span class="lives">♥' + p.lives + '</span>' : '';
+      var name = escapeHtml(p.nick) + ' · ' + p.role + (p.id === app.game.meId ? ' (вы)' : '') + lives;
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'
         : '<div class="charrow"><span class="' + cls + '">' + name + '</span><span class="pips">' + pips + '</span></div>';
     }
     var sig = '';
-    for (var i = 0; i < snap.players.length; i++) { var q = snap.players[i]; sig += q.id + ':' + q.hp + (q.koed ? 'k' : '') + ';'; }
+    for (var i = 0; i < snap.players.length; i++) { var q = snap.players[i]; sig += q.id + ':' + q.hp + (q.koed ? 'k' : '') + (q.lives != null ? 'l' + q.lives : '') + ';'; }
     if (sig !== hudCache.sig) {
       hudCache.sig = sig;
       var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
-      var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
       if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
-      if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
+      if (!pve) {
+        var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
+        if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
+      }
     }
+    if (pve) updatePveHud(snap, pve);
     var tm = fmtTime(snap.timeLeft);
     if (tm !== hudCache.timer) { hudCache.timer = tm; $('matchTimer').textContent = tm; }
 
@@ -551,6 +612,37 @@
       if (me.cd > 0) { abilityBtn.disabled = true; abilityCd.textContent = me.cd.toFixed(1) + ' с'; touchAbilityCd.textContent = Math.ceil(me.cd) + 'с'; }
       else { abilityBtn.disabled = false; abilityCd.textContent = me.special ? 'следующий бросок' : 'готова'; touchAbilityCd.textContent = ''; }
     }
+  }
+  function updatePveHud(snap, pve) {
+    var boss = null;
+    for (var i = 0; i < snap.players.length; i++) {
+      var p = snap.players[i];
+      if (p.et === 'boss' && !p.koed) { boss = p; break; }
+    }
+    var info;
+    if (pve.endless) {
+      info = 'Эндлесс · волна ' + ((pve.wave || 0) + 1);
+    } else {
+      info = 'Ур. ' + ((pve.level || 0) + 1) + ' · Волна ' + Math.min((pve.wave || 0) + 1, pve.waveCount) + '/' + pve.waveCount;
+    }
+    if (pve.phase === 'between' && pve.nextInMs > 0) info += ' · след. через ' + Math.ceil(pve.nextInMs / 1000) + ' с';
+    if (pve.objHp != null) info += '  🛡 ' + pve.objHp + '/' + pve.objMaxHp;
+
+    var panel = pve.phase === 'between'
+      ? '<div class="wavePanel">Готовьтесь…</div>'
+      : '<div class="wavePanel">Осталось врагов: <b>' + pve.enemiesLeft + '</b></div>';
+    if (boss) {
+      var frac = boss.mhp ? Math.max(0, Math.round(boss.hp / boss.mhp * 12)) : 0;
+      var bar = ''; for (var k = 0; k < 12; k++) bar += k < frac ? '█' : '░';
+      panel += '<div class="bossBar">' + escapeHtml(boss.nick) + '<br>' + bar + ' ' + boss.hp + '/' + boss.mhp +
+        (boss.bph === 2 ? ' <span class="phase2">ЯРОСТЬ</span>' : '') + '</div>';
+    }
+    var pveSig = info + '|' + panel;
+    if (pveSig === hudCache.pve) return;
+    hudCache.pve = pveSig;
+    var pi = $('pveInfo'); if (pi) { pi.hidden = false; pi.textContent = info; }
+    $('teamBLabel').textContent = 'Волна';
+    $('teamB').innerHTML = panel;
   }
   function myHitEvents(events) {
     if (!events || !app.game) return;
@@ -613,8 +705,15 @@
         ? 'WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.'
         : 'ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.');
     $('netStat').hidden = !!g.offline; $('netStat').textContent = ''; $('netStat').className = '';
-    $('teamALabel').textContent = 'Команда A' + (g.myTeam === 'A' ? ' (вы)' : '');
-    $('teamBLabel').textContent = 'Команда B' + (g.myTeam === 'B' ? ' (вы)' : '');
+    var pve = g.gameMode && g.gameMode !== 'pvp';
+    $('pveInfo').hidden = !pve;
+    if (pve) {
+      $('teamALabel').textContent = 'Пати';
+      $('teamBLabel').textContent = 'Волна';
+    } else {
+      $('teamALabel').textContent = 'Команда A' + (g.myTeam === 'A' ? ' (вы)' : '');
+      $('teamBLabel').textContent = 'Команда B' + (g.myTeam === 'B' ? ' (вы)' : '');
+    }
     $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
     Device.apply();
     touchLayer.hidden = !isTouch;
@@ -634,17 +733,39 @@
     try { if (sessionStorage.getItem(k)) return true; sessionStorage.setItem(k, '1'); } catch (e) { /* игнор */ }
     return false;
   }
-  function showResult(winner, myTeam, reason) {
+  var PVE_REASONS = { cleared: 1, wiped: 1, objective: 1, expired: 1 };
+  function showResult(winner, myTeam, reason, snap) {
     var g = app.game; if (!g) return;
     g.over = true;
     intent.reset(); touch.reset();
     overlay.style.display = 'flex';
-    if (reason === 'shutdown') { overlayText.textContent = 'МАТЧ ПРЕРВАН'; overlayText.style.color = '#ffd166'; overlaySub.textContent = 'Сервер перезапускается для обновления.'; }
+    if (PVE_REASONS[reason]) {
+      showPveResult(reason, snap || g.lastSnap);
+    } else if (reason === 'shutdown') { overlayText.textContent = 'МАТЧ ПРЕРВАН'; overlayText.style.color = '#ffd166'; overlaySub.textContent = 'Сервер перезапускается для обновления.'; }
     else if (reason === 'abandoned') { overlayText.textContent = 'МАТЧ ЗАВЕРШЁН'; overlayText.style.color = '#ffd166'; overlaySub.textContent = 'Все игроки покинули матч.'; }
     else if (!winner) { overlayText.textContent = 'НИЧЬЯ'; overlayText.style.color = '#ffd166'; overlaySub.textContent = 'Время вышло.'; Audio_.drawChord(); }
     else if (winner === myTeam) { overlayText.textContent = 'ПОБЕДА 🎉'; overlayText.style.color = '#7CFFB2'; overlaySub.textContent = 'Команда ' + winner + ' вывела из строя всех соперников.'; Audio_.victoryFanfare(); }
     else { overlayText.textContent = 'ПОРАЖЕНИЕ'; overlayText.style.color = '#ff8080'; overlaySub.textContent = 'Команда ' + winner + ' оказалась сильнее.'; Audio_.defeatChord(); }
     $('againBtn').textContent = g.offline ? 'Играть снова' : (g.roomCode ? 'В лобби' : 'Играть снова');
+  }
+  function showPveResult(reason, snap) {
+    var pve = snap && snap.pve;
+    var where = pve ? (pve.endless
+      ? 'Волн пройдено: ' + (pve.wavesSurvived || 0)
+      : 'Уровень ' + ((pve.level || 0) + 1) + ', волна ' + ((pve.wave || 0) + 1)) : '';
+    if (reason === 'cleared') {
+      overlayText.textContent = 'КАМПАНИЯ ПРОЙДЕНА 🏆'; overlayText.style.color = '#7CFFB2';
+      overlaySub.textContent = 'Все уровни зачищены. Попробуйте эндлесс!'; Audio_.victoryFanfare();
+    } else if (reason === 'objective') {
+      overlayText.textContent = 'СНЕГОВИК РАЗБИТ'; overlayText.style.color = '#ff8080';
+      overlaySub.textContent = 'Объект не удержали. ' + where; Audio_.defeatChord();
+    } else if (reason === 'expired') {
+      overlayText.textContent = 'ВРЕМЯ ВЫШЛО'; overlayText.style.color = '#ffd166';
+      overlaySub.textContent = where; Audio_.drawChord();
+    } else { // wiped
+      overlayText.textContent = 'ПАТИ ПОВЕРЖЕНА'; overlayText.style.color = '#ff8080';
+      overlaySub.textContent = where; Audio_.defeatChord();
+    }
   }
   function stopGame() {
     var g = app.game; if (!g) return;
@@ -679,15 +800,24 @@
   // ------------------------------------------------------------
   function startOfflineMatch() {
     stopGame();
-    var drv = window.SBOffline.start({ mode: app.offline.mode, arena: app.offline.arena, role: app.offline.role, botLevel: app.offline.botLevel });
+    var o = app.offline;
+    var drv = window.SBOffline.start({
+      mode: o.mode, arena: o.arena, role: o.role, botLevel: o.botLevel,
+      gameMode: o.gameMode, campaign: o.campaign, difficulty: o.botLevel
+    });
     sendTraining(true);
     var g = {
       offline: true, meId: drv.meId, players: drv.players, myTeam: 'A', roomCode: '', over: false, countdown: 0,
+      gameMode: drv.gameMode || 'pvp',
       input: function (kind, x, y, power) { if (!g.over) drv.input(kind, x, y, power); },
       frame: function () {
         if (g.over) return { snap: g.lastSnap, events: [] };
         var fr = drv.frame(); g.lastSnap = fr.snap; g.countdown = fr.countdown || 0;
-        if (drv.isOver()) showResult(drv.winner(), 'A', drv.winner() ? 'ko' : 'timeout');
+        if (drv.isOver()) {
+          var reason = drv.reason && drv.reason();
+          if (!reason) reason = drv.winner() ? 'ko' : 'timeout';
+          showResult(drv.winner(), 'A', reason, fr.snap);
+        }
         return fr;
       },
       stop: function () { drv.stop(); }
@@ -742,7 +872,7 @@
       },
       onEnd: function (e) {
         if (g.lastSnap == null && buffer.latest()) g.lastSnap = buffer.latest();
-        showResult(e.winner, e.yourTeam || myTeam, e.reason);
+        showResult(e.winner, e.yourTeam || myTeam, e.reason, g.lastSnap);
       },
       frame: function () {
         var snap = buffer.current();
