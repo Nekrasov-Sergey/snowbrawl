@@ -30,7 +30,9 @@ fi
 IMAGE_BASE="${SNOWBRAWL_IMAGE%%:*}"
 export SNOWBRAWL_IMAGE="${IMAGE_BASE}:${TAG}"
 BASE_URL="http://127.0.0.1:${SNOWBRAWL_HTTP_PORT:-80}"
-if [[ "${SNOWBRAWL_TLS:-false}" == "true" ]]; then BASE_URL="http://127.0.0.1:80"; fi
+# С Caddy сервер не публикует 80-й порт: стучаться туда нельзя, у Caddy нет сайта для
+# Host: 127.0.0.1 и он ответит 404. Ходим прямо в сервер на loopback (см. docker-compose.tls.yml).
+if [[ "${SNOWBRAWL_TLS:-false}" == "true" ]]; then BASE_URL="http://127.0.0.1:8080"; fi
 
 echo "==> Образ: $SNOWBRAWL_IMAGE"
 
