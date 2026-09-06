@@ -95,6 +95,15 @@
   }
   function send(type, data) { if (!app.net || !app.net.send(type, data)) toast('Нет соединения с сервером.'); }
 
+  // Тренировка с ботами идёт в браузере, сервер о ней не знает. Сообщаем, чтобы админка
+  // показывала, чем занят игрок. Молча: без связи тренировка всё равно играется.
+  function sendTraining(on) {
+    if (!app.net) return;
+    app.net.send('training', on
+      ? { on: true, mode: app.offline.mode, arena: app.offline.arena, role: app.offline.role }
+      : { on: false });
+  }
+
   function onMessage(type, d) {
     switch (type) {
       case 'welcome':
@@ -103,6 +112,7 @@
         $('verSim').textContent = d.sim; $('menuNick').textContent = d.nick;
         setOnline(d.online);
         setDrain(!!d.draining);
+        if (app.game && app.game.offline) sendTraining(true);
         // Восстановление места после переподключения.
         if (d.resume === 'queue') { if (app.screen !== 'search') goto('search'); }
         else if (d.resume === 'room') { if (app.screen !== 'lobby') goto('lobby'); }
@@ -639,6 +649,7 @@
   function stopGame() {
     var g = app.game; if (!g) return;
     app.game = null;
+    if (g.offline) sendTraining(false);
     intent.reset(); touch.reset(); mouse.dragging = false; keys = {};
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (g.stop) g.stop();
@@ -669,6 +680,7 @@
   function startOfflineMatch() {
     stopGame();
     var drv = window.SBOffline.start({ mode: app.offline.mode, arena: app.offline.arena, role: app.offline.role, botLevel: app.offline.botLevel });
+    sendTraining(true);
     var g = {
       offline: true, meId: drv.meId, players: drv.players, myTeam: 'A', roomCode: '', over: false, countdown: 0,
       input: function (kind, x, y, power) { if (!g.over) drv.input(kind, x, y, power); },

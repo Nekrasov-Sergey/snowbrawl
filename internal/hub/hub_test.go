@@ -19,6 +19,7 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/ws"
 )
@@ -468,4 +469,48 @@ func TestStatsCarriesNicks(t *testing.T) {
 		t.Fatalf("в матче 1×1 ожидались двое, получено %+v", st.Matches[0].Players)
 	}
 	host.close()
+}
+
+func TestTrainingShownInStats(t *testing.T) {
+	s := newServer(t, nil)
+	p := s.connect(t, "Тренирующийся", "")
+	p.send(protocol.CTraining, protocol.Training{On: true, Mode: 3, Arena: 2, Role: "Снайпер"})
+
+	// Ответа на training нет, поэтому ждём, пока hub обработает сообщение.
+	var ps *hub.PlayerStat
+	for i := 0; i < 100; i++ {
+		st := s.hub.Stats()
+		for j := range st.Sessions {
+			if st.Sessions[j].Training {
+				ps = &st.Sessions[j]
+			}
+		}
+		if ps != nil {
+			if st.Training != 1 {
+				t.Fatalf("счётчик тренировок = %d, ожидалась 1", st.Training)
+			}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ps == nil {
+		t.Fatal("тренировка не попала в сводку")
+	}
+	if ps.Nick != "Тренирующийся" || ps.TrainingMode != 3 || ps.TrainingArena != 2 || ps.TrainingRole != "Снайпер" {
+		t.Fatalf("сводка тренировки = %+v", *ps)
+	}
+	if ps.Place != string(session.InMenu) {
+		t.Fatalf("место игрока = %q, тренировка не должна его менять", ps.Place)
+	}
+
+	// Выход из тренировки снимает пометку.
+	p.send(protocol.CTraining, protocol.Training{On: false})
+	for i := 0; i < 100; i++ {
+		if s.hub.Stats().Training == 0 {
+			p.close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("пометка тренировки не снялась")
 }

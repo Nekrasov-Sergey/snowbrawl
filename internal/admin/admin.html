@@ -66,6 +66,12 @@ function table(id, head, rows, empty) {
 }
 
 function place(p) {
+  // Тренировка идёт в браузере игрока: сервер знает о ней со слов клиента и держит его в меню.
+  if (p.training) {
+    return 'тренировка с ботами ' + mode(p.trainingMode) +
+      (p.trainingRole ? ', ' + esc(p.trainingRole) : '') + ', арена ' + (p.trainingArena || 0) +
+      ' (' + secs(p.trainingMs || 0) + ')';
+  }
   if (p.place === 'menu') return 'в меню';
   if (p.place === 'queue') return 'в очереди ' + mode(+p.where || 0);
   if (p.place === 'room') return 'в комнате ' + esc(p.where);
@@ -103,7 +109,8 @@ async function load() {
     '<span class="pill">sim ' + esc(s.sim) + '</span>' +
     '<span class="pill">proto ' + s.proto + '</span>' +
     '<span class="pill">сессий ' + s.players + ', на связи ' + s.online + '</span>' +
-    '<span class="pill">матчей ' + s.matchesLive + '</span>';
+    '<span class="pill">матчей ' + s.matchesLive + '</span>' +
+    (s.training ? '<span class="pill">в тренировке ' + s.training + '</span>' : '');
 
   document.getElementById('drain').innerHTML = s.draining
     ? '<div class="drain">Идёт выкладка новой версии (с ' + new Date(s.drainSince).toLocaleTimeString() +
