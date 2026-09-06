@@ -67,9 +67,12 @@ Merge-коммитов в истории больше не бывает.
    ```bash
    git checkout main && git pull --ff-only
    git rev-parse HEAD          # должен совпасть с sha из ответа merge
-   git branch -d feat/<kebab>  # удалённую GitHub снёс сам
+   git branch -D feat/<kebab>  # удалённую GitHub снёс сам
    git remote prune origin
    ```
+
+   Именно `-D`: после rebase-merge коммит в `main` имеет другой SHA, поэтому `git branch -d`
+   считает ветку неслитой и отказывается её удалять.
 
 10. **Нужен ли тег.** Если изменения тронули только `docs/**`, `README.md`, `CHANGELOG.md`,
     `CLAUDE.md`, `.github/**` — тега нет, работа закончена: тег перезапускает сервер и рвёт
@@ -120,7 +123,8 @@ Merge-коммитов в истории больше не бывает.
 cd /opt/snowbrawl && ./deploy.sh v0.2.1
 ```
 
-Старые образы лежат в GHCR.
+Если новая сборка вообще не стартует, `deploy.sh` сам поднимает обратно предыдущий образ, а шаг
+деплоя в Actions при этом остаётся красным. Старые образы лежат в GHCR.
 
 ## CHANGELOG
 
