@@ -22,9 +22,10 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.1.1',                 // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.2.0',                 // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, CHARGE_FULL_MS, KO_ANIM_MS,
-  ARENAS, ROLE_STATS, SPECIALS, MODES, HERO_DESCRIPTIONS, ABILITY_HINT_TEXT, ALL_ROLES,
+  ARENAS, ROLE_STATS, SPECIALS, ABILITIES, BOT_LEVEL_NAMES, MODES,
+  HERO_DESCRIPTIONS, ABILITY_HINT_TEXT, ALL_ROLES,
   makeRng(seed), shuffle(rng, arr),
 
   createMatch(config, seed) -> state,
@@ -41,6 +42,28 @@ SnowBrawlSim = {
 `applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`. Остальное — для клиента,
 в том числе `canHitTarget(obstacles, shooter, x, y, power)` (с 1.1.1): упрётся ли снежок в
 препятствие — клиент красит луч прицела красным.
+
+### Способности (с 1.2.0)
+
+У каждой роли один пассив (всегда) и один актив на Q (`input.kind = 'special'`, `(x,y)` —
+прицел/направление). `ABILITIES[role] = { active: { id, cooldown, needsDir }, passive: <id> }`.
+`SPECIALS[role]` сохранён для совместимости: `{ type: <id>, cooldown, needsDir }`.
+
+| Роль | Пассив | Актив (id) |
+|---|---|---|
+| Раннер | при 1 HP скорость +20% | `dash` — рывок с неуязвимостью 0.25 с |
+| Танк | оглушение вдвое короче | `taram` — рывок вперёд, сбивает и оглушает врага |
+| Снайпер | снежок быстрее/настильнее | `snipe` — следующий бросок по прямой на максимум |
+| Бомбер | взрывы ломают ящики и чужую стену | `explosive` — взрывной снежок (AoE) |
+| Фризер | враги рядом −12 % скорости | `frost` — следующий бросок оставляет наледь (−40 %) |
+| Щит | щитовой пузырь гасит одно попадание, реген 12 с | `wall` — снежная стена с прочностью |
+
+Три уровня ботов: `config.players[].botLevel` (0 Лёгкий / 1 Обычный / 2 Сложный, по умолчанию 1)
+масштабируют разброс прицела, паузы решений, шанс уворота и использования способности.
+`BOT_LEVEL_NAMES` — подписи для UI. Уровень 1 сохраняет прежнее поведение ботов.
+
+Разрушаемые укрытия: у части препятствий `ARENAS[].obstacles[]` есть `hp` (снимается только
+взрывом Бомбера). Зона льда карты «Река»: `ARENAS[].ice = { y0, y1, slow }` — замедление в полосе.
 
 ### `createMatch(config, seed)`
 
@@ -93,6 +116,9 @@ config = {
 {type:'ko', targetId, x, y}                    // третье попадание
 {type:'wallHit', x, y}  {type:'miss', x, y}  {type:'explosion', x, y}
 {type:'special', playerId, special}  {type:'wallPlaced', playerId}
+{type:'dash', playerId, kind:'dash'|'taram'}   {type:'knockback', targetId, x, y}   // с 1.2.0
+{type:'frost', x, y}   {type:'bubblePop', targetId, x, y}   {type:'bubbleReady', playerId}
+{type:'obstacleHit', x, y}   {type:'obstacleBreak', x, y}
 {type:'matchEnd', winner: 'A'|'B'|null}
 ```
 
@@ -104,11 +130,14 @@ config = {
 Сериализуемый объект для рендера и сети (через `JSON.stringify`, поэтому без функций и циклов):
 
 ```
-{ v, tick, time, timeLeft, mode, arena, over, winner,
+{ v, tick, time, timeLeft, mode, arena, ice, over, winner,
   players: [{ id, team, role, nick, bot, x, y, hp, stun, koed, koAt, hitAt,
-              moving, anim, charging, power, aimX, aimY, special, cd }],
-  balls:   [{ id, x, y, z, r, team, ex, fr }],
-  walls:   [{ x, y, w, h, team, ttl, life }] }
+              moving, anim, charging, power, aimX, aimY, special, cd,
+              armed, iframe, dash, bubble, slow }],           // armed…slow — с 1.2.0
+  balls:   [{ id, x, y, z, r, team, ex, fr, sn }],
+  walls:   [{ x, y, w, h, team, hp, maxHp, ttl, life }],
+  destr:   [{ i, type, x, y, w, h, r, mat, hp, maxHp }],      // разрушаемые укрытия арены
+  fx:      [{ id, kind:'frost', x, y, r, team, ttl, life }] } // зоны на земле
 ```
 
 Клиент интерполирует `players[].x/y/anim/power` и `balls[].x/y/z` по `id` между снапшотами —

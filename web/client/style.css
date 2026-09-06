@@ -69,6 +69,13 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .heroInfo b { color: #eaf2ff; }
 .navRow { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; justify-content: center; }
 
+/* сегментированный переключатель (сложность ботов) */
+.segRow { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.segBtn { padding: 8px 16px; border-radius: 8px; border: 1px solid #3a5a80; background: #0e1a2b; color: #a9c2e0; font: 600 14px 'Segoe UI', Arial, sans-serif; cursor: pointer; }
+.segBtn:hover { border-color: #4aa8ff; }
+.segBtn.selected { border-color: #4aa8ff; background: #1c3a58; color: #eaf2ff; }
+html.touch .segBtn { min-height: 44px; }
+
 /* настройки */
 .settingsBox { background: #16283f; border: 1px solid #3a5a80; border-radius: 10px; padding: 8px 18px; width: 100%; max-width: 460px; box-sizing: border-box; }
 .setRow { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid #23405f; font-size: 15px; cursor: pointer; }
