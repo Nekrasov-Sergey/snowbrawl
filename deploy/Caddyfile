@@ -5,3 +5,14 @@
 		header_up X-Forwarded-For {remote_host}
 	}
 }
+
+# www — на канонический адрес. Сертификат Caddy получит сам, A-запись на www нужна.
+www.{$SNOWBRAWL_DOMAIN} {
+	redir https://{$SNOWBRAWL_DOMAIN}{uri} permanent
+}
+
+# Заход по IP или чужому имени. ACME-проверку Caddy обслуживает своим маршрутом
+# раньше этого блока, поэтому выпуск сертификата он не ломает.
+http:// {
+	redir https://{$SNOWBRAWL_DOMAIN}{uri} permanent
+}
