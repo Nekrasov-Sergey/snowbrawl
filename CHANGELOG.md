@@ -2,7 +2,7 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — semver.
 
-## [Unreleased]
+## [0.3.0] - 2026-09-06
 
 ### Added
 - Способности у всех ролей: один пассив (всегда) и один актив на Q (`SIM_VERSION` 1.2.0).
