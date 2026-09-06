@@ -48,12 +48,16 @@
 | `room.state` | `{code, hostId, mode, arena, players[], inMatch, lastWinner?}` | полное состояние лобби при любом изменении |
 | `room.left` | `{code?: "kicked"}` | вы вышли/вас выгнали |
 | `match.start` | `{matchId, mode, arena, players[], yourId, tickRate, roomCode?}` | матч начался или вы переподключились к идущему |
-| `snapshot` | `{tick, s: <снапшот sim.js>, e?: [события шага]}` | каждый тик (20/с) |
+| `snapshot` | `{tick, s: <снапшот sim.js>, e?: [события шага], cd?: мс до старта}` | каждый тик (20/с) |
 | `match.end` | `{winner: "A"\|"B"\|"", yourTeam, reason, roomCode?}` | `reason` ∈ `ko\|timeout\|abandoned\|shutdown` |
 | `pong` | — | ответ на `ping` |
+| `online` | `{n}` | число игроков на сервере; шлётся при каждом изменении |
 
 `room.state.players[]`: `{id, nick, team, index, role, host, connected}`.
 `match.start.players[]`: `{id, nick, team, role, bot}`.
+
+`snapshot.cd` > 0 — идёт отсчёт перед началом матча: симуляция стоит, `input` сервером не
+применяется, клиент рисует «3, 2, 1». Поля нет — матч идёт.
 
 Формат `snapshot.s` и `snapshot.e` определяет `sim.js` (`snapshot(state)` и события `step`),
 см. [SIM_CONTRACT.md](SIM_CONTRACT.md). Сервер их не разбирает и передаёт как есть.

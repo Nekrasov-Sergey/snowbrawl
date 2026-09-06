@@ -43,6 +43,8 @@ window.SBAudio = (function () {
     setEnabled: function (v) { enabled = v; try { localStorage.setItem('sb.sound', v ? 'on' : 'off'); } catch (e) { /* игнор */ } },
     isEnabled: function () { return enabled; },
     uiClick: function () { tone({ freq: 900, duration: 0.05, type: 'square', gain: 0.07 }); },
+    countBeep: function () { tone({ freq: 660, duration: 0.12, type: 'square', gain: 0.09 }); },
+    goBeep: function () { tone({ freq: 990, duration: 0.25, type: 'square', gain: 0.12 }); tone({ freq: 1320, duration: 0.3, type: 'triangle', gain: 0.08, delay: 0.06 }); },
     /** Замах = лепка снежка: череда мягких «шлепков» ладонями по снегу. Не тон, а ритмичный
      *  шум — каждый шлепок это короткий всплеск шума через bandpass плюс низкий уплотняющий
      *  толчок. Темп и громкость растут с силой. Бёрсты планируются по таймеру (~5–9/с), а не

@@ -40,6 +40,7 @@ type Result struct {
 type Options struct {
 	TickRate   int
 	AFKTimeout time.Duration
+	Countdown  time.Duration // отсчёт перед стартом: симуляция стоит, снапшоты идут
 	Log        zerolog.Logger
 	Now        func() time.Time
 }
@@ -61,6 +62,7 @@ type Match struct {
 	Arena    int
 	Players  []protocol.MatchPlayer
 	Created  time.Time
+	StartsAt time.Time // до этого момента идёт отсчёт, симуляция стоит
 
 	opts  Options
 	onEnd func(*Match, Result)
@@ -98,7 +100,8 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 	now := opts.Now()
 	m := &Match{
 		ID: "m" + randomHex(4), RoomCode: roomCode, Mode: mode, Arena: arena, Players: players, Created: now,
-		opts: opts, onEnd: onEnd, sim: s, humans: map[string]*human{}, stopCh: make(chan struct{}),
+		StartsAt: now.Add(opts.Countdown),
+		opts:     opts, onEnd: onEnd, sim: s, humans: map[string]*human{}, stopCh: make(chan struct{}),
 	}
 	for _, p := range players {
 		if !p.Bot {
@@ -161,7 +164,11 @@ func (m *Match) Input(playerID string, raw json.RawMessage) {
 	if !ok || h.left || m.done {
 		return
 	}
-	h.lastInput = m.opts.Now()
+	now := m.opts.Now()
+	h.lastInput = now
+	if now.Before(m.StartsAt) {
+		return // идёт отсчёт: команды до старта не применяем, иначе боец рванёт с первого тика
+	}
 	if h.bot && h.conn != nil {
 		m.setBot(h, false) // вернулся из AFK
 	}
@@ -279,6 +286,23 @@ func (m *Match) step(dt float64) bool {
 		return true
 	}
 
+	// Отсчёт перед стартом: симуляцию не двигаем, но снапшоты шлём — клиент рисует арену,
+	// бойцов на стартовых местах и крупные «3, 2, 1».
+	if left := m.StartsAt.Sub(now); left > 0 {
+		state, err := m.sim.Snapshot()
+		if err != nil {
+			m.opts.Log.Error().Err(err).Str("match", m.ID).Msg("sim snapshot failed, aborting match")
+			m.done = true
+			m.result = Result{Reason: ReasonShutdown}
+			return true
+		}
+		m.tick++
+		m.broadcast(protocol.MustEncode(protocol.SSnapshot, protocol.Snapshot{
+			Tick: m.tick, State: state, Countdown: int(left.Milliseconds()),
+		}))
+		return false
+	}
+
 	events, err := m.sim.Step(dt)
 	if err != nil {
 		m.opts.Log.Error().Err(err).Str("match", m.ID).Msg("sim step failed, aborting match")
@@ -297,12 +321,7 @@ func (m *Match) step(dt float64) bool {
 	if len(events) <= 2 { // "[]"
 		events = nil
 	}
-	msg := protocol.MustEncode(protocol.SSnapshot, protocol.Snapshot{Tick: m.tick, State: state, Events: events})
-	for _, h := range m.humans {
-		if h.conn != nil && !h.left {
-			h.conn.Send(msg)
-		}
-	}
+	m.broadcast(protocol.MustEncode(protocol.SSnapshot, protocol.Snapshot{Tick: m.tick, State: state, Events: events}))
 	if m.sim.IsOver() {
 		m.done = true
 		winner := m.sim.Winner()
@@ -314,6 +333,15 @@ func (m *Match) step(dt float64) bool {
 		return true
 	}
 	return false
+}
+
+// broadcast шлёт сообщение всем подключённым игрокам матча. Вызывать под m.mu.
+func (m *Match) broadcast(msg []byte) {
+	for _, h := range m.humans {
+		if h.conn != nil && !h.left {
+			h.conn.Send(msg)
+		}
+	}
 }
 
 // finish рассылает match.end и уведомляет владельца. Вызывается ровно один раз.

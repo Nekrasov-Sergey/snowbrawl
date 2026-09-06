@@ -355,3 +355,65 @@ func TestBadProtocolVersionGetsReload(t *testing.T) {
 		t.Fatal("client with wrong protocol must receive reload and be closed")
 	}
 }
+
+// Счётчик онлайна привязан к игровому сокету: первый же клиент видит в welcome единицу
+// (раньше число бралось отдельным HTTP-запросом, который успевал ответить нулём до hello),
+// а подключение и отключение соседа приходят push-сообщением online.
+func TestOnlineCountFollowsConnections(t *testing.T) {
+	s := newServer(t, nil)
+
+	a := s.connect(t, "Аня", "")
+	if got := s.hub.Online(); got != 1 {
+		t.Fatalf("после первого подключения online = %d, ожидалась 1", got)
+	}
+
+	b := s.connect(t, "Боря", "")
+	var on protocol.Online
+	a.expect(protocol.SOnline, &on)
+	if on.N != 2 {
+		t.Fatalf("push после второго подключения: n = %d, ожидалось 2", on.N)
+	}
+
+	b.close()
+	a.expect(protocol.SOnline, &on)
+	if on.N != 1 {
+		t.Fatalf("push после отключения: n = %d, ожидалась 1", on.N)
+	}
+}
+
+// Welcome несёт актуальное число игроков, включая самого подключившегося.
+func TestWelcomeCarriesOnline(t *testing.T) {
+	s := newServer(t, nil)
+	s.connect(t, "Первый", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	url := "ws" + strings.TrimPrefix(s.srv.URL, "http") + "/ws"
+	c, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close(websocket.StatusNormalClosure, "") }()
+	if err := c.Write(ctx, websocket.MessageText, protocol.MustEncode(protocol.CHello,
+		protocol.Hello{Nick: "Второй", BuildVersion: "dev", ProtocolVersion: protocol.Version})); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		env, err := protocol.Decode(data)
+		if err != nil || env.Type != protocol.SWelcome {
+			continue
+		}
+		var w protocol.Welcome
+		if err := json.Unmarshal(env.Data, &w); err != nil {
+			t.Fatal(err)
+		}
+		if w.Online != 2 {
+			t.Fatalf("welcome.online = %d, ожидалось 2 (сам плюс уже подключённый)", w.Online)
+		}
+		return
+	}
+}

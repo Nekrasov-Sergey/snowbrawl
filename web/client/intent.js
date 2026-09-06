@@ -17,16 +17,20 @@ window.SBIntent = (function () {
    *  o.getMe(snap)   → мой боец из снапшота
    *  o.canAct(p)     → может ли боец действовать (жив, не оглушён)
    *  o.onChargeStart(), o.onChargeEnd() — хуки (звук замаха)
-   * Возвращает api; api.local — {charging, power, aimX, aimY} для мгновенного отклика в рендере.
+   *  o.blocked()     → true, пока команды принимать нельзя (отсчёт перед стартом)
+   * Возвращает api; api.local — {charging, power, aimX, aimY, pending} для мгновенного отклика
+   * в рендере. pending — нажатие во время перезарядки: замах начнётся сам, как только она пройдёт.
    */
   function create(o) {
-    var local = { charging: false, start: 0, aimX: 0, aimY: 0, power: 0 };
+    var local = { charging: false, start: 0, aimX: 0, aimY: 0, power: 0, pending: false };
     var moveDir = null, lastMoveSend = 0, lastAimSend = 0;
+    var pending = null; // {x, y, dir} — нажатие, отложенное до конца перезарядки
     var lastAimDir = { x: 1, y: 0 };
 
     function game() { var g = o.getGame(); return g && !g.over ? g : null; }
     function me() { var g = o.getGame(); return g ? o.getMe(g.lastSnap) : null; }
-    function send(kind, x, y, power) { var g = game(); if (g) g.input(kind, x, y, power); }
+    function blocked() { return !!(o.blocked && o.blocked()); }
+    function send(kind, x, y, power) { var g = game(); if (g && !blocked()) g.input(kind, x, y, power); }
     function now() { return performance.now(); }
     function speedOf(p) { return (Sim.ROLE_STATS[p.role] || { speed: 150 }).speed; }
     function chargePower() { return Math.min((now() - local.start) / Sim.CHARGE_FULL_MS, 1); }
@@ -37,6 +41,7 @@ window.SBIntent = (function () {
       if (o.onChargeStart) o.onChargeStart();
     }
     function endCharge() { local.charging = false; local.power = 0; if (o.onChargeEnd) o.onChargeEnd(); }
+    function clearPending() { pending = null; local.pending = false; }
 
     var api = {
       local: local,
@@ -49,11 +54,17 @@ window.SBIntent = (function () {
       },
       chargeStartAt: function (x, y) {
         var p = me();
-        if (!p || !o.canAct(p) || local.charging || p.rl > 0) return false; // p.rl — идёт перезарядка выстрела
+        if (!p || !o.canAct(p) || local.charging || pending || blocked()) return false;
+        if (p.rl > 0) { // идёт перезарядка: запоминаем нажатие, замах начнётся сам по готовности
+          pending = { x: x, y: y, dir: false };
+          local.pending = true;
+          return true;
+        }
         beginCharge(x, y);
         return true;
       },
       aimAt: function (x, y) {
+        if (pending) { if (!pending.dir) { pending.x = x; pending.y = y; } return; }
         if (!local.charging) return;
         local.aimX = x; local.aimY = y;
         var t = now();
@@ -61,12 +72,14 @@ window.SBIntent = (function () {
         lastAimSend = t; send('aim', x, y);
       },
       throwAt: function (x, y) {
+        if (pending) { clearPending(); return; } // отпустил раньше, чем закончилась перезарядка
         if (!local.charging) return;
         var pw = chargePower();
         endCharge();
         send('throw', x, y, pw);
       },
       cancelCharge: function () {
+        if (pending) { clearPending(); return; }
         if (!local.charging) return;
         endCharge();
         send('cancelCharge', 0, 0);
@@ -95,17 +108,22 @@ window.SBIntent = (function () {
         if (!p) return false;
         if (dir) lastAimDir = dir;
         var pt = aimPoint(lastAimDir, p);
-        return api.chargeStartAt(pt.x, pt.y);
+        var ok = api.chargeStartAt(pt.x, pt.y);
+        if (ok && pending) pending.dir = true; // стик крутится, точку пересчитаем в момент старта
+        return ok;
       },
       setAimDir: function (dir) {
         var p = me();
-        if (!p || !dir || !local.charging) return;
+        if (!p || !dir) return;
+        if (pending) { lastAimDir = dir; return; }
+        if (!local.charging) return;
         lastAimDir = dir;
         var pt = aimPoint(dir, p);
         api.aimAt(pt.x, pt.y);
       },
       throwDir: function (dir) {
         var p = me();
+        if (pending) { clearPending(); return; }
         if (!p) { api.cancelCharge(); return; }
         if (dir) lastAimDir = dir;
         var pt = aimPoint(lastAimDir, p);
@@ -123,6 +141,14 @@ window.SBIntent = (function () {
       /** Раз в кадр: переотправка цели движения, сила замаха, сброс замаха при оглушении/KO. */
       tick: function () {
         var p = me();
+        if (pending) {
+          if (!p || !o.canAct(p) || blocked()) clearPending();
+          else if (!(p.rl > 0)) { // перезарядка закончилась — начинаем отложенный замах
+            var pt = pending.dir ? aimPoint(lastAimDir, p) : { x: pending.x, y: pending.y };
+            clearPending();
+            beginCharge(pt.x, pt.y);
+          }
+        }
         if (local.charging) {
           local.power = chargePower();
           if (!p || !o.canAct(p)) endCharge();
@@ -137,7 +163,7 @@ window.SBIntent = (function () {
       },
       /** Есть ли активное намерение движения (для переотправки после возврата вкладки). */
       isMoving: function () { return !!moveDir; },
-      reset: function () { if (local.charging) endCharge(); moveDir = null; }
+      reset: function () { if (local.charging) endCharge(); clearPending(); moveDir = null; }
     };
     return api;
   }

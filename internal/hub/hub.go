@@ -39,6 +39,8 @@ type Hub struct {
 	draining bool
 	drainAt  time.Time
 	rng      *rand.Rand
+	// lastOnline — последнее разосланное число игроков: рассылаем только при изменении.
+	lastOnline int
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -176,6 +178,7 @@ func (h *Hub) OnClose(c *ws.Conn) {
 		}
 	}
 	h.log.Debug().Str("player", p.ID).Str("place", string(p.Place)).Msg("player disconnected")
+	h.broadcastOnline(nil)
 }
 
 // ---- hello / сессии ----
@@ -230,7 +233,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 
 	c.Send(protocol.MustEncode(protocol.SWelcome, protocol.Welcome{
 		Token: p.Token, PlayerID: p.ID, Nick: p.Nick, Build: h.cfg.BuildVersion, SimVersion: h.prog.Version(),
-		Proto: protocol.Version, Draining: h.draining, Resume: string(p.Place),
+		Proto: protocol.Version, Draining: h.draining, Resume: string(p.Place), Online: h.onlineLocked(),
 	}))
 	if h.draining {
 		c.Send(h.drainMessage())
@@ -257,6 +260,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 			}
 		}
 	}
+	h.broadcastOnline(p)
 }
 
 // ---- Quick Match ----
@@ -588,7 +592,7 @@ func (h *Hub) broadcastRoom(r *room.Room) {
 func (h *Hub) launchMatch(roomCode string, mode, arena int, humans []protocol.MatchPlayer) *match.Match {
 	players := h.fillTeams(mode, humans)
 	m, err := match.New(h.prog, roomCode, mode, arena, players, match.Options{
-		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Log: h.log, Now: h.now,
+		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Countdown: h.cfg.Countdown, Log: h.log, Now: h.now,
 	}, h.onMatchEnd)
 	if err != nil {
 		h.log.Error().Err(err).Msg("create match")
@@ -842,6 +846,11 @@ type QueueStat struct {
 func (h *Hub) Online() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.onlineLocked()
+}
+
+// onlineLocked считает подключённых игроков. Вызывать под h.mu.
+func (h *Hub) onlineLocked() int {
 	n := 0
 	for _, p := range h.byID {
 		if p.Connected() {
@@ -849,6 +858,24 @@ func (h *Hub) Online() int {
 		}
 	}
 	return n
+}
+
+// broadcastOnline рассылает новое число игроков, если оно изменилось. Вызывать под h.mu.
+// Счётчик идёт по игровому сокету, поэтому клиент видит ровно то состояние, в котором сам
+// находится: при обрыве связи он не получит цифру и покажет прочерк вместо ложного нуля.
+// except пропускается: тот, кто только что подключился, уже получил число в welcome.
+func (h *Hub) broadcastOnline(except *session.Player) {
+	n := h.onlineLocked()
+	if n == h.lastOnline {
+		return
+	}
+	h.lastOnline = n
+	msg := protocol.MustEncode(protocol.SOnline, protocol.Online{N: n})
+	for _, p := range h.byID {
+		if p != except {
+			p.Send(msg)
+		}
+	}
 }
 
 // Stats возвращает сводку.

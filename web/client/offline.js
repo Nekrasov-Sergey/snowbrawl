@@ -13,6 +13,8 @@ window.SBOffline = (function () {
     return players;
   }
 
+  var COUNTDOWN_MS = 3000; // как на сервере: матч начинается после отсчёта
+
   /** start({mode, arena, role, botLevel}) → драйвер с интерфейсом, совместимым с сетевым матчем. */
   function start(cfg) {
     var seed = (Math.random() * 0xffffffff) >>> 0;
@@ -20,12 +22,14 @@ window.SBOffline = (function () {
     var players = buildPlayers(cfg.mode, cfg.role, rng, cfg.botLevel);
     var state = Sim.createMatch({ mode: cfg.mode, arenaIndex: cfg.arena, players: players }, seed);
     var lastT = performance.now();
+    var startAt = lastT + COUNTDOWN_MS;
     return {
       offline: true,
       meId: 'me',
       players: players.map(function (p) { return { id: p.id, nick: p.nick, team: p.team, role: p.role, bot: p.bot }; }),
       mode: cfg.mode, arena: cfg.arena,
       input: function (kind, x, y, power) {
+        if (performance.now() < startAt) return; // идёт отсчёт
         var inp = { kind: kind, x: x, y: y };
         if (power !== undefined) inp.power = power;
         Sim.applyInput(state, 'me', inp);
@@ -33,6 +37,10 @@ window.SBOffline = (function () {
       /** Продвинуть симуляцию до текущего времени; вернуть {snap, events}. */
       frame: function () {
         var now = performance.now();
+        if (now < startAt) { // отсчёт: симуляция стоит, арена и бойцы уже видны
+          lastT = now;
+          return { snap: Sim.snapshot(state), events: [], countdown: Math.round(startAt - now) };
+        }
         var dt = Math.min((now - lastT) / 1000, 0.05);
         lastT = now;
         var events = Sim.step(state, dt);
