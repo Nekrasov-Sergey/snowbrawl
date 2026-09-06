@@ -1,4 +1,11 @@
 # Caddy: автоматический TLS (Let's Encrypt) и проксирование WebSocket на сервер игры.
+
+# Глобальные настройки обязаны идти первым блоком файла.
+{
+	# Почта аккаунта ACME: Let's Encrypt предупредит письмом, если продление сертификата сломается.
+	email 79508031750@yandex.ru
+}
+
 {$SNOWBRAWL_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy server:8080 {

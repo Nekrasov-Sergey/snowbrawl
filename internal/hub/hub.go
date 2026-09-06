@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -820,26 +822,59 @@ type Stats struct {
 	DrainSince  *time.Time   `json:"drainSince,omitempty"`
 	Players     int          `json:"players"`
 	Online      int          `json:"online"`
+	Sessions    []PlayerStat `json:"sessions"`
 	Rooms       []RoomStat   `json:"rooms"`
 	Queues      []QueueStat  `json:"queues"`
 	Matches     []match.Info `json:"matches"`
 	MatchesLive int          `json:"matchesLive"`
 }
 
+// PlayerStat — сессия игрока в сводке: кто это, где находится и на связи ли.
+type PlayerStat struct {
+	ID         string `json:"id"`
+	Nick       string `json:"nick"`
+	IP         string `json:"ip"`
+	Place      string `json:"place"`           // menu | queue | room | match
+	Where      string `json:"where,omitempty"` // код комнаты, режим очереди или id матча
+	Online     bool   `json:"online"`
+	AgeMs      int64  `json:"ageMs"`                  // сколько существует сессия
+	OfflineFor int64  `json:"offlineForMs,omitempty"` // сколько нет связи
+}
+
 // RoomStat — комната в сводке.
 type RoomStat struct {
-	Code    string `json:"code"`
-	Mode    int    `json:"mode"`
-	Arena   int    `json:"arena"`
-	Members int    `json:"members"`
-	InMatch bool   `json:"inMatch"`
+	Code    string       `json:"code"`
+	Mode    int          `json:"mode"`
+	Arena   int          `json:"arena"`
+	Members int          `json:"members"`
+	InMatch bool         `json:"inMatch"`
+	Players []MemberStat `json:"players"`
+}
+
+// MemberStat — участник комнаты в сводке.
+type MemberStat struct {
+	ID     string `json:"id"`
+	Nick   string `json:"nick"`
+	Team   string `json:"team,omitempty"`
+	Role   string `json:"role,omitempty"`
+	Host   bool   `json:"host,omitempty"`
+	Online bool   `json:"online"`
 }
 
 // QueueStat — очередь в сводке.
 type QueueStat struct {
-	Mode     int `json:"mode"`
-	Players  int `json:"players"`
-	WaitLeft int `json:"waitLeftMs"`
+	Mode     int           `json:"mode"`
+	Players  int           `json:"players"`
+	WaitLeft int           `json:"waitLeftMs"`
+	Waiting  []QueuePlayer `json:"waiting"`
+}
+
+// QueuePlayer — игрок в очереди.
+type QueuePlayer struct {
+	ID      string `json:"id"`
+	Nick    string `json:"nick"`
+	Role    string `json:"role,omitempty"`
+	WaitsMs int64  `json:"waitsMs"`
 }
 
 // Online возвращает число подключённых игроков (для публичного /api/online).
@@ -890,17 +925,52 @@ func (h *Hub) Stats() Stats {
 	}
 	st.Players = len(h.byID)
 	for _, p := range h.byID {
-		if p.Connected() {
+		online := p.Connected()
+		if online {
 			st.Online++
 		}
+		ps := PlayerStat{
+			ID: p.ID, Nick: p.Nick, IP: p.IP, Place: string(p.Place), Online: online,
+			AgeMs: now.Sub(p.CreatedAt).Milliseconds(),
+		}
+		switch p.Place {
+		case session.InRoom:
+			ps.Where = p.RoomCode
+		case session.InQueue:
+			ps.Where = strconv.Itoa(p.QueueMode)
+		case session.InMatch:
+			ps.Where = p.MatchID
+		}
+		if !online && !p.DisconnectedAt.IsZero() {
+			ps.OfflineFor = now.Sub(p.DisconnectedAt).Milliseconds()
+		}
+		st.Sessions = append(st.Sessions, ps)
 	}
+	sort.Slice(st.Sessions, func(i, j int) bool { return st.Sessions[i].Nick < st.Sessions[j].Nick })
 	for _, r := range h.rooms {
-		st.Rooms = append(st.Rooms, RoomStat{Code: r.Code, Mode: r.Mode, Arena: r.Arena, Members: len(r.Members), InMatch: r.InMatch})
+		rs := RoomStat{Code: r.Code, Mode: r.Mode, Arena: r.Arena, Members: len(r.Members), InMatch: r.InMatch}
+		for _, m := range r.Members {
+			ms := MemberStat{ID: m.ID, Team: m.Team, Role: m.Role, Host: m.ID == r.HostID}
+			if p := h.byID[m.ID]; p != nil {
+				ms.Nick, ms.Online = p.Nick, p.Connected()
+			}
+			rs.Players = append(rs.Players, ms)
+		}
+		st.Rooms = append(st.Rooms, rs)
 	}
 	for _, q := range h.queues.All() {
-		if len(q.Entries) > 0 {
-			st.Queues = append(st.Queues, QueueStat{Mode: q.Mode, Players: len(q.Entries), WaitLeft: int(q.WaitLeft(now, h.cfg.QueueWait) / time.Millisecond)})
+		if len(q.Entries) == 0 {
+			continue
 		}
+		qs := QueueStat{Mode: q.Mode, Players: len(q.Entries), WaitLeft: int(q.WaitLeft(now, h.cfg.QueueWait) / time.Millisecond)}
+		for _, e := range q.Entries {
+			qp := QueuePlayer{ID: e.PlayerID, Role: e.Role, WaitsMs: now.Sub(e.JoinedAt).Milliseconds()}
+			if p := h.byID[e.PlayerID]; p != nil {
+				qp.Nick = p.Nick
+			}
+			qs.Waiting = append(qs.Waiting, qp)
+		}
+		st.Queues = append(st.Queues, qs)
 	}
 	for _, m := range h.matches {
 		st.Matches = append(st.Matches, m.Info())

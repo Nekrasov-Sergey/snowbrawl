@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SnowBrawl admin</title>
+<style>
+:root { color-scheme: dark }
+body { font-family: system-ui, sans-serif; background: #0e1a2b; color: #eaf2ff; padding: 16px; max-width: 1000px; margin: 0 auto }
+h1 { font-size: 22px; margin: 0 0 12px }
+h3 { font-size: 16px; margin: 22px 0 6px }
+table { border-collapse: collapse; width: 100%; margin: 6px 0 }
+td, th { border: 1px solid #3a5a80; padding: 6px 8px; font-size: 13px; text-align: left; vertical-align: top }
+th { background: #17293f; font-weight: 600 }
+tr.off td { opacity: .5 }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 10px; background: #274363; font-size: 12px; margin: 0 6px 6px 0 }
+.drain { display: block; margin: 10px 0; padding: 10px 12px; border-radius: 8px; background: #46381a; color: #ffd166; font-size: 13px }
+.empty { color: #86a0bd; font-size: 13px; margin: 6px 0 }
+.bar { display: flex; align-items: center; gap: 10px; margin: 12px 0; font-size: 12px; color: #86a0bd }
+button { background: #274363; border: none; color: #eaf2ff; padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer }
+.team-A { color: #7cc4ff } .team-B { color: #ffb37c }
+.ip { color: #86a0bd; font-variant-numeric: tabular-nums }
+.err { color: #ff8b8b }
+@media (max-width: 700px) {
+  body { padding: 10px }
+  table, tbody, tr, td { display: block; width: auto }
+  thead { display: none }
+  tr { border: 1px solid #3a5a80; border-radius: 8px; margin-bottom: 8px; padding: 4px }
+  td { border: none; padding: 3px 6px }
+  td::before { content: attr(data-h) ": "; color: #86a0bd }
+}
+</style>
+</head>
+<body>
+<h1>❄️ SnowBrawl — админка</h1>
+<div id="sum"></div>
+<div id="drain"></div>
+<div class="bar"><span id="fresh">загрузка…</span><button id="pause">Пауза</button></div>
+
+<h3>Игроки</h3><div id="sessions"></div>
+<h3>Матчи</h3><div id="matches"></div>
+<h3>Комнаты</h3><div id="rooms"></div>
+<h3>Очереди</h3><div id="queues"></div>
+
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+let paused = false, lastAt = 0;
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const secs = ms => {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' с';
+  const m = Math.floor(s / 60);
+  return m < 60 ? m + ' мин' : Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
+};
+const mode = n => n + '×' + n;
+
+// Таблица или строка «сейчас никого», если данных нет.
+function table(id, head, rows, empty) {
+  const el = document.getElementById(id);
+  if (!rows || !rows.length) { el.innerHTML = '<p class="empty">' + empty + '</p>'; return; }
+  el.innerHTML = '<table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
+    rows.map(r => '<tr' + (r.off ? ' class="off"' : '') + '>' +
+      r.cells.map((c, i) => '<td data-h="' + head[i] + '">' + c + '</td>').join('') + '</tr>').join('') +
+    '</tbody></table>';
+}
+
+function place(p) {
+  if (p.place === 'menu') return 'в меню';
+  if (p.place === 'queue') return 'в очереди ' + mode(+p.where || 0);
+  if (p.place === 'room') return 'в комнате ' + esc(p.where);
+  if (p.place === 'match') return 'в матче ' + esc(p.where);
+  return esc(p.place);
+}
+
+// Состав матча: команда A против B, с пометками кто бот и за кого играет бот.
+function roster(players) {
+  const side = t => (players || []).filter(p => p.team === t).map(p => {
+    let s = esc(p.nick);
+    if (p.bot) s += ' 🤖';
+    else if (p.left) s += ' ⚠ вышел';
+    else if (p.botNow) s += ' ⚠ бот';
+    else if (!p.online) s += ' ⚠ нет связи';
+    return s;
+  }).join(', ') || '—';
+  return '<span class="team-A">' + side('A') + '</span> против <span class="team-B">' + side('B') + '</span>';
+}
+
+async function load() {
+  let s;
+  try {
+    const r = await fetch('/admin/state?token=' + encodeURIComponent(token));
+    if (!r.ok) { document.getElementById('sum').innerHTML = '<span class="err">Ошибка ' + r.status + '</span>'; return; }
+    s = await r.json();
+  } catch (e) {
+    document.getElementById('sum').innerHTML = '<span class="err">Сервер не отвечает</span>';
+    return;
+  }
+  lastAt = Date.now();
+
+  document.getElementById('sum').innerHTML =
+    '<span class="pill">build ' + esc(s.build) + '</span>' +
+    '<span class="pill">sim ' + esc(s.sim) + '</span>' +
+    '<span class="pill">proto ' + s.proto + '</span>' +
+    '<span class="pill">сессий ' + s.players + ', на связи ' + s.online + '</span>' +
+    '<span class="pill">матчей ' + s.matchesLive + '</span>';
+
+  document.getElementById('drain').innerHTML = s.draining
+    ? '<div class="drain">Идёт выкладка новой версии (с ' + new Date(s.drainSince).toLocaleTimeString() +
+      '). Новые матчи не начинаются, текущие доигрываются. Снимется само после перезапуска сервера.</div>'
+    : '';
+
+  table('sessions', ['ник', 'где', 'связь', 'в игре', 'IP', 'id'],
+    (s.sessions || []).map(p => ({
+      off: !p.online,
+      cells: [esc(p.nick), place(p),
+        p.online ? 'онлайн' : 'нет связи ' + secs(p.offlineForMs || 0),
+        secs(p.ageMs), '<span class="ip">' + esc(p.ip) + '</span>', esc(p.id)],
+    })), 'Сейчас никого нет.');
+
+  table('matches', ['состав', 'режим', 'арена', 'людей', 'на связи', 'тик', 'комната', 'начат'],
+    (s.matches || []).map(m => ({
+      cells: [roster(m.players), mode(m.mode), m.arena, m.humans, m.online, m.tick,
+        m.roomCode || '—', new Date(m.created).toLocaleTimeString()],
+    })), 'Матчей нет.');
+
+  table('rooms', ['код', 'участники', 'режим', 'арена', 'в матче'],
+    (s.rooms || []).map(r => ({
+      cells: [esc(r.code),
+        (r.players || []).map(p => esc(p.nick || p.id) + (p.host ? ' ★' : '') +
+          (p.team ? ' (' + p.team + ')' : '') + (p.online ? '' : ' ⚠')).join(', ') || '—',
+        mode(r.mode), r.arena, r.inMatch ? 'да' : 'нет'],
+    })), 'Комнат нет.');
+
+  table('queues', ['режим', 'кто ждёт', 'до добора ботами'],
+    (s.queues || []).map(q => ({
+      cells: [mode(q.mode),
+        (q.waiting || []).map(p => esc(p.nick || p.id) + (p.role ? ' — ' + esc(p.role) : '') +
+          ' (' + secs(p.waitsMs) + ')').join(', ') || '—',
+        Math.ceil(q.waitLeftMs / 1000) + ' с'],
+    })), 'Очереди пусты.');
+}
+
+document.getElementById('pause').onclick = function () {
+  paused = !paused;
+  this.textContent = paused ? 'Продолжить' : 'Пауза';
+  if (!paused) load();
+};
+
+setInterval(function () {
+  const el = document.getElementById('fresh');
+  if (paused) { el.textContent = 'обновление на паузе'; return; }
+  el.textContent = lastAt ? 'обновлено ' + Math.round((Date.now() - lastAt) / 1000) + ' с назад' : 'загрузка…';
+}, 500);
+setInterval(function () { if (!paused) load(); }, 2000);
+load();
+</script>
+</body>
+</html>
