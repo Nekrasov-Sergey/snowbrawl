@@ -36,6 +36,7 @@ const (
 	CRoomLeave  = "room.leave"
 	CMatchLeave = "match.leave"
 	CInput      = "input"
+	CTraining   = "training"
 	CPing       = "ping"
 )
 
@@ -112,6 +113,15 @@ type Error struct {
 type QueueJoin struct {
 	Mode int    `json:"mode"`
 	Role string `json:"role"`
+}
+
+// Training — клиент сообщает, что играет тренировку с ботами. Тренировка целиком в браузере,
+// сервер в ней не участвует и знает о ней только отсюда — чтобы админка показывала, чем занят игрок.
+type Training struct {
+	On    bool   `json:"on"`
+	Mode  int    `json:"mode,omitempty"`
+	Arena int    `json:"arena,omitempty"`
+	Role  string `json:"role,omitempty"`
 }
 
 // QueueStatus — состояние очереди для игрока.

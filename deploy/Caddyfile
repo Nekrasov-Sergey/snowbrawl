@@ -8,9 +8,8 @@
 
 {$SNOWBRAWL_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy server:8080 {
-		header_up X-Forwarded-For {remote_host}
-	}
+	# X-Forwarded-For Caddy проставляет сам, вручную дублировать не нужно.
+	reverse_proxy server:8080
 }
 
 # www — на канонический адрес. Сертификат Caddy получит сам, A-запись на www нужна.

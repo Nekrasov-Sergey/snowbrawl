@@ -154,6 +154,8 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.leaveMatch(p)
 	case protocol.CInput:
 		h.handleInput(p, env.Data)
+	case protocol.CTraining:
+		h.handleTraining(p, env.Data)
 	default:
 		h.sendErr(c, protocol.ErrBadMessage, "unknown type "+env.Type)
 	}
@@ -290,6 +292,7 @@ func (h *Hub) handleQueueJoin(p *session.Player, data json.RawMessage) {
 		return
 	}
 	q := h.queues.Join(req.Mode, p.ID, req.Role, h.now())
+	p.Training = false
 	p.Place, p.QueueMode = session.InQueue, req.Mode
 	if q.Full() {
 		h.startQuickMatch(q)
@@ -383,6 +386,7 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 	}
 	r := room.New(code, p.ID, p.IP, req.Mode, req.Arena, h.now())
 	h.rooms[code] = r
+	p.Training = false
 	p.Place, p.RoomCode = session.InRoom, code
 	h.log.Info().Str("room", code).Str("host", p.ID).Int("mode", req.Mode).Msg("room created")
 	h.broadcastRoom(r)
@@ -416,6 +420,7 @@ func (h *Hub) handleRoomJoin(p *session.Player, data json.RawMessage) {
 		h.sendErrP(p, protocol.ErrRoomFull, "room is full")
 		return
 	}
+	p.Training = false
 	p.Place, p.RoomCode = session.InRoom, code
 	h.broadcastRoom(r)
 }
@@ -720,6 +725,25 @@ func (h *Hub) handleInput(p *session.Player, data json.RawMessage) {
 
 // ---- Фоновые таймауты ----
 
+// handleTraining запоминает, что игрок ушёл в тренировку с ботами. Место игрока не меняется:
+// для сервера он по-прежнему в меню и может встать в очередь или создать комнату.
+// Вызывается из OnMessage, то есть уже под h.mu — свой Lock здесь был бы дедлоком.
+func (h *Hub) handleTraining(p *session.Player, data json.RawMessage) {
+	var req protocol.Training
+	if err := json.Unmarshal(data, &req); err != nil {
+		h.sendErrP(p, protocol.ErrBadMessage, "bad training")
+		return
+	}
+	if !req.On {
+		p.Training = false
+		return
+	}
+	if !p.Training {
+		p.TrainingSince = h.now()
+	}
+	p.Training, p.TrainingMode, p.TrainingArena, p.TrainingRole = true, req.Mode, req.Arena, req.Role
+}
+
 func (h *Hub) tick() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -822,6 +846,7 @@ type Stats struct {
 	DrainSince  *time.Time   `json:"drainSince,omitempty"`
 	Players     int          `json:"players"`
 	Online      int          `json:"online"`
+	Training    int          `json:"training"` // сколько игроков в тренировке с ботами
 	Sessions    []PlayerStat `json:"sessions"`
 	Rooms       []RoomStat   `json:"rooms"`
 	Queues      []QueueStat  `json:"queues"`
@@ -839,6 +864,13 @@ type PlayerStat struct {
 	Online     bool   `json:"online"`
 	AgeMs      int64  `json:"ageMs"`                  // сколько существует сессия
 	OfflineFor int64  `json:"offlineForMs,omitempty"` // сколько нет связи
+
+	// Тренировка с ботами: сервер её не считает, данные со слов клиента.
+	Training      bool   `json:"training,omitempty"`
+	TrainingMode  int    `json:"trainingMode,omitempty"`
+	TrainingArena int    `json:"trainingArena,omitempty"`
+	TrainingRole  string `json:"trainingRole,omitempty"`
+	TrainingMs    int64  `json:"trainingMs,omitempty"`
 }
 
 // RoomStat — комната в сводке.
@@ -943,6 +975,11 @@ func (h *Hub) Stats() Stats {
 		}
 		if !online && !p.DisconnectedAt.IsZero() {
 			ps.OfflineFor = now.Sub(p.DisconnectedAt).Milliseconds()
+		}
+		if p.Training {
+			ps.Training, ps.TrainingMode, ps.TrainingArena, ps.TrainingRole = true, p.TrainingMode, p.TrainingArena, p.TrainingRole
+			ps.TrainingMs = now.Sub(p.TrainingSince).Milliseconds()
+			st.Training++
 		}
 		st.Sessions = append(st.Sessions, ps)
 	}
