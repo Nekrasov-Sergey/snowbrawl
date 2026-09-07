@@ -1,6 +1,6 @@
-// Package hub — центр сервера: сессии игроков, комнаты, очереди Quick Match, реестр
-// матчей, дренаж. Все структуры данных под одним мьютексом; матчи живут в своих
-// горутинах и общаются с hub через потокобезопасные методы и колбэк onEnd.
+// Package hub — центр сервера: сессии игроков, комнаты, список комнат, реестр матчей,
+// дренаж. Все структуры данных под одним мьютексом; матчи живут в своих горутинах и
+// общаются с hub через потокобезопасные методы и колбэк onEnd.
 package hub
 
 import (
@@ -17,7 +17,6 @@ import (
 
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/match"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/matchmaking"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/room"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
@@ -36,11 +35,17 @@ type Hub struct {
 	byToken  map[string]*session.Player
 	byID     map[string]*session.Player
 	rooms    map[string]*room.Room
-	queues   *matchmaking.Queues
 	matches  map[string]*match.Match
 	draining bool
 	drainAt  time.Time
 	rng      *rand.Rand
+	// listSubs — кто смотрит список комнат: страницу пересобираем в тике и отправляем,
+	// только если она изменилась. Ключ — id игрока.
+	listSubs map[string]*listSub
+	// codeTries — неудачные попытки войти по коду, по IP: защита от перебора закрытых комнат.
+	codeTries map[string]*codeTry
+	// matchPush — последняя отправленная в лобби сводка идущего матча, по коду комнаты.
+	matchPush map[string]string
 	// lastOnline — последнее разосланное число игроков: рассылаем только при изменении.
 	lastOnline int
 
@@ -53,14 +58,16 @@ func New(cfg config.Config, prog *sim.Program, log zerolog.Logger) *Hub {
 	return &Hub{
 		cfg: cfg, prog: prog, log: log, now: time.Now,
 		byToken: map[string]*session.Player{}, byID: map[string]*session.Player{},
-		rooms: map[string]*room.Room{}, queues: matchmaking.New(cfg.QueueWait),
-		matches: map[string]*match.Match{},
-		rng:     rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xDEADBEEF)),
-		stopCh:  make(chan struct{}),
+		rooms:    map[string]*room.Room{},
+		matches:  map[string]*match.Match{},
+		listSubs: map[string]*listSub{}, codeTries: map[string]*codeTry{},
+		matchPush: map[string]string{},
+		rng:       rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xDEADBEEF)),
+		stopCh:    make(chan struct{}),
 	}
 }
 
-// Run запускает фоновый цикл таймаутов (очереди, TTL сессий и комнат).
+// Run запускает фоновый цикл таймаутов (TTL сессий и комнат, рассылка списка комнат).
 func (h *Hub) Run() {
 	h.wg.Add(1)
 	go func() {
@@ -129,11 +136,6 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.sendErr(c, protocol.ErrNotAllowed, "already said hello")
 	case protocol.CPing:
 		c.Send(protocol.MustEncode(protocol.SPong, nil))
-	case protocol.CQueueJoin:
-		h.handleQueueJoin(p, env.Data)
-	case protocol.CQueueLeave:
-		h.leaveQueue(p)
-		h.sendQueueStatus(p)
 	case protocol.CRoomCreate:
 		h.handleRoomCreate(p, env.Data)
 	case protocol.CRoomJoin:
@@ -144,6 +146,14 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.handleRoomRole(p, env.Data)
 	case protocol.CRoomConfig:
 		h.handleRoomConfig(p, env.Data)
+	case protocol.CRoomReady:
+		h.handleRoomReady(p, env.Data)
+	case protocol.CRoomList:
+		h.handleRoomList(p, env.Data)
+	case protocol.CRoomUnlist:
+		delete(h.listSubs, p.ID)
+	case protocol.CMatchJoin:
+		h.handleMatchJoin(p)
 	case protocol.CRoomKick:
 		h.handleRoomKick(p, env.Data)
 	case protocol.CRoomStart:
@@ -171,9 +181,8 @@ func (h *Hub) OnClose(c *ws.Conn) {
 	}
 	p.Conn = nil
 	p.DisconnectedAt = h.now()
+	delete(h.listSubs, p.ID)
 	switch p.Place {
-	case session.InQueue:
-		h.leaveQueue(p)
 	case session.InRoom:
 		h.broadcastRoom(h.rooms[p.RoomCode])
 	case session.InMatch:
@@ -244,8 +253,6 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 	}
 	// Восстановление места.
 	switch p.Place {
-	case session.InQueue:
-		h.sendQueueStatus(p)
 	case session.InRoom:
 		if r := h.rooms[p.RoomCode]; r != nil {
 			h.broadcastRoom(r)
@@ -265,89 +272,6 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		}
 	}
 	h.broadcastOnline(p)
-}
-
-// ---- Quick Match ----
-
-func (h *Hub) handleQueueJoin(p *session.Player, data json.RawMessage) {
-	var req protocol.QueueJoin
-	if err := json.Unmarshal(data, &req); err != nil {
-		h.sendErrP(p, protocol.ErrBadMessage, "bad queue.join")
-		return
-	}
-	if p.Place != session.InMenu {
-		h.sendErrP(p, protocol.ErrBusy, "leave current room/match first")
-		return
-	}
-	if h.draining {
-		h.sendErrP(p, protocol.ErrDraining, "server is restarting soon")
-		return
-	}
-	if req.Mode < 1 || req.Mode > 4 {
-		h.sendErrP(p, protocol.ErrBadMode, "mode must be 1..4")
-		return
-	}
-	if !h.prog.HasRole(req.Role) {
-		h.sendErrP(p, protocol.ErrBadRole, "unknown role")
-		return
-	}
-	q := h.queues.Join(req.Mode, p.ID, req.Role, h.now())
-	p.Training = false
-	p.Place, p.QueueMode = session.InQueue, req.Mode
-	if q.Full() {
-		h.startQuickMatch(q)
-		return
-	}
-	h.broadcastQueue(q)
-}
-
-func (h *Hub) leaveQueue(p *session.Player) {
-	if p.Place != session.InQueue {
-		return
-	}
-	h.queues.Leave(p.QueueMode, p.ID)
-	q := h.queues.Get(p.QueueMode)
-	p.ToMenu()
-	h.broadcastQueue(q)
-}
-
-func (h *Hub) sendQueueStatus(p *session.Player) {
-	if p.Place != session.InQueue {
-		p.Send(protocol.MustEncode(protocol.SQueueStatus, protocol.QueueStatus{InQueue: false}))
-		return
-	}
-	q := h.queues.Get(p.QueueMode)
-	p.Send(protocol.MustEncode(protocol.SQueueStatus, protocol.QueueStatus{
-		InQueue: true, Mode: q.Mode, Players: len(q.Entries), Needed: q.Capacity(),
-		WaitLeft: int(q.WaitLeft(h.now(), h.cfg.QueueWait) / time.Millisecond),
-	}))
-}
-
-func (h *Hub) broadcastQueue(q *matchmaking.Queue) {
-	for _, e := range q.Entries {
-		if p := h.byID[e.PlayerID]; p != nil {
-			h.sendQueueStatus(p)
-		}
-	}
-}
-
-func (h *Hub) startQuickMatch(q *matchmaking.Queue) {
-	entries := q.Take(h.now())
-	h.rng.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
-	var players []protocol.MatchPlayer
-	for i, e := range entries {
-		p := h.byID[e.PlayerID]
-		if p == nil {
-			continue
-		}
-		team := "A"
-		if i%2 == 1 {
-			team = "B"
-		}
-		players = append(players, protocol.MatchPlayer{ID: p.ID, Nick: p.Nick, Team: team, Role: e.Role})
-	}
-	arena := h.rng.IntN(h.prog.ArenaCount())
-	h.launchMatch("", q.Mode, arena, "pvp", false, 0, players)
 }
 
 // ---- Комнаты ----
@@ -390,7 +314,8 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 	for h.rooms[code] != nil {
 		code = room.GenerateCode()
 	}
-	r := room.New(code, p.ID, p.IP, req.Mode, req.Arena, gameMode, req.Campaign, difficulty, h.now())
+	r := room.New(code, p.ID, p.IP, room.Config{Mode: req.Mode, Arena: req.Arena, GameMode: gameMode,
+		Campaign: req.Campaign, Difficulty: difficulty, Visibility: req.Visibility}, h.now())
 	h.rooms[code] = r
 	p.Training = false
 	p.Place, p.RoomCode = session.InRoom, code
@@ -408,27 +333,33 @@ func (h *Hub) handleRoomJoin(p *session.Player, data json.RawMessage) {
 		h.sendErrP(p, protocol.ErrBusy, "leave current room/match first")
 		return
 	}
+	if !h.codeTryAllowed(p.IP) {
+		h.sendErrP(p, protocol.ErrTooManyTries, "too many attempts, wait a minute")
+		return
+	}
 	code, err := protocol.NormalizeRoomCode(req.Code)
 	if err != nil {
-		h.sendErrP(p, protocol.ErrRoomNotFound, "bad code")
+		h.codeTryFailed(p.IP)
+		h.sendErrP(p, protocol.ErrBadCode, "bad code")
 		return
 	}
 	r := h.rooms[code]
 	if r == nil {
+		h.codeTryFailed(p.IP)
 		h.sendErrP(p, protocol.ErrRoomNotFound, "room not found")
 		return
 	}
-	if r.InMatch {
-		h.sendErrP(p, protocol.ErrBusy, "match in progress, try later")
-		return
-	}
+	// Войти можно и в комнату с идущим матчем: слот комнаты — это боец матча, вошедший
+	// получает свободное место и сам решает, вступать ли в бой.
 	if err := r.Join(p.ID); err != nil {
 		h.sendErrP(p, protocol.ErrRoomFull, "room is full")
 		return
 	}
 	p.Training = false
 	p.Place, p.RoomCode = session.InRoom, code
+	delete(h.listSubs, p.ID)
 	h.broadcastRoom(r)
+	h.sendRoomMatch(p, r) // вошёл в комнату с идущим матчем — сразу показываем, что там происходит
 }
 
 func (h *Hub) roomOf(p *session.Player) *room.Room {
@@ -455,6 +386,7 @@ func (h *Hub) handleRoomSlot(p *session.Player, data json.RawMessage) {
 	if r == nil {
 		return
 	}
+	// В матче слот меняет только тот, кто сидит в лобби: у играющего боец уже привязан к слоту.
 	if err := r.SetSlot(p.ID, req.Team, req.Index); err != nil {
 		h.sendErrP(p, protocol.ErrBadSlot, err.Error())
 		return
@@ -496,12 +428,52 @@ func (h *Hub) handleRoomConfig(p *session.Player, data json.RawMessage) {
 		return
 	}
 	cfg := room.Config{Mode: req.Mode, Arena: req.Arena, GameMode: gameMode,
-		Campaign: req.Campaign, Difficulty: clampDifficulty(req.Difficulty)}
+		Campaign: req.Campaign, Difficulty: clampDifficulty(req.Difficulty), Visibility: req.Visibility}
 	if err := r.SetConfig(p.ID, cfg, h.prog.ArenaCount()); err != nil {
 		h.sendErrP(p, protocol.ErrNotAllowed, err.Error())
 		return
 	}
 	h.broadcastRoom(r)
+}
+
+// handleRoomReady отмечает готовность. Когда готовы все люди в комнате, включая хоста,
+// матч стартует сам — отдельного отсчёта в лобби нет, он есть в начале матча.
+func (h *Hub) handleRoomReady(p *session.Player, data json.RawMessage) {
+	var req protocol.RoomReady
+	if err := json.Unmarshal(data, &req); err != nil {
+		h.sendErrP(p, protocol.ErrBadMessage, "bad room.ready")
+		return
+	}
+	r := h.roomOf(p)
+	if r == nil {
+		return
+	}
+	if r.InMatch {
+		h.sendErrP(p, protocol.ErrBusy, "match already running")
+		return
+	}
+	if err := r.SetReady(p.ID, req.Ready); err != nil {
+		h.sendErrP(p, protocol.ErrNotAllowed, err.Error())
+		return
+	}
+	if h.tryAutoStart(r) {
+		return
+	}
+	h.broadcastRoom(r)
+}
+
+// tryAutoStart запускает матч, если все на связи готовы. Возвращает true, если матч пошёл.
+func (h *Hub) tryAutoStart(r *room.Room) bool {
+	if r == nil || r.InMatch || h.draining || !r.AllReady(h.connectedByID) {
+		return false
+	}
+	return h.startRoomMatch(r) != nil
+}
+
+// connectedByID — есть ли у игрока живое соединение (для расчёта готовности).
+func (h *Hub) connectedByID(id string) bool {
+	p := h.byID[id]
+	return p != nil && p.Connected()
 }
 
 func (h *Hub) handleRoomKick(p *session.Player, data json.RawMessage) {
@@ -564,6 +536,11 @@ func (h *Hub) handleRoomStart(p *session.Player) {
 		h.sendErrP(p, protocol.ErrDraining, "server is restarting soon")
 		return
 	}
+	h.startRoomMatch(r)
+}
+
+// startRoomMatch собирает состав комнаты и запускает матч. Вызывать под h.mu.
+func (h *Hub) startRoomMatch(r *room.Room) *match.Match {
 	r.PlaceAll()
 	var players []protocol.MatchPlayer
 	for _, m := range r.Members {
@@ -571,14 +548,16 @@ func (h *Hub) handleRoomStart(p *session.Player) {
 		if mp == nil {
 			continue
 		}
-		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Role: m.Role})
+		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Index: m.Index, Role: m.Role})
 	}
 	m := h.launchMatch(r.Code, r.Mode, r.Arena, r.GameMode, r.Campaign, r.Difficulty, players)
 	if m == nil {
-		return
+		return nil
 	}
 	r.InMatch, r.MatchID = true, m.ID
+	r.ResetReady() // следующий матч комнаты начинается с чистой готовности
 	h.broadcastRoom(r)
+	return m
 }
 
 // normGameMode приводит пустой режим к "pvp".
@@ -589,23 +568,27 @@ func normGameMode(gm string) string {
 	return gm
 }
 
-// clampDifficulty ограничивает ручку сложности диапазоном 0..2 (по умолчанию 1).
-func clampDifficulty(d int) int {
-	if d < 0 || d > 2 {
+// clampDifficulty ограничивает ручку сложности диапазоном 0..2. Не присланная сложность —
+// «Обычный» (1), а не «Лёгкий»: иначе забытое поле незаметно ослабляло бы ботов.
+func clampDifficulty(d *int) int {
+	if d == nil || *d < 0 || *d > 2 {
 		return 1
 	}
-	return d
+	return *d
 }
 
 func (h *Hub) roomState(r *room.Room) protocol.RoomState {
+	ready, _ := r.ReadyCount(h.connectedByID)
 	st := protocol.RoomState{Code: r.Code, HostID: r.HostID, Mode: r.Mode, Arena: r.Arena,
-		GameMode: r.GameMode, Campaign: r.Campaign, Difficulty: r.Difficulty,
-		InMatch: r.InMatch, LastWinner: r.LastWinner}
+		GameMode: r.GameMode, Campaign: r.Campaign, Difficulty: r.Difficulty, Visibility: r.Visibility,
+		InMatch: r.InMatch, LastWinner: r.LastWinner, ReadyCount: ready}
 	for _, m := range r.Members {
 		p := h.byID[m.ID]
-		rp := protocol.RoomPlayer{ID: m.ID, Team: m.Team, Index: m.Index, Role: m.Role, Host: m.ID == r.HostID}
+		rp := protocol.RoomPlayer{ID: m.ID, Team: m.Team, Index: m.Index, Role: m.Role,
+			Host: m.ID == r.HostID, Ready: m.Ready}
 		if p != nil {
 			rp.Nick, rp.Connected = p.Nick, p.Connected()
+			rp.InMatch = p.Place == session.InMatch && p.MatchID == r.MatchID
 		}
 		st.Players = append(st.Players, rp)
 	}
@@ -628,7 +611,7 @@ func (h *Hub) broadcastRoom(r *room.Room) {
 
 // launchMatch дополняет состав ботами, создаёт матч и переводит игроков в него.
 func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, campaign bool, difficulty int, humans []protocol.MatchPlayer) *match.Match {
-	players := h.fillTeams(mode, gameMode, humans)
+	players := h.fillTeams(mode, gameMode, difficulty, humans)
 	m, err := match.New(h.prog, roomCode, mode, arena, players, match.Options{
 		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Countdown: h.cfg.Countdown, Log: h.log, Now: h.now,
 		GameMode: gameMode, Campaign: campaign, Difficulty: difficulty,
@@ -649,7 +632,7 @@ func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, cam
 		if p == nil {
 			continue
 		}
-		p.Place, p.MatchID, p.RoomCode, p.QueueMode = session.InMatch, m.ID, roomCode, 0
+		p.Place, p.MatchID, p.RoomCode = session.InMatch, m.ID, roomCode
 		if p.Connected() {
 			p.Send(m.StartMessage(p.ID))
 			m.Attach(p.ID, p.Conn)
@@ -663,7 +646,7 @@ func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, cam
 // fillTeams назначает роли не выбравшим, дополняет состав ботами и убирает дубли ников.
 // PvP: обе команды добиваются до mode. PvE: добивается только пати (команда A) —
 // врагов создаёт волновой планировщик в sim.js.
-func (h *Hub) fillTeams(mode int, gameMode string, humans []protocol.MatchPlayer) []protocol.MatchPlayer {
+func (h *Hub) fillTeams(mode int, gameMode string, difficulty int, humans []protocol.MatchPlayer) []protocol.MatchPlayer {
 	roles := h.prog.Roles()
 	pve := gameMode != "" && gameMode != "pvp"
 	players := make([]protocol.MatchPlayer, 0, 2*mode)
@@ -684,13 +667,23 @@ func (h *Hub) fillTeams(mode int, gameMode string, humans []protocol.MatchPlayer
 	if pve {
 		teams = []string{"A"}
 	}
+	// Боты занимают свободные слоты команд: индекс слота нужен, чтобы вошедший позже игрок
+	// сел именно за бойца своего места в комнате.
+	taken := map[string]bool{}
+	for _, hp := range players {
+		taken[hp.Team+strconv.Itoa(hp.Index)] = true
+	}
 	botN := 0
 	for _, team := range teams {
-		for count[team] < mode {
+		for i := 0; i < mode; i++ {
+			if taken[team+strconv.Itoa(i)] {
+				continue
+			}
 			botN++
+			level := difficulty
 			bp := protocol.MatchPlayer{
 				ID: fmt.Sprintf("bot%d", botN), Nick: fmt.Sprintf("Бот %d", botN), Team: team,
-				Role: roles[h.rng.IntN(len(roles))], Bot: true,
+				Index: i, Role: roles[h.rng.IntN(len(roles))], Bot: true, BotLevel: &level,
 			}
 			if pve {
 				bp.Nick = fmt.Sprintf("Союзник %d", botN)
@@ -707,11 +700,9 @@ func (h *Hub) onMatchEnd(m *match.Match, res match.Result) {
 	defer h.mu.Unlock()
 	delete(h.matches, m.ID)
 	r := h.rooms[m.RoomCode]
-	for _, mp := range m.Players {
-		if mp.Bot {
-			continue
-		}
-		p := h.byID[mp.ID]
+	// Именно HumanIDs: у подсевшего на место бота id бойца в матче не равен id сессии.
+	for _, id := range m.HumanIDs() {
+		p := h.byID[id]
 		if p == nil || p.MatchID != m.ID {
 			continue
 		}
@@ -738,6 +729,8 @@ func (h *Hub) onMatchEnd(m *match.Match, res match.Result) {
 	}
 }
 
+// leaveMatch выводит игрока из боя, но оставляет в комнате: место остаётся за ним, бойца ведёт
+// бот, и кнопкой «Присоединиться к матчу» игрок возвращается за того же бойца.
 func (h *Hub) leaveMatch(p *session.Player) {
 	if p.Place != session.InMatch {
 		h.sendErrP(p, protocol.ErrNotAllowed, "not in a match")
@@ -746,14 +739,15 @@ func (h *Hub) leaveMatch(p *session.Player) {
 	if m := h.matches[p.MatchID]; m != nil {
 		m.Leave(p.ID)
 	}
-	if r := h.rooms[p.RoomCode]; r != nil && r.Member(p.ID) != nil {
-		empty := r.Leave(p.ID, h.now())
-		if !empty {
-			h.broadcastRoom(r)
-		}
+	r := h.rooms[p.RoomCode]
+	if r == nil || r.Member(p.ID) == nil {
+		p.ToMenu()
+		p.Send(protocol.MustEncode(protocol.SRoomLeft, nil))
+		return
 	}
-	p.ToMenu()
-	p.Send(protocol.MustEncode(protocol.SRoomLeft, nil))
+	p.Place, p.MatchID = session.InRoom, ""
+	h.broadcastRoom(r)
+	h.sendRoomMatch(p, r)
 }
 
 func (h *Hub) handleInput(p *session.Player, data json.RawMessage) {
@@ -795,14 +789,12 @@ func (h *Hub) tick() {
 	defer h.mu.Unlock()
 	now := h.now()
 
-	for _, q := range h.queues.All() {
-		if h.draining {
-			continue
-		}
-		if q.Ready(now, h.cfg.QueueWait) {
-			h.startQuickMatch(q)
-		} else if len(q.Entries) > 0 {
-			h.broadcastQueue(q)
+	h.pushRoomLists()
+	h.pushRoomMatches()
+
+	for ip, t := range h.codeTries {
+		if now.After(t.resetAt) {
+			delete(h.codeTries, ip)
 		}
 	}
 
@@ -824,9 +816,8 @@ func (h *Hub) tick() {
 }
 
 func (h *Hub) expirePlayer(p *session.Player) {
+	delete(h.listSubs, p.ID)
 	switch p.Place {
-	case session.InQueue:
-		h.leaveQueue(p)
 	case session.InRoom:
 		h.leaveRoom(p, false)
 	case session.InMatch:
@@ -858,16 +849,6 @@ func (h *Hub) SetDrain(active bool) {
 	for _, p := range h.byID {
 		p.Send(msg)
 	}
-	// Игроков в очередях возвращаем в меню: матчи всё равно не стартуют.
-	if active {
-		for _, q := range h.queues.All() {
-			for _, e := range append([]matchmaking.Entry(nil), q.Entries...) {
-				if p := h.byID[e.PlayerID]; p != nil {
-					h.leaveQueue(p)
-				}
-			}
-		}
-	}
 }
 
 func (h *Hub) drainMessage() []byte {
@@ -895,7 +876,6 @@ type Stats struct {
 	Training    int          `json:"training"` // сколько игроков в тренировке с ботами
 	Sessions    []PlayerStat `json:"sessions"`
 	Rooms       []RoomStat   `json:"rooms"`
-	Queues      []QueueStat  `json:"queues"`
 	Matches     []match.Info `json:"matches"`
 	MatchesLive int          `json:"matchesLive"`
 }
@@ -905,7 +885,7 @@ type PlayerStat struct {
 	ID         string `json:"id"`
 	Nick       string `json:"nick"`
 	IP         string `json:"ip"`
-	Place      string `json:"place"`           // menu | queue | room | match
+	Place      string `json:"place"`           // menu | room | match
 	Where      string `json:"where,omitempty"` // код комнаты, режим очереди или id матча
 	Online     bool   `json:"online"`
 	AgeMs      int64  `json:"ageMs"`                  // сколько существует сессия
@@ -921,12 +901,14 @@ type PlayerStat struct {
 
 // RoomStat — комната в сводке.
 type RoomStat struct {
-	Code    string       `json:"code"`
-	Mode    int          `json:"mode"`
-	Arena   int          `json:"arena"`
-	Members int          `json:"members"`
-	InMatch bool         `json:"inMatch"`
-	Players []MemberStat `json:"players"`
+	Code       string       `json:"code"`
+	Mode       int          `json:"mode"`
+	Arena      int          `json:"arena"`
+	GameMode   string       `json:"gameMode,omitempty"`
+	Visibility string       `json:"visibility,omitempty"`
+	Members    int          `json:"members"`
+	InMatch    bool         `json:"inMatch"`
+	Players    []MemberStat `json:"players"`
 }
 
 // MemberStat — участник комнаты в сводке.
@@ -937,22 +919,7 @@ type MemberStat struct {
 	Role   string `json:"role,omitempty"`
 	Host   bool   `json:"host,omitempty"`
 	Online bool   `json:"online"`
-}
-
-// QueueStat — очередь в сводке.
-type QueueStat struct {
-	Mode     int           `json:"mode"`
-	Players  int           `json:"players"`
-	WaitLeft int           `json:"waitLeftMs"`
-	Waiting  []QueuePlayer `json:"waiting"`
-}
-
-// QueuePlayer — игрок в очереди.
-type QueuePlayer struct {
-	ID      string `json:"id"`
-	Nick    string `json:"nick"`
-	Role    string `json:"role,omitempty"`
-	WaitsMs int64  `json:"waitsMs"`
+	Ready  bool   `json:"ready,omitempty"`
 }
 
 // Online возвращает число подключённых игроков (для публичного /api/online).
@@ -1014,8 +981,6 @@ func (h *Hub) Stats() Stats {
 		switch p.Place {
 		case session.InRoom:
 			ps.Where = p.RoomCode
-		case session.InQueue:
-			ps.Where = strconv.Itoa(p.QueueMode)
 		case session.InMatch:
 			ps.Where = p.MatchID
 		}
@@ -1031,29 +996,16 @@ func (h *Hub) Stats() Stats {
 	}
 	sort.Slice(st.Sessions, func(i, j int) bool { return st.Sessions[i].Nick < st.Sessions[j].Nick })
 	for _, r := range h.rooms {
-		rs := RoomStat{Code: r.Code, Mode: r.Mode, Arena: r.Arena, Members: len(r.Members), InMatch: r.InMatch}
+		rs := RoomStat{Code: r.Code, Mode: r.Mode, Arena: r.Arena, GameMode: r.GameMode,
+			Visibility: r.Visibility, Members: len(r.Members), InMatch: r.InMatch}
 		for _, m := range r.Members {
-			ms := MemberStat{ID: m.ID, Team: m.Team, Role: m.Role, Host: m.ID == r.HostID}
+			ms := MemberStat{ID: m.ID, Team: m.Team, Role: m.Role, Host: m.ID == r.HostID, Ready: m.Ready}
 			if p := h.byID[m.ID]; p != nil {
 				ms.Nick, ms.Online = p.Nick, p.Connected()
 			}
 			rs.Players = append(rs.Players, ms)
 		}
 		st.Rooms = append(st.Rooms, rs)
-	}
-	for _, q := range h.queues.All() {
-		if len(q.Entries) == 0 {
-			continue
-		}
-		qs := QueueStat{Mode: q.Mode, Players: len(q.Entries), WaitLeft: int(q.WaitLeft(now, h.cfg.QueueWait) / time.Millisecond)}
-		for _, e := range q.Entries {
-			qp := QueuePlayer{ID: e.PlayerID, Role: e.Role, WaitsMs: now.Sub(e.JoinedAt).Milliseconds()}
-			if p := h.byID[e.PlayerID]; p != nil {
-				qp.Nick = p.Nick
-			}
-			qs.Waiting = append(qs.Waiting, qp)
-		}
-		st.Queues = append(st.Queues, qs)
 	}
 	for _, m := range h.matches {
 		st.Matches = append(st.Matches, m.Info())

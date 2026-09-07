@@ -16,6 +16,7 @@ type Member struct {
 	Team  string // "A" | "B" | ""
 	Index int    // слот в команде
 	Role  string // "" — не выбрал
+	Ready bool   // нажал «Готов»
 }
 
 // Room — комната.
@@ -28,6 +29,7 @@ type Room struct {
 	GameMode   string // "" | "pvp" | "survival" | "defense"
 	Campaign   bool   // PvE: кампания (иначе эндлесс)
 	Difficulty int    // PvE: 0..2
+	Visibility string // "open" — видна в списке и открыта; "closed" — нужен код
 	Members    []*Member
 	InMatch    bool
 	MatchID    string
@@ -38,6 +40,31 @@ type Room struct {
 
 // IsPvE — комната играет кооперативный PvE (не PvP).
 func (r *Room) IsPvE() bool { return r.GameMode != "" && r.GameMode != "pvp" }
+
+// Section — раздел меню, к которому относится комната: "pvp" или "pve".
+func (r *Room) Section() string {
+	if r.IsPvE() {
+		return "pve"
+	}
+	return "pvp"
+}
+
+// IsClosed — в комнату можно войти только по коду.
+func (r *Room) IsClosed() bool { return r.Visibility == VisibilityClosed }
+
+// Видимость комнаты.
+const (
+	VisibilityOpen   = "open"
+	VisibilityClosed = "closed"
+)
+
+// NormalizeVisibility приводит видимость к известному значению; всё неизвестное — открытая комната.
+func NormalizeVisibility(v string) string {
+	if v == VisibilityClosed {
+		return VisibilityClosed
+	}
+	return VisibilityOpen
+}
 
 // Ошибки операций с комнатой.
 var (
@@ -53,9 +80,10 @@ var (
 )
 
 // New создаёт комнату с хостом внутри.
-func New(code, hostID, hostIP string, mode, arena int, gameMode string, campaign bool, difficulty int, now time.Time) *Room {
-	r := &Room{Code: code, HostID: hostID, HostIP: hostIP, Mode: mode, Arena: arena,
-		GameMode: gameMode, Campaign: campaign, Difficulty: difficulty, CreatedAt: now}
+func New(code, hostID, hostIP string, cfg Config, now time.Time) *Room {
+	r := &Room{Code: code, HostID: hostID, HostIP: hostIP, Mode: cfg.Mode, Arena: cfg.Arena,
+		GameMode: cfg.GameMode, Campaign: cfg.Campaign, Difficulty: cfg.Difficulty,
+		Visibility: NormalizeVisibility(cfg.Visibility), CreatedAt: now}
 	r.Members = append(r.Members, &Member{ID: hostID, Team: "A", Index: 0})
 	return r
 }
@@ -113,11 +141,10 @@ func (r *Room) Leave(id string, now time.Time) bool {
 	return false
 }
 
-// SetSlot ставит игрока в слот команды.
+// SetSlot ставит игрока в слот команды. Работает и во время матча: слот комнаты — это боец
+// матча, и сидящий в лобби участник может перейти на свободное место. Того, кто прямо сейчас
+// играет, не пускает hub (у него другое место в сессии).
 func (r *Room) SetSlot(id, team string, index int) error {
-	if r.InMatch {
-		return ErrInMatch
-	}
 	m := r.Member(id)
 	if m == nil {
 		return ErrNotMember
@@ -134,18 +161,62 @@ func (r *Room) SetSlot(id, team string, index int) error {
 	if o := r.slotOwner(team, index); o != nil && o != m {
 		return ErrSlotTaken
 	}
+	if m.Team != team || m.Index != index {
+		m.Ready = false
+	}
 	m.Team, m.Index = team, index
 	return nil
 }
 
-// SetRole выбирает бойца.
+// SetRole выбирает бойца. Смена бойца снимает готовность только у этого игрока.
 func (r *Room) SetRole(id, role string) error {
 	m := r.Member(id)
 	if m == nil {
 		return ErrNotMember
 	}
+	if m.Role != role {
+		m.Ready = false
+	}
 	m.Role = role
 	return nil
+}
+
+// SetReady отмечает готовность игрока.
+func (r *Room) SetReady(id string, ready bool) error {
+	m := r.Member(id)
+	if m == nil {
+		return ErrNotMember
+	}
+	m.Ready = ready
+	return nil
+}
+
+// ResetReady снимает готовность со всех: настройки комнаты изменились.
+func (r *Room) ResetReady() {
+	for _, m := range r.Members {
+		m.Ready = false
+	}
+}
+
+// ReadyCount — сколько игроков с живым соединением готовы и сколько их всего.
+// Отключённые (в окне реконнекта) не считаются: иначе обрыв связи одного блокирует старт.
+func (r *Room) ReadyCount(connected func(id string) bool) (ready, total int) {
+	for _, m := range r.Members {
+		if connected != nil && !connected(m.ID) {
+			continue
+		}
+		total++
+		if m.Ready {
+			ready++
+		}
+	}
+	return ready, total
+}
+
+// AllReady — в комнате есть хотя бы один игрок на связи и все такие игроки готовы.
+func (r *Room) AllReady(connected func(id string) bool) bool {
+	ready, total := r.ReadyCount(connected)
+	return total > 0 && ready == total
 }
 
 // SetConfig меняет режим игры, размер, арену и настройки PvE (только хост, не в матче).
@@ -170,8 +241,16 @@ func (r *Room) SetConfig(hostID string, cfg Config, arenaCount int) error {
 	if len(r.Members) > maxN {
 		return ErrTooMany
 	}
+	vis := NormalizeVisibility(cfg.Visibility)
+	changed := r.Mode != cfg.Mode || r.Arena != cfg.Arena || r.GameMode != cfg.GameMode ||
+		r.Campaign != cfg.Campaign || r.Difficulty != cfg.Difficulty || r.Visibility != vis
 	r.Mode, r.Arena = cfg.Mode, cfg.Arena
 	r.GameMode, r.Campaign, r.Difficulty = cfg.GameMode, cfg.Campaign, cfg.Difficulty
+	r.Visibility = vis
+	// Игрок соглашался играть в другие правила — готовность снимается со всех.
+	if changed {
+		r.ResetReady()
+	}
 	// Слоты за пределами нового режима (или команда B в PvE) освобождаем и расставляем заново.
 	for _, m := range r.Members {
 		if m.Index >= cfg.Mode || (pve && m.Team == "B") {
@@ -193,6 +272,7 @@ type Config struct {
 	GameMode   string
 	Campaign   bool
 	Difficulty int
+	Visibility string
 }
 
 // Kick выгоняет игрока (только хост, не себя).
@@ -228,8 +308,8 @@ func (r *Room) slotOwner(team string, index int) *Member {
 	return nil
 }
 
-// autoPlace ставит в первый свободный слот, чередуя команды для баланса.
-// В PvE вся пати — команда A.
+// autoPlace ставит в первый свободный слот команды, где больше ботов (то есть меньше людей).
+// Во время матча «больше ботов» и означает «больше свободных мест». В PvE вся команда — A.
 func (r *Room) autoPlace(m *Member) {
 	countA, countB := 0, 0
 	for _, o := range r.Members {

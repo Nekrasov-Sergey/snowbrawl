@@ -1,11 +1,13 @@
 package hub_test
 
 // Интеграционный тест: настоящий HTTP-сервер, настоящие WebSocket-клиенты на Go,
-// полный путь «hello → комната → матч с ботами → match.end», реконнект и Quick Match.
+// полный путь «hello → комната → матч с ботами → match.end», реконнект, список комнат,
+// готовность с автостартом и вход в идущий матч на место бота.
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,7 +44,6 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 	}
 	cfg := config.Defaults()
 	cfg.TickRate = 40 // быстрее, чтобы тесты не ждали
-	cfg.QueueWait = 300 * time.Millisecond
 	cfg.ReconnectTTL = 2 * time.Second
 	cfg.AFKTimeout = 0 // в тестах не трогаем
 	if mutate != nil {
@@ -139,6 +140,22 @@ func (cl *client) expect(typ string, dst any) protocol.Envelope {
 
 func (cl *client) close() { _ = cl.c.Close(websocket.StatusNormalClosure, "") }
 
+// waitRoom ждёт состояние комнаты, удовлетворяющее cond: в очереди клиента могут лежать
+// состояния прошлых изменений. Каждое сообщение разбирается в свежую структуру — иначе
+// json.Unmarshal слил бы поля с omitempty из предыдущего состояния.
+func (cl *client) waitRoom(what string, cond func(protocol.RoomState) bool) protocol.RoomState {
+	cl.t.Helper()
+	for i := 0; i < 20; i++ {
+		var st protocol.RoomState
+		cl.expect(protocol.SRoomState, &st)
+		if cond(st) {
+			return st
+		}
+	}
+	cl.t.Fatalf("%s: no room state matching %s", cl.name, what)
+	return protocol.RoomState{}
+}
+
 func TestRoomMatchWithBotsToEnd(t *testing.T) {
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
@@ -193,10 +210,25 @@ func TestRoomMatchWithBotsToEnd(t *testing.T) {
 
 	// Люди не играют — матч доигрывают боты (люди стоят, боты их выносят) либо таймер.
 	// Чтобы не ждать, гость сам выходит, а хост тоже уходит: матч завершается как abandoned.
+	// Выход из матча оставляет в комнате: оба возвращаются в лобби, матч гибнет как abandoned.
 	guest.send(protocol.CMatchLeave, nil)
-	guest.expect(protocol.SRoomLeft, nil)
+	guest.waitRoom("guest in lobby", func(st protocol.RoomState) bool {
+		for _, p := range st.Players {
+			if p.ID == guest.ID {
+				return !p.InMatch
+			}
+		}
+		return false
+	})
 	host.send(protocol.CMatchLeave, nil)
-	host.expect(protocol.SRoomLeft, nil)
+	host.waitRoom("host in lobby", func(st protocol.RoomState) bool {
+		for _, p := range st.Players {
+			if p.ID == host.ID {
+				return !p.InMatch
+			}
+		}
+		return false
+	})
 
 	st := s.hub.Stats()
 	deadline := time.Now().Add(5 * time.Second)
@@ -255,8 +287,9 @@ func TestPveRoomMatch(t *testing.T) {
 	var rs protocol.RoomState
 	host.expect(protocol.SRoomState, &rs)
 
+	normal := 1
 	host.send(protocol.CRoomConfig, protocol.RoomConfig{
-		Mode: 2, Arena: 0, GameMode: "survival", Campaign: true, Difficulty: 1,
+		Mode: 2, Arena: 0, GameMode: "survival", Campaign: true, Difficulty: &normal,
 	})
 	host.expect(protocol.SRoomState, &rs)
 	if rs.GameMode != "survival" || !rs.Campaign {
@@ -311,7 +344,14 @@ func TestPveRoomMatch(t *testing.T) {
 	}
 
 	host.send(protocol.CMatchLeave, nil)
-	host.expect(protocol.SRoomLeft, nil)
+	host.waitRoom("host in lobby", func(st protocol.RoomState) bool {
+		for _, p := range st.Players {
+			if p.ID == host.ID {
+				return !p.InMatch
+			}
+		}
+		return false
+	})
 	host.close()
 }
 
@@ -352,33 +392,273 @@ func TestReconnectIntoMatch(t *testing.T) {
 	t.Fatalf("session/match must expire: %+v", s.hub.Stats())
 }
 
-func TestQuickMatchFillsWithBots(t *testing.T) {
-	s := newServer(t, nil)
-	a := s.connect(t, "Аня", "")
-	b := s.connect(t, "Боря", "")
-	a.send(protocol.CQueueJoin, protocol.QueueJoin{Mode: 2, Role: "Раннер"})
-	var qs protocol.QueueStatus
-	a.expect(protocol.SQueueStatus, &qs)
-	if !qs.InQueue || qs.Players != 1 || qs.Needed != 4 {
-		t.Fatalf("queue status: %+v", qs)
+func TestRoomListSectionsOrderAndPaging(t *testing.T) {
+	s := newServer(t, func(c *config.Config) { c.RoomsPerIP = 100 })
+	// Три PvP-комнаты по очереди и одна PvE: список должен отдать только свой раздел
+	// и в порядке создания, старые первыми.
+	var codes []string
+	for i := 0; i < 3; i++ {
+		host := s.connect(t, fmt.Sprintf("Хост%d", i), "")
+		host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
+		var rs protocol.RoomState
+		host.expect(protocol.SRoomState, &rs)
+		codes = append(codes, rs.Code)
+		time.Sleep(10 * time.Millisecond) // чтобы CreatedAt отличался
 	}
-	b.send(protocol.CQueueJoin, protocol.QueueJoin{Mode: 2, Role: "Танк"})
-	// Через QueueWait добор ботами — оба получают match.start одного матча.
-	var msA, msB protocol.MatchStart
-	a.expect(protocol.SMatchStart, &msA)
-	b.expect(protocol.SMatchStart, &msB)
-	if msA.MatchID != msB.MatchID || msA.RoomCode != "" || len(msA.Players) != 4 {
-		t.Fatalf("quick match: %+v / %+v", msA, msB)
+	pveHost := s.connect(t, "ПвеХост", "")
+	pveHost.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, GameMode: "survival", Campaign: true})
+	pveHost.expect(protocol.SRoomState, nil)
+
+	viewer := s.connect(t, "Зритель", "")
+	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pvp", Page: 0})
+	var page protocol.RoomListPage
+	viewer.expect(protocol.SRoomList, &page)
+	if page.Total != 3 || len(page.Rooms) != 3 || page.Pages != 1 {
+		t.Fatalf("pvp list: %+v", page)
 	}
-	humans := 0
-	for _, p := range msA.Players {
-		if !p.Bot {
-			humans++
+	for i, r := range page.Rooms {
+		if r.Code != codes[i] {
+			t.Fatalf("room %d: got %s, want %s (order by creation)", i, r.Code, codes[i])
+		}
+		if r.Section != "pvp" || r.Capacity != 4 || r.Humans != 1 || r.Bots != 3 || !r.Joinable {
+			t.Fatalf("brief %+v", r)
 		}
 	}
-	if humans != 2 {
-		t.Fatalf("expected 2 humans, got %d", humans)
+	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pve", Page: 0})
+	viewer.expect(protocol.SRoomList, &page)
+	if page.Total != 1 || page.Rooms[0].Section != "pve" || page.Rooms[0].GameMode != "survival" {
+		t.Fatalf("pve list: %+v", page)
 	}
+	// Подписка живая: новая комната прилетает без запроса.
+	extra := s.connect(t, "Ещё", "")
+	extra.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, GameMode: "defense"})
+	extra.expect(protocol.SRoomState, nil)
+	viewer.expect(protocol.SRoomList, &page)
+	if page.Total != 2 {
+		t.Fatalf("push must bring the new pve room: %+v", page)
+	}
+}
+
+func TestClosedRoomHidesCodeAndLimitsTries(t *testing.T) {
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, Visibility: "closed"})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+	if rs.Visibility != "closed" {
+		t.Fatalf("visibility: %+v", rs)
+	}
+	viewer := s.connect(t, "Зритель", "")
+	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pvp"})
+	var page protocol.RoomListPage
+	viewer.expect(protocol.SRoomList, &page)
+	if len(page.Rooms) != 1 || page.Rooms[0].Code != "" || !page.Rooms[0].NeedCode {
+		t.Fatalf("closed room must be visible without code: %+v", page.Rooms)
+	}
+	// Пять неудачных попыток кода, шестая — отказ.
+	var e protocol.Error
+	for i := 0; i < 5; i++ {
+		viewer.send(protocol.CRoomJoin, protocol.RoomJoin{Code: "0000"})
+		viewer.expect(protocol.SError, &e)
+		if e.Code != protocol.ErrRoomNotFound && e.Code != protocol.ErrBadCode {
+			t.Fatalf("attempt %d: %+v", i, e)
+		}
+	}
+	viewer.send(protocol.CRoomJoin, protocol.RoomJoin{Code: "0000"})
+	viewer.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrTooManyTries {
+		t.Fatalf("expected too_many_tries, got %s", e.Code)
+	}
+	// Правильный код после лимита тоже не пускает — лимит по адресу, а не по коду.
+	viewer.send(protocol.CRoomJoin, protocol.RoomJoin{Code: rs.Code})
+	viewer.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrTooManyTries {
+		t.Fatalf("expected too_many_tries, got %s", e.Code)
+	}
+}
+
+func TestReadyAutoStartsMatch(t *testing.T) {
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+	guest := s.connect(t, "Гость", "")
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+	guest.send(protocol.CRoomJoin, protocol.RoomJoin{Code: rs.Code})
+	guest.expect(protocol.SRoomState, &rs)
+
+	// Готов только хост — матч не стартует.
+	host.send(protocol.CRoomReady, protocol.RoomReady{Ready: true})
+	host.waitRoom("ready=1", func(st protocol.RoomState) bool { return st.ReadyCount == 1 && !st.InMatch })
+	time.Sleep(300 * time.Millisecond)
+	if live := s.hub.Stats().MatchesLive; live != 0 {
+		t.Fatalf("match must not start with one ready, live=%d", live)
+	}
+	// Готов второй — матч стартует сам, без кнопки хоста.
+	guest.send(protocol.CRoomReady, protocol.RoomReady{Ready: true})
+	var msHost, msGuest protocol.MatchStart
+	host.expect(protocol.SMatchStart, &msHost)
+	guest.expect(protocol.SMatchStart, &msGuest)
+	if msHost.MatchID != msGuest.MatchID || msHost.RoomCode != rs.Code {
+		t.Fatalf("auto start: %+v / %+v", msHost, msGuest)
+	}
+}
+
+func TestConfigChangeResetsReady(t *testing.T) {
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+	guest := s.connect(t, "Гость", "")
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+	guest.send(protocol.CRoomJoin, protocol.RoomJoin{Code: rs.Code})
+	guest.expect(protocol.SRoomState, &rs)
+	guest.send(protocol.CRoomReady, protocol.RoomReady{Ready: true})
+	guest.waitRoom("ready=1", func(st protocol.RoomState) bool { return st.ReadyCount == 1 })
+	host.send(protocol.CRoomConfig, protocol.RoomConfig{Mode: 3, Arena: 1})
+	st := host.waitRoom("mode=3", func(st protocol.RoomState) bool { return st.Mode == 3 })
+	if st.ReadyCount != 0 {
+		t.Fatalf("config change must reset ready: %+v", st)
+	}
+	for _, pl := range st.Players {
+		if pl.Ready {
+			t.Fatalf("player must not stay ready: %+v", pl)
+		}
+	}
+}
+
+func TestJoinRunningMatchTakesOwnSlot(t *testing.T) {
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+	host.send(protocol.CRoomStart, nil)
+	var ms protocol.MatchStart
+	host.expect(protocol.SMatchStart, &ms)
+	if len(ms.Players) != 4 {
+		t.Fatalf("match players: %+v", ms.Players)
+	}
+	// Каждый боец привязан к слоту комнаты: у ботов индексы свободных мест.
+	seen := map[string]bool{}
+	for _, p := range ms.Players {
+		key := p.Team + string(rune('0'+p.Index))
+		if seen[key] {
+			t.Fatalf("slot %s used twice: %+v", key, ms.Players)
+		}
+		seen[key] = true
+	}
+
+	// Комната в матче видна в списке и открыта для входа: людей меньше, чем мест.
+	guest := s.connect(t, "Гость", "")
+	guest.send(protocol.CRoomList, protocol.RoomList{Section: "pvp"})
+	var page protocol.RoomListPage
+	guest.expect(protocol.SRoomList, &page)
+	if len(page.Rooms) != 1 || !page.Rooms[0].InMatch || !page.Rooms[0].Joinable {
+		t.Fatalf("running room in list: %+v", page.Rooms)
+	}
+	// Вход в комнату во время матча даёт свободный слот и сводку матча в лобби.
+	guest.send(protocol.CRoomJoin, protocol.RoomJoin{Code: rs.Code})
+	st := guest.waitRoom("me placed", func(st protocol.RoomState) bool { return len(st.Players) == 2 })
+	var mySlot protocol.RoomPlayer
+	for _, p := range st.Players {
+		if p.ID == guest.ID {
+			mySlot = p
+		}
+	}
+	if mySlot.Team == "" || mySlot.InMatch {
+		t.Fatalf("guest must get a free slot and stay in lobby: %+v", st.Players)
+	}
+	var rm protocol.RoomMatch
+	guest.expect(protocol.SRoomMatch, &rm)
+	if len(rm.Slots) != 4 || rm.TimeLeftMs <= 0 {
+		t.Fatalf("lobby must see the match: %+v", rm)
+	}
+	// Присоединяемся к матчу — садимся именно за бойца своего слота.
+	guest.send(protocol.CMatchJoin, nil)
+	var msGuest protocol.MatchStart
+	guest.expect(protocol.SMatchStart, &msGuest)
+	var mine protocol.MatchPlayer
+	for _, p := range msGuest.Players {
+		if p.ID == msGuest.YourID {
+			mine = p
+		}
+	}
+	if mine.Team != mySlot.Team || mine.Index != mySlot.Index || mine.Nick != "Гость" || mine.Bot {
+		t.Fatalf("joined the wrong fighter: slot=%+v fighter=%+v", mySlot, mine)
+	}
+	var roster protocol.MatchRoster
+	host.expect(protocol.SMatchRoster, &roster)
+
+	// Выход из матча оставляет в комнате и держит место: возвращаемся за того же бойца.
+	guest.send(protocol.CMatchLeave, nil)
+	back := guest.waitRoom("back in lobby", func(st protocol.RoomState) bool {
+		for _, p := range st.Players {
+			if p.ID == guest.ID {
+				return !p.InMatch
+			}
+		}
+		return false
+	})
+	for _, p := range back.Players {
+		if p.ID == guest.ID && (p.Team != mySlot.Team || p.Index != mySlot.Index) {
+			t.Fatalf("slot must stay with the player: %+v", p)
+		}
+	}
+	guest.send(protocol.CMatchJoin, nil)
+	guest.expect(protocol.SMatchStart, &msGuest)
+	if msGuest.YourID != mine.ID {
+		t.Fatalf("player must return to the same fighter: %s != %s", msGuest.YourID, mine.ID)
+	}
+}
+
+func TestRoomListSortsOpenAndFreeFirst(t *testing.T) {
+	s := newServer(t, func(c *config.Config) { c.RoomsPerIP = 100 })
+	// Четыре комнаты 1×1: открытая свободная, открытая заполненная, закрытая свободная,
+	// закрытая заполненная. Создаём в обратном порядке — сортировка должна их развернуть.
+	mk := func(nick, visibility string, fill bool) string {
+		host := s.connect(t, nick, "")
+		host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0, Visibility: visibility})
+		var rs protocol.RoomState
+		host.expect(protocol.SRoomState, &rs)
+		if fill {
+			mate := s.connect(t, nick+"-2", "")
+			mate.send(protocol.CRoomJoin, protocol.RoomJoin{Code: rs.Code})
+			mate.expect(protocol.SRoomState, nil)
+		}
+		time.Sleep(10 * time.Millisecond)
+		return rs.Code
+	}
+	closedFull := mk("ЗакрПолн", "closed", true)
+	closedFree := mk("ЗакрСвоб", "closed", false)
+	openFull := mk("ОткрПолн", "open", true)
+	openFree := mk("ОткрСвоб", "open", false)
+
+	viewer := s.connect(t, "Зритель", "")
+	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pvp"})
+	var page protocol.RoomListPage
+	viewer.expect(protocol.SRoomList, &page)
+	if len(page.Rooms) != 4 {
+		t.Fatalf("expected 4 rooms, got %+v", page.Rooms)
+	}
+	// У закрытых комнат кода нет, поэтому сверяем по признакам.
+	kind := func(b protocol.RoomBrief) string {
+		k := b.Visibility
+		if b.Humans >= b.Capacity {
+			return k + "-full"
+		}
+		return k + "-free"
+	}
+	want := []string{"open-free", "open-full", "closed-free", "closed-full"}
+	for i, b := range page.Rooms {
+		if kind(b) != want[i] {
+			t.Fatalf("room %d is %s, want %s (%+v)", i, kind(b), want[i], page.Rooms)
+		}
+	}
+	if page.Rooms[0].Code != openFree || page.Rooms[1].Code != openFull {
+		t.Fatalf("open rooms out of order: %+v", page.Rooms)
+	}
+	_, _ = closedFull, closedFree
 }
 
 func TestDrainBlocksNewMatches(t *testing.T) {
@@ -390,7 +670,9 @@ func TestDrainBlocksNewMatches(t *testing.T) {
 	if !d.Active {
 		t.Fatal("drain must be active")
 	}
-	p.send(protocol.CQueueJoin, protocol.QueueJoin{Mode: 1, Role: "Танк"})
+	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
+	p.expect(protocol.SRoomState, nil)
+	p.send(protocol.CRoomStart, nil)
 	var e protocol.Error
 	p.expect(protocol.SError, &e)
 	if e.Code != protocol.ErrDraining {

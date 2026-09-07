@@ -56,7 +56,8 @@ type Options struct {
 }
 
 type human struct {
-	id        string
+	id        string // id сессии игрока
+	simID     string // id бойца в симуляции; отличается от id, если игрок подсел на место бота
 	team      string
 	conn      session.Sender
 	lastInput time.Time
@@ -102,7 +103,7 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 		cfg.Campaign = &campaign
 	}
 	for _, p := range players {
-		pc := sim.PlayerConfig{ID: p.ID, Team: p.Team, Role: p.Role, Bot: p.Bot, Nick: p.Nick}
+		pc := sim.PlayerConfig{ID: p.ID, Team: p.Team, Role: p.Role, Bot: p.Bot, Nick: p.Nick, BotLevel: p.BotLevel}
 		cfg.Players = append(cfg.Players, pc)
 	}
 	var seedBytes [4]byte
@@ -122,7 +123,8 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 	}
 	for _, p := range players {
 		if !p.Bot {
-			m.humans[p.ID] = &human{id: p.ID, team: p.Team, lastInput: now, bot: true} // bot=true до Attach
+			// bot=true до Attach
+			m.humans[p.ID] = &human{id: p.ID, simID: p.ID, team: p.Team, lastInput: now, bot: true}
 		}
 	}
 	return m, nil
@@ -131,12 +133,167 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 // Start запускает цикл матча в отдельной горутине.
 func (m *Match) Start() { go m.loop() }
 
-// StartMessage — сообщение match.start для конкретного игрока.
+// StartMessage — сообщение match.start для конкретного игрока. YourID — это id бойца в
+// симуляции: у подсевшего на место бота он не равен id сессии.
 func (m *Match) StartMessage(playerID string) []byte {
+	m.mu.Lock()
+	yourID := playerID
+	if h, ok := m.humans[playerID]; ok && h.simID != "" {
+		yourID = h.simID
+	}
+	players := append([]protocol.MatchPlayer(nil), m.Players...)
+	m.mu.Unlock()
 	return protocol.MustEncode(protocol.SMatchStart, protocol.MatchStart{
-		MatchID: m.ID, Mode: m.Mode, Arena: m.Arena, GameMode: m.GameMode, Players: m.Players, YourID: playerID,
+		MatchID: m.ID, Mode: m.Mode, Arena: m.Arena, GameMode: m.GameMode, Players: players, YourID: yourID,
 		TickRate: m.opts.TickRate, RoomCode: m.RoomCode,
 	})
+}
+
+// LobbyStatus — состояние идущего матча для лобби комнаты: сколько осталось времени и что
+// с бойцами по слотам. HP берётся из снапшота, поэтому вызов не бесплатный — звать раз в тик.
+func (m *Match) LobbyStatus() protocol.RoomMatch {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := protocol.RoomMatch{Code: m.RoomCode}
+	if m.done {
+		return st
+	}
+	hp, koed, timeLeft := m.slotState()
+	st.TimeLeftMs = timeLeft / 1000 * 1000 // до секунды: сводка уходит в лобби только при изменении
+	for _, p := range m.Players {
+		bot := p.Bot
+		if h := m.humanBySim(p.ID); h == nil || h.conn == nil || h.left {
+			bot = true // слот свободен или его человек ушёл в лобби
+		}
+		st.Slots = append(st.Slots, protocol.RoomMatchSlot{
+			Team: p.Team, Index: p.Index, Nick: p.Nick, Role: p.Role,
+			Bot: bot, HP: hp[p.ID], Koed: koed[p.ID],
+		})
+	}
+	return st
+}
+
+// FreeSlot сообщает, ведёт ли бойца этого слота бот, то есть можно ли на него сесть.
+func (m *Match) FreeSlot(team string, index int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.playerAt(team, index)
+	if p == nil || m.done {
+		return false
+	}
+	h := m.humanBySim(p.ID)
+	return h == nil || h.conn == nil || h.left
+}
+
+// Replace сажает живого игрока за бойца слота (team, index).
+func (m *Match) Replace(team string, index int, playerID, nick string, conn session.Sender) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.done {
+		return ErrMatchOver
+	}
+	// Запись игрока, который вышел в лобби или потерял связь, входу не мешает — он возвращается.
+	if h, ok := m.humans[playerID]; ok {
+		if h.conn != nil && !h.left {
+			return ErrAlreadyIn
+		}
+		delete(m.humans, playerID)
+	}
+	idx := -1
+	for i, p := range m.Players {
+		if p.Team == team && p.Index == index {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ErrNoSuchSlot
+	}
+	simID := m.Players[idx].ID
+	if h := m.humanBySim(simID); h != nil {
+		if h.conn != nil && !h.left {
+			return ErrSlotTaken
+		}
+		delete(m.humans, h.id) // слот освободил тот, кто вышел в лобби или потерял связь
+	}
+	now := m.opts.Now()
+	h := &human{id: playerID, simID: simID, team: team, conn: conn, lastInput: now, bot: true}
+	m.humans[playerID] = h
+	m.setBot(h, false)
+	m.Players[idx].Nick = nick
+	m.Players[idx].Bot = false
+	m.broadcast(m.rosterMessage())
+	return nil
+}
+
+// Ошибки входа в идущий матч.
+var (
+	ErrMatchOver  = errors.New("match is over")
+	ErrAlreadyIn  = errors.New("already in match")
+	ErrNoSuchSlot = errors.New("no such slot")
+	ErrSlotTaken  = errors.New("slot taken")
+)
+
+// rosterMessage — сообщение match.roster. Вызывать под m.mu.
+func (m *Match) rosterMessage() []byte {
+	players := append([]protocol.MatchPlayer(nil), m.Players...)
+	return protocol.MustEncode(protocol.SMatchRoster, protocol.MatchRoster{Players: players})
+}
+
+// humanBySim ищет человека по id бойца в симуляции. Вызывать под m.mu.
+func (m *Match) humanBySim(simID string) *human {
+	for _, h := range m.humans {
+		if h.simID == simID {
+			return h
+		}
+	}
+	return nil
+}
+
+// playerAt — боец слота (team, index). Вызывать под m.mu.
+func (m *Match) playerAt(team string, index int) *protocol.MatchPlayer {
+	for i, p := range m.Players {
+		if p.Team == team && p.Index == index {
+			return &m.Players[i]
+		}
+	}
+	return nil
+}
+
+// slotState достаёт из снапшота HP бойцов, признак KO и остаток времени матча. Вызывать под m.mu.
+func (m *Match) slotState() (map[string]int, map[string]bool, int) {
+	hp, koed := map[string]int{}, map[string]bool{}
+	state, err := m.sim.Snapshot()
+	if err != nil {
+		return hp, koed, 0
+	}
+	var snap struct {
+		TimeLeft int `json:"timeLeft"`
+		Players  []struct {
+			ID   string `json:"id"`
+			HP   int    `json:"hp"`
+			Koed bool   `json:"koed"`
+		} `json:"players"`
+	}
+	if err := json.Unmarshal(state, &snap); err != nil {
+		return hp, koed, 0
+	}
+	for _, p := range snap.Players {
+		hp[p.ID] = p.HP
+		koed[p.ID] = p.Koed
+	}
+	return hp, koed, snap.TimeLeft
+}
+
+// releaseSlot помечает слот как ведомый ботом и рассылает новый состав. Вызывать под m.mu.
+func (m *Match) releaseSlot(simID string) {
+	for i, p := range m.Players {
+		if p.ID == simID && !p.Bot {
+			m.Players[i].Bot = true
+			m.broadcast(m.rosterMessage())
+			return
+		}
+	}
 }
 
 // Attach подключает (или переподключает) игрока: снапшоты пойдут в conn, бот отдаёт управление.
@@ -159,6 +316,7 @@ func (m *Match) Detach(playerID string) {
 	if h, ok := m.humans[playerID]; ok {
 		h.conn = nil
 		m.setBot(h, true)
+		m.releaseSlot(h.simID)
 	}
 }
 
@@ -170,6 +328,7 @@ func (m *Match) Leave(playerID string) {
 		h.conn = nil
 		h.left = true
 		m.setBot(h, true)
+		m.releaseSlot(h.simID)
 	}
 }
 
@@ -189,7 +348,7 @@ func (m *Match) Input(playerID string, raw json.RawMessage) {
 	if h.bot && h.conn != nil {
 		m.setBot(h, false) // вернулся из AFK
 	}
-	if _, err := m.sim.ApplyInput(playerID, raw); err != nil {
+	if _, err := m.sim.ApplyInput(h.simID, raw); err != nil {
 		m.opts.Log.Warn().Err(err).Str("match", m.ID).Str("player", playerID).Msg("input rejected by sim")
 	}
 }
@@ -239,7 +398,7 @@ func (m *Match) Info() Info {
 	info := Info{ID: m.ID, RoomCode: m.RoomCode, Mode: m.Mode, Arena: m.Arena, Tick: m.tick, Created: m.Created}
 	for _, p := range m.Players {
 		pi := PlayerInfo{ID: p.ID, Nick: p.Nick, Team: p.Team, Role: p.Role, Bot: p.Bot}
-		if h := m.humans[p.ID]; h != nil {
+		if h := m.humanBySim(p.ID); h != nil {
 			pi.BotNow = h.bot
 			pi.Left = h.left
 			pi.Online = h.conn != nil && !h.conn.Closed()
@@ -275,7 +434,7 @@ func (m *Match) setBot(h *human, bot bool) {
 		return
 	}
 	h.bot = bot
-	if err := m.sim.SetBot(h.id, bot); err != nil {
+	if err := m.sim.SetBot(h.simID, bot); err != nil {
 		m.opts.Log.Warn().Err(err).Str("match", m.ID).Msg("setBot")
 	}
 }

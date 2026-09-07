@@ -126,14 +126,18 @@ type PveConfig struct {
 
 // MatchConfig — конфигурация матча для createMatch.
 type MatchConfig struct {
-	GameMode   string         `json:"gameMode,omitempty"`
-	Mode       int            `json:"mode"`
-	ArenaIndex int            `json:"arenaIndex"`
-	DurationMs int64          `json:"durationMs,omitempty"`
-	Difficulty int            `json:"difficulty,omitempty"`
-	Campaign   *bool          `json:"campaign,omitempty"`
-	Pve        *PveConfig     `json:"pve,omitempty"`
-	Players    []PlayerConfig `json:"players"`
+	GameMode   string     `json:"gameMode,omitempty"`
+	Mode       int        `json:"mode"`
+	ArenaIndex int        `json:"arenaIndex"`
+	DurationMs int64      `json:"durationMs,omitempty"`
+	Difficulty int        `json:"difficulty,omitempty"`
+	Campaign   *bool      `json:"campaign,omitempty"`
+	Pve        *PveConfig `json:"pve,omitempty"`
+	// Tutorial — режим обучения: состав может быть неполным, матч не заканчивается,
+	// боец-человек не выбывает. Сервер такие матчи не создаёт (обучение идёт в браузере),
+	// поле нужно тестам контракта.
+	Tutorial bool           `json:"tutorial,omitempty"`
+	Players  []PlayerConfig `json:"players"`
 }
 
 // Match — живой матч внутри собственной goja.Runtime. Не потокобезопасен.
@@ -149,6 +153,9 @@ type Match struct {
 	reason     goja.Callable
 	stringify  goja.Callable
 	parse      goja.Callable
+
+	tutorialSpawn  goja.Callable
+	tutorialRemove goja.Callable
 }
 
 // NewMatch создаёт матч: новая VM, вызов createMatch(config, seed).
@@ -173,6 +180,7 @@ func (p *Program) NewMatch(cfg MatchConfig, seed uint32) (*Match, error) {
 	for name, dst := range map[string]*goja.Callable{
 		"applyInput": &m.applyInput, "step": &m.step, "snapshot": &m.snapshot,
 		"setBot": &m.setBot, "isOver": &m.isOver, "winner": &m.winner, "reason": &m.reason,
+		"tutorialSpawn": &m.tutorialSpawn, "tutorialRemove": &m.tutorialRemove,
 	} {
 		fn, err := get(name)
 		if err != nil {
@@ -217,6 +225,43 @@ func (m *Match) ApplyInput(playerID string, input json.RawMessage) (bool, error)
 func (m *Match) SetBot(playerID string, bot bool) error {
 	if _, err := m.setBot(goja.Undefined(), m.state, m.vm.ToValue(playerID), m.vm.ToValue(bot)); err != nil {
 		return wrapJS(err, "setBot")
+	}
+	return nil
+}
+
+// TutorialSpawnOpts — соперник в обучении.
+type TutorialSpawnOpts struct {
+	Role     string  `json:"role"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	BotLevel int     `json:"botLevel"`
+	Bot      bool    `json:"bot"`
+}
+
+// TutorialSpawn ставит соперника в матче обучения и возвращает его id.
+func (m *Match) TutorialSpawn(opts TutorialSpawnOpts) (string, error) {
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return "", errors.Wrap(err, "marshal tutorial opts")
+	}
+	val, err := m.parse(goja.Undefined(), m.vm.ToValue(string(b)))
+	if err != nil {
+		return "", wrapJS(err, "parse tutorial opts")
+	}
+	res, err := m.tutorialSpawn(goja.Undefined(), m.state, val)
+	if err != nil {
+		return "", wrapJS(err, "tutorialSpawn")
+	}
+	if goja.IsNull(res) || goja.IsUndefined(res) {
+		return "", errors.New("tutorialSpawn: not a tutorial match")
+	}
+	return res.String(), nil
+}
+
+// TutorialRemove убирает соперника обучения.
+func (m *Match) TutorialRemove(id string) error {
+	if _, err := m.tutorialRemove(goja.Undefined(), m.state, m.vm.ToValue(id)); err != nil {
+		return wrapJS(err, "tutorialRemove")
 	}
 	return nil
 }

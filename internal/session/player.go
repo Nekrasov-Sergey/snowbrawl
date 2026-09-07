@@ -14,7 +14,6 @@ type Place string
 // Возможные места игрока.
 const (
 	InMenu  Place = "menu"
-	InQueue Place = "queue"
 	InRoom  Place = "room"
 	InMatch Place = "match"
 )
@@ -36,10 +35,9 @@ type Player struct {
 	DisconnectedAt time.Time // когда пропало соединение (если Conn == nil)
 	CreatedAt      time.Time
 
-	Place     Place
-	RoomCode  string // если Place == InRoom или матч из комнаты
-	QueueMode int    // если Place == InQueue
-	MatchID   string // если Place == InMatch
+	Place    Place
+	RoomCode string // если Place == InRoom или матч из комнаты
+	MatchID  string // если Place == InMatch
 
 	// Тренировка с ботами идёт целиком в браузере, сервер в ней не участвует: для него игрок
 	// остаётся в меню. Эти поля заполнены со слов клиента и нужны только админке.
@@ -76,7 +74,6 @@ func (p *Player) Send(msg []byte) {
 func (p *Player) ToMenu() {
 	p.Place = InMenu
 	p.RoomCode = ""
-	p.QueueMode = 0
 	p.MatchID = ""
 }
 

@@ -10,19 +10,22 @@
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { /* игнор */ } }
   };
 
-  var SCREENS = ['nick', 'menu', 'mode', 'character', 'map', 'search', 'createroom', 'joinroom', 'lobby', 'game', 'settings'];
+  var SCREENS = ['nick', 'menu', 'hub', 'createroom', 'rooms', 'lobby', 'game', 'settings'];
   var app = {
     screen: 'nick',
+    nav: [],                  // стек экранов для кнопки «Назад»
     nick: store.get('sb.nick') || '',
     token: store.get('sb.token') || '',
     me: null,                 // playerId с сервера
     net: null,
     connected: false,
     draining: false,
-    flow: 'qm',               // qm | offline — куда ведёт экран выбора бойца
-    qm: { mode: 3, role: null },
-    offline: { mode: 3, role: null, arena: 0, botLevel: 1, gameMode: 'pvp', campaign: true },
-    create: { mode: 3, arena: 0 },
+    section: 'pvp',           // pvp | pve — раздел, в котором игрок сейчас ходит
+    create: { mode: 3, arena: 0, visibility: 'open', botLevel: 1 },
+    // Список комнат: страница приходит пушем от сервера.
+    rooms: { page: 0, data: null },
+    roomMatch: null,          // последнее room.match — состояние идущего матча для лобби
+    offline: { mode: 1, role: 'Раннер', arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true },
     room: null,               // последнее room.state
     game: null                // активный матч (см. startNetMatch / startOfflineMatch)
   };
@@ -30,17 +33,29 @@
   // ------------------------------------------------------------
   // Утилиты UI
   // ------------------------------------------------------------
-  function goto(name) {
+  // Переход на экран. Стек nav нужен кнопке «Назад»: экранов-хабов стало больше, и зашитая
+  // в каждую кнопку цель начинала врать (список комнат достижим только из раздела).
+  function goto(name, opts) {
+    var push = !(opts && opts.back);
+    if (push && app.screen && app.screen !== name && CAN_RETURN[app.screen]) app.nav.push(app.screen);
+    if (!CAN_RETURN[name]) app.nav = [];   // ник, матч и лобби начинают путь заново
+    if (app.screen === 'rooms' && name !== 'rooms') unwatchRooms();
     app.screen = name;
     SCREENS.forEach(function (s) { $('screen-' + s).hidden = (s !== name); });
-    if (name === 'mode') buildModeGrid();
-    if (name === 'character') buildHeroGrid();
-    if (name === 'map') buildMapGrid();
-    if (name === 'createroom') buildCreateGrids();
-    if (name === 'menu') { $('menuNick').textContent = app.nick; renderOnline(); }
+    if (name === 'hub') renderHub();
+    if (name === 'createroom') buildCreateScreen();
+    if (name === 'rooms') openRooms();
+    if (name === 'menu') { $('menuNick').textContent = app.nick; renderOnline(); renderTutorialBadge(); }
     if (name === 'settings') renderSettings();
     if (name !== 'game' && app.game) stopGame();
     document.documentElement.classList.toggle('ingame', name === 'game');
+  }
+  // Экраны, на которые имеет смысл возвращаться кнопкой «Назад».
+  var CAN_RETURN = { menu: 1, hub: 1, createroom: 1, rooms: 1, settings: 1 };
+  function goBack() {
+    Audio_.uiClick();
+    var to = app.nav.pop() || 'menu';
+    goto(to, { back: true });
   }
   // Счётчик онлайна: число приходит по игровому сокету — в welcome и потом при каждом изменении.
   // Раньше оно бралось отдельным запросом /api/online, и тот успевал ответить раньше, чем сервер
@@ -61,6 +76,10 @@
     room_not_found: 'Комната с таким кодом не найдена.',
     room_full: 'Комната заполнена.',
     room_limit: 'С вашего адреса уже создано слишком много комнат.',
+    bad_code: 'Код — четыре цифры.',
+    too_many_tries: 'Слишком много попыток кода. Подождите минуту.',
+    slot_taken: 'Это место уже занял другой игрок.',
+    no_slots: 'В матче нет свободных мест.',
     busy: 'Сначала выйдите из текущей комнаты или матча.',
     draining: 'Сервер скоро перезапустится: новые матчи временно не начинаются.',
     server_full: 'Сервер переполнен, попробуйте позже.',
@@ -88,7 +107,6 @@
         el.className = state === 'open' ? 'on' : (state === 'closed' ? 'off' : '');
         el.title = state === 'open' ? 'Соединение установлено' : 'Нет соединения с сервером';
         if (app.game && !app.game.offline) $('reconnectOverlay').hidden = (state === 'open');
-        if (state !== 'open' && app.screen === 'search') { /* сервер снял нас с очереди при разрыве */ goto('menu'); toast('Связь потеряна, поиск отменён.'); }
       },
       onMessage: onMessage
     });
@@ -114,15 +132,15 @@
         setDrain(!!d.draining);
         if (app.game && app.game.offline) sendTraining(true);
         // Восстановление места после переподключения.
-        if (d.resume === 'queue') { if (app.screen !== 'search') goto('search'); }
-        else if (d.resume === 'room') { if (app.screen !== 'lobby') goto('lobby'); }
+        if (d.resume === 'room') { if (app.screen !== 'lobby') goto('lobby'); }
         else if (d.resume === 'match') { /* придёт match.start */ }
-        else if (app.screen === 'search' || app.screen === 'lobby' || (app.game && !app.game.offline)) { goto('menu'); }
+        else if (app.screen === 'lobby' || (app.game && !app.game.offline)) { goto('menu'); }
+        else if (app.screen === 'rooms') watchRooms();
         break;
       case 'error':
         toast(ERR_TEXT[d.code] || ('Ошибка: ' + (d.msg || d.code)));
         if (d.code === 'bad_nick') goto('nick');
-        if (d.code === 'room_not_found' || d.code === 'room_full') $('joinMsg').textContent = ERR_TEXT[d.code];
+        if (app.screen === 'rooms' && ERR_TEXT[d.code]) $('roomsMsg').textContent = ERR_TEXT[d.code];
         break;
       case 'online':
         setOnline(d.n);
@@ -133,14 +151,25 @@
       case 'drain':
         setDrain(!!d.active);
         break;
-      case 'queue.status':
-        if (!d.inQueue) { if (app.screen === 'search') goto('menu'); break; }
-        if (app.screen !== 'search') goto('search');
-        $('searchCount').textContent = d.players + ' / ' + d.needed;
-        $('searchTimer').textContent = Math.ceil(d.waitLeft / 1000);
+      case 'room.list':
+        app.rooms.data = d;
+        app.rooms.page = d.page;
+        if (app.screen === 'rooms') renderRooms();
+        break;
+      case 'room.match':
+        app.roomMatch = d;
+        if (app.screen === 'lobby') renderLobby();
+        break;
+      case 'match.roster':
+        if (app.game && !app.game.offline) {
+          app.game.players = d.players;
+          app.game.names = nameMap(d.players);
+          resetHudCache();
+        }
         break;
       case 'room.state':
         app.room = d;
+        if (!d.inMatch) app.roomMatch = null;
         // Во время матча и пока показано табло результата лобби не переключаем:
         // игрок сам нажмёт «В лобби» (или оно откроется по кнопке выхода).
         if (app.game && !app.game.offline) break;
@@ -183,10 +212,9 @@
   $('nickInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('nickOk').click(); });
   $('changeNick').onclick = function () { Audio_.uiClick(); $('nickInput').value = app.nick; goto('nick'); };
 
-  $('btnQuickMatch').onclick = function () { Audio_.uiClick(); app.flow = 'qm'; goto('mode'); };
-  $('btnCreateRoom').onclick = function () { Audio_.uiClick(); goto('createroom'); };
-  $('btnJoinRoom').onclick = function () { Audio_.uiClick(); $('joinMsg').textContent = ''; goto('joinroom'); };
-  $('btnOffline').onclick = function () { Audio_.uiClick(); app.flow = 'offline'; goto('mode'); };
+  $('btnPvp').onclick = function () { Audio_.uiClick(); app.section = 'pvp'; goto('hub'); };
+  $('btnPve').onclick = function () { Audio_.uiClick(); app.section = 'pve'; goto('hub'); };
+  $('btnTutorial').onclick = function () { Audio_.uiClick(); startTutorial(); };
   $('btnSettings').onclick = function () { Audio_.uiClick(); goto('settings'); };
 
   // ------------------------------------------------------------
@@ -195,38 +223,16 @@
   function renderSettings() {
     $('setHaptics').checked = !!Settings.get('haptics');
     $('setTouch').value = Settings.get('touch');
-    $('setPc').value = pcMode();
-    $('pcRow').hidden = Device.isTouch();
   }
-  $('setPc').onchange = function () { Settings.set('pcControls', $('setPc').value); };
   $('setHaptics').onchange = function () { Settings.set('haptics', $('setHaptics').checked); };
   $('setTouch').onchange = function () { Settings.set('touch', $('setTouch').value); Device.apply(); };
-  $('backFromSettings').onclick = function () { Audio_.uiClick(); goto('menu'); };
+  $('backFromSettings').onclick = goBack;
 
   // ------------------------------------------------------------
-  // Quick Match / оффлайн: режим → боец → (арена)
+  // Общие детали интерфейса
   // ------------------------------------------------------------
-  function buildModeGrid() {
-    var grid = $('modeGrid'); grid.innerHTML = '';
-    var cur = app.flow === 'qm' ? app.qm : app.offline;
-    Sim.MODES.forEach(function (n) {
-      var card = document.createElement('div');
-      card.className = 'modeCard' + (cur.mode === n ? ' selected' : '');
-      card.textContent = n + ' на ' + n;
-      card.onclick = function () { Audio_.uiClick(); cur.mode = n; buildModeGrid(); };
-      grid.appendChild(card);
-    });
-    $('nextFromMode').disabled = !cur.mode;
-  }
-  $('nextFromMode').onclick = function () {
-    var cur = app.flow === 'qm' ? app.qm : app.offline;
-    if (!cur.mode) return;
-    Audio_.uiClick(); goto('character');
-  };
-  $('backFromMode').onclick = function () { Audio_.uiClick(); goto('menu'); };
-
-  // Компактная карточка: цвет, имя и кнопка «i». Описание показывается в общем блоке infoEl
-  // под сеткой, чтобы шесть бойцов помещались на экране телефона без прокрутки.
+  // Компактная карточка бойца: цвет, имя и кнопка «i». Описание показывается в общем блоке
+  // infoEl под сеткой, чтобы шесть бойцов помещались на экране телефона без прокрутки.
   function heroCard(role, selected, onClick, infoEl) {
     var stats = Sim.ROLE_STATS[role];
     var card = document.createElement('div');
@@ -234,39 +240,20 @@
     card.innerHTML = '<div class="heroSwatch" style="background:' + stats.color + '"></div>' +
       '<div class="heroName">' + role + '</div><button type="button" class="heroInfoBtn" title="Описание">i</button>';
     card.onclick = onClick;
-    card.querySelector('.heroInfoBtn').onclick = function (e) { e.stopPropagation(); Audio_.uiClick(); toggleHeroInfo(infoEl, role); };
+    card.querySelector('.heroInfoBtn').onclick = function (e) {
+      e.stopPropagation(); Audio_.uiClick();
+      toggleInfo(infoEl, role, '<b>' + role + '.</b> ' + Sim.HERO_DESCRIPTIONS[role]);
+    };
     return card;
   }
-  function toggleHeroInfo(el, role) {
+  // Один блок описания на экран: повторный клик по той же «i» его сворачивает.
+  function toggleInfo(el, key, html) {
     if (!el) return;
-    if (!el.hidden && el.getAttribute('data-role') === role) { el.hidden = true; return; }
-    el.setAttribute('data-role', role);
-    el.innerHTML = '<b>' + role + '.</b> ' + Sim.HERO_DESCRIPTIONS[role];
+    if (!el.hidden && el.getAttribute('data-key') === key) { el.hidden = true; return; }
+    el.setAttribute('data-key', key);
+    el.innerHTML = html;
     el.hidden = false;
   }
-  function buildHeroGrid() {
-    var grid = $('heroGrid'); grid.innerHTML = '';
-    var cur = app.flow === 'qm' ? app.qm : app.offline;
-    Sim.ALL_ROLES.forEach(function (role) {
-      grid.appendChild(heroCard(role, cur.role === role, function () { Audio_.uiClick(); cur.role = role; buildHeroGrid(); }, $('heroInfo')));
-    });
-    $('nextFromCharacter').disabled = !cur.role;
-    $('nextFromCharacter').textContent = app.flow === 'qm' ? 'Искать матч' : 'Далее';
-  }
-  $('backFromCharacter').onclick = function () { Audio_.uiClick(); goto('mode'); };
-  $('nextFromCharacter').onclick = function () {
-    Audio_.uiClick();
-    if (app.flow === 'qm') {
-      if (!app.qm.role) return;
-      send('queue.join', { mode: app.qm.mode, role: app.qm.role });
-      $('searchCount').textContent = '1 / ' + (2 * app.qm.mode);
-      goto('search');
-    } else {
-      goto('map');
-    }
-  };
-  $('cancelSearch').onclick = function () { Audio_.uiClick(); send('queue.leave'); goto('menu'); };
-
   function mapCard(i, selected, onClick) {
     var arena = Sim.ARENAS[i];
     var card = document.createElement('div');
@@ -274,12 +261,6 @@
     card.innerHTML = '<div class="heroName">' + arena.name + '</div><div class="heroDesc">' + arena.obstacles.length + ' укрытий на арене</div>';
     card.onclick = onClick;
     return card;
-  }
-  var GAME_MODE_NAMES = { pvp: 'Дуэли (PvP)', survival: 'Волны', defense: 'Защита' };
-  function isPve(gm) { return gm && gm !== 'pvp'; }
-  function pveResultText(r) {
-    return { cleared: 'Прошлый забег: кампания пройдена 🏆', wiped: 'Прошлый забег: пати повержена',
-      objective: 'Прошлый забег: снеговик разбит', expired: 'Прошлый забег: время вышло' }[r] || '';
   }
   function segRow(el, items, current, onPick) {
     if (!el) return;
@@ -293,106 +274,309 @@
       el.appendChild(b);
     });
   }
-  function buildMapGrid() {
-    var o = app.offline, pve = isPve(o.gameMode);
-    segRow($('gameModeSel'), (Sim.GAME_MODES || ['pvp', 'survival', 'defense']).map(function (gm) {
-      return { value: gm, label: GAME_MODE_NAMES[gm] || gm };
-    }), o.gameMode, function (v) { o.gameMode = v; buildMapGrid(); });
-
-    $('pveCampaignLabel').hidden = !pve;
-    $('pveCampaignSel').hidden = !pve;
-    if (pve) {
-      segRow($('pveCampaignSel'), [{ value: true, label: 'Кампания' }, { value: false, label: 'Эндлесс' }],
-        o.campaign, function (v) { o.campaign = v; buildMapGrid(); });
-    }
-
-    // В PvE арену задаёт таблица уровней — выбор арены показываем только для PvP.
-    var showArena = !pve;
-    $('mapArenaLabel').hidden = !showArena;
-    var grid = $('mapGrid'); grid.hidden = !showArena; grid.innerHTML = '';
-    if (showArena) {
-      Sim.ARENAS.forEach(function (_, i) {
-        grid.appendChild(mapCard(i, o.arena === i, function () { Audio_.uiClick(); o.arena = i; buildMapGrid(); }));
-      });
-    }
-
-    $('botLevelLabel').textContent = pve ? 'Сложность' : 'Сложность ботов';
-    segRow($('botLevelSel'), (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).map(function (name, lvl) {
-      return { value: lvl, label: name };
-    }), o.botLevel, function (v) { o.botLevel = v; buildMapGrid(); });
+  var GAME_MODE_NAMES = { pvp: 'Дуэли (PvP)', survival: 'Волны', defense: 'Защита' };
+  var GAME_MODE_DESCRIPTIONS = {
+    pvp: 'Две команды бросают снежки. Побеждает команда, которая вывела из строя всех соперников; если время вышло — ничья.',
+    survival: 'Волны врагов идут на вашу команду. У команды общие жизни, между волнами есть передышка, каждый уровень заканчивается боссом.',
+    defense: 'То же, что «Волны», но на арене стоит снеговик, и врагам нужен он. Разобьют снеговика — забег закончен, даже если команда жива.'
+  };
+  // «Кампания» и «Эндлесс» ничего не говорили игроку: теперь формат называется словами,
+  // а детали — по кнопке «i».
+  var FORMAT_NAMES = { campaign: 'Прохождение (3 уровня и босс)', endless: 'Бесконечные волны' };
+  var FORMAT_DESCRIPTIONS = {
+    campaign: 'Три уровня по четыре волны, в конце каждого — босс. Уровни идут на разных аренах; зачистите все три — кампания пройдена.',
+    endless: 'Волны не кончаются и становятся всё сложнее. Играете, пока команда держится; в итогах записывается, сколько волн выстояли.'
+  };
+  var PVE_GAME_MODES = ['survival', 'defense'];
+  var VIS_NAMES = { open: 'Открытая — видна всем', closed: 'Закрытая — только по коду' };
+  function isPve(gm) { return gm && gm !== 'pvp'; }
+  function botLevelNames() { return Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']; }
+  function pveResultText(r) {
+    return { cleared: 'Прошлый забег: прохождение завершено 🏆', wiped: 'Прошлый забег: команда повержена',
+      objective: 'Прошлый забег: снеговик разбит', expired: 'Прошлый забег: время вышло' }[r] || '';
   }
-  $('backFromMap').onclick = function () { Audio_.uiClick(); goto('character'); };
-  $('startOfflineBtn').onclick = function () { Audio_.uiClick(); startOfflineMatch(); };
+  function nameMap(players) {
+    var out = {};
+    (players || []).forEach(function (p) { out[p.id] = p.nick; });
+    return out;
+  }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function plural(n, one, few, many) {
+    var m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return one;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+    return many;
+  }
+  function ageText(ms) {
+    var min = Math.floor(ms / 60000);
+    if (min < 1) return 'только что';
+    if (min < 60) return min + ' ' + plural(min, 'минуту', 'минуты', 'минут') + ' назад';
+    var h = Math.floor(min / 60);
+    return h + ' ' + plural(h, 'час', 'часа', 'часов') + ' назад';
+  }
 
   // ------------------------------------------------------------
-  // Комнаты
+  // Раздел PVP / PVE
   // ------------------------------------------------------------
-  function buildCreateGrids() {
+  function renderHub() {
+    var pve = app.section === 'pve';
+    $('hubHint').textContent = pve
+      ? 'Кооператив против волн врагов: соберите команду до четырёх игроков, пустые слоты займут союзные боты.'
+      : 'Команда против команды. Создайте комнату или войдите в чужую — свободные слоты займут боты.';
+  }
+  $('backFromHub').onclick = goBack;
+  $('btnCreateRoom').onclick = function () { Audio_.uiClick(); goto('createroom'); };
+  $('btnJoinRoom').onclick = function () { Audio_.uiClick(); goto('rooms'); };
+
+  // ------------------------------------------------------------
+  // Создание комнаты
+  // ------------------------------------------------------------
+  function buildCreateScreen() {
+    var pve = app.section === 'pve', c = app.create;
+    $('createHead').textContent = pve ? 'Новая PvE-комната' : 'Новая PvP-комната';
+    $('createModeLabel').textContent = pve ? 'Размер команды' : 'Размер команд';
     var mg = $('createModeGrid'); mg.innerHTML = '';
     Sim.MODES.forEach(function (n) {
       var card = document.createElement('div');
-      card.className = 'modeCard' + (app.create.mode === n ? ' selected' : '');
-      card.textContent = n + '×' + n;
-      card.onclick = function () { Audio_.uiClick(); app.create.mode = n; buildCreateGrids(); };
+      card.className = 'modeCard' + (c.mode === n ? ' selected' : '');
+      card.textContent = pve ? n + ' игр.' : n + '×' + n;
+      card.onclick = function () { Audio_.uiClick(); c.mode = n; buildCreateScreen(); };
       mg.appendChild(card);
     });
-    var grid = $('createMapGrid'); grid.innerHTML = '';
-    Sim.ARENAS.forEach(function (_, i) {
-      grid.appendChild(mapCard(i, app.create.arena === i, function () { Audio_.uiClick(); app.create.arena = i; buildCreateGrids(); }));
-    });
+    // В PvE арену задаёт таблица уровней, выбирать нечего.
+    $('createArenaLabel').hidden = pve;
+    var grid = $('createMapGrid'); grid.hidden = pve; grid.innerHTML = '';
+    if (!pve) {
+      Sim.ARENAS.forEach(function (_, i) {
+        grid.appendChild(mapCard(i, c.arena === i, function () { Audio_.uiClick(); c.arena = i; buildCreateScreen(); }));
+      });
+    }
+    segRow($('createVisSel'), ['open', 'closed'].map(function (v) { return { value: v, label: VIS_NAMES[v] }; }),
+      c.visibility, function (v) { c.visibility = v; buildCreateScreen(); });
+    segRow($('createBotSel'), botLevelNames().map(function (name, lvl) { return { value: lvl, label: name }; }),
+      c.botLevel, function (v) { c.botLevel = v; buildCreateScreen(); });
   }
-  $('backFromCreate').onclick = function () { Audio_.uiClick(); goto('menu'); };
-  $('createRoomBtn').onclick = function () { Audio_.uiClick(); send('room.create', { mode: app.create.mode, arena: app.create.arena }); };
-  $('backFromJoin').onclick = function () { Audio_.uiClick(); goto('menu'); };
-  $('btnJoinConfirm').onclick = function () {
+  $('backFromCreate').onclick = goBack;
+  $('createRoomBtn').onclick = function () {
     Audio_.uiClick();
-    var code = $('joinCodeInput').value.trim().toUpperCase();
-    if (!code) { $('joinMsg').textContent = 'Введите код.'; return; }
-    $('joinMsg').textContent = '';
+    var c = app.create, pve = app.section === 'pve';
+    send('room.create', {
+      mode: c.mode, arena: pve ? 0 : c.arena, visibility: c.visibility, difficulty: c.botLevel,
+      // Волны или защита выбираются уже в комнате; при создании берём волны.
+      gameMode: pve ? 'survival' : 'pvp', campaign: true
+    });
+  };
+
+  // ------------------------------------------------------------
+  // Список комнат: страницу присылает сервер и обновляет её сам, пока экран открыт
+  // ------------------------------------------------------------
+  function watchRooms() { send('room.list', { section: app.section, page: app.rooms.page }); }
+  function unwatchRooms() {
+    app.rooms.data = null; app.rooms.slots = null;
+    if (app.net) app.net.send('room.unlist', {});
+  }
+  function openRooms() {
+    app.rooms.page = 0;
+    $('roomsMsg').textContent = '';
+    clearCode();
+    $('roomsHead').textContent = app.section === 'pve' ? 'PvE-комнаты' : 'PvP-комнаты';
+    renderRooms();
+    watchRooms();
+  }
+  $('backFromRooms').onclick = goBack;
+
+  // Код комнаты — четыре клетки: цифра переводит фокус вперёд, Backspace назад, вставка
+  // раскладывает код по клеткам целиком.
+  var codeCells = Array.prototype.slice.call(document.querySelectorAll('#codeCells .codeCell'));
+  function codeValue() { return codeCells.map(function (c) { return c.value; }).join(''); }
+  function clearCode() {
+    codeCells.forEach(function (c) { c.value = ''; c.classList.remove('filled'); });
+    $('btnJoinConfirm').disabled = true;
+  }
+  function syncCode() {
+    codeCells.forEach(function (c) { c.classList.toggle('filled', !!c.value); });
+    $('btnJoinConfirm').disabled = codeValue().length !== 4;
+  }
+  function fillCode(digits, from) {
+    for (var i = 0; i < digits.length && from + i < codeCells.length; i++) codeCells[from + i].value = digits[i];
+    var next = Math.min(from + digits.length, codeCells.length - 1);
+    codeCells[next].focus();
+    syncCode();
+  }
+  codeCells.forEach(function (cell, i) {
+    cell.addEventListener('input', function () {
+      var digits = cell.value.replace(/\D/g, '');
+      cell.value = '';
+      if (!digits) { syncCode(); return; }
+      fillCode(digits, i);
+      if (codeValue().length === 4) $('btnJoinConfirm').focus();
+    });
+    cell.addEventListener('keydown', function (e) {
+      if (e.key === 'Backspace' && !cell.value && i > 0) { e.preventDefault(); codeCells[i - 1].value = ''; codeCells[i - 1].focus(); syncCode(); }
+      else if (e.key === 'ArrowLeft' && i > 0) codeCells[i - 1].focus();
+      else if (e.key === 'ArrowRight' && i < codeCells.length - 1) codeCells[i + 1].focus();
+      else if (e.key === 'Enter' && !$('btnJoinConfirm').disabled) $('btnJoinConfirm').click();
+    });
+    cell.addEventListener('paste', function (e) {
+      var text = (e.clipboardData || window.clipboardData).getData('text') || '';
+      var digits = text.replace(/\D/g, '');
+      if (!digits) return;
+      e.preventDefault();
+      fillCode(digits, i);
+    });
+    cell.addEventListener('focus', function () { cell.select(); });
+  });
+  $('btnJoinConfirm').onclick = function () {
+    var code = codeValue();
+    if (code.length !== 4) { $('roomsMsg').textContent = 'Код — четыре цифры.'; return; }
+    Audio_.uiClick();
+    $('roomsMsg').textContent = '';
     send('room.join', { code: code });
   };
-  $('joinCodeInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('btnJoinConfirm').click(); });
+
+  function renderRooms() {
+    var list = $('roomsList'); list.innerHTML = '';
+    var d = app.rooms.data;
+    if (!d) { $('roomsMsg').textContent = 'Загружаем список…'; $('roomsPager').innerHTML = ''; return; }
+    if (!d.rooms || !d.rooms.length) {
+      $('roomsMsg').textContent = 'Комнат пока нет — создайте свою, к вам зайдут.';
+      $('roomsPager').innerHTML = '';
+      return;
+    }
+    if ($('roomsMsg').textContent === 'Загружаем список…') $('roomsMsg').textContent = '';
+    d.rooms.forEach(function (r) { list.appendChild(roomRow(r)); });
+    var pager = $('roomsPager');
+    if (d.pages > 1) {
+      var items = [];
+      for (var i = 0; i < d.pages; i++) items.push({ value: i, label: String(i + 1) });
+      segRow(pager, items, d.page, function (v) { app.rooms.page = v; watchRooms(); });
+    } else pager.innerHTML = '';
+  }
+
+  function roomRow(r) {
+    var el = document.createElement('div');
+    el.className = 'roomRow' + (r.inMatch ? ' live' : '');
+    var game = isPve(r.gameMode)
+      ? (GAME_MODE_NAMES[r.gameMode] || r.gameMode) + ' · ' + (r.campaign ? 'Прохождение' : 'Бесконечные волны')
+      : GAME_MODE_NAMES.pvp;
+    var size = isPve(r.gameMode) ? r.mode + ' игр.' : r.mode + '×' + r.mode;
+    var arena = (Sim.ARENAS[r.arena] || {}).name || '';
+    var meta = [size];
+    if (!isPve(r.gameMode) && arena) meta.push(arena);
+    meta.push('игроков ' + r.humans + '/' + r.capacity);
+    if (r.bots > 0) meta.push('ботов ' + r.bots);
+    if (r.hostNick) meta.push('хост ' + escapeHtml(r.hostNick));
+    meta.push(ageText(r.ageMs || 0));
+    el.innerHTML =
+      '<div class="roomMain">' +
+        '<span class="roomCode">' + (r.needCode ? '🔒 ••••' : escapeHtml(r.code)) + '</span>' +
+        '<span class="roomGame">' + game + '</span>' +
+        '<span class="status ' + (r.inMatch ? 'live">Матч' : 'wait">Ожидание') + '</span>' +
+      '</div>' +
+      '<div class="roomMeta">' + meta.join(' · ') + '</div>';
+    var act = document.createElement('div');
+    act.className = 'roomAct';
+    var btn = document.createElement('button');
+    btn.className = 'menuBtn' + (r.joinable ? ' primary' : ' ghost');
+    if (!r.joinable) {
+      btn.textContent = 'Мест нет';
+      btn.disabled = true;
+    } else if (r.needCode) {
+      btn.textContent = 'Ввести код';
+      btn.onclick = function () {
+        Audio_.uiClick();
+        $('roomsMsg').textContent = 'Комната закрытая: спросите код у хоста.';
+        codeCells[0].focus();
+      };
+    } else {
+      // Войти можно и в комнату с идущим матчем: в лобби будет видно бой и кнопка вступить.
+      btn.textContent = r.inMatch ? 'Войти в матч' : 'Войти';
+      btn.onclick = function () { Audio_.uiClick(); $('roomsMsg').textContent = ''; send('room.join', { code: r.code }); };
+    }
+    act.appendChild(btn);
+    el.appendChild(act);
+    return el;
+  }
+
+  // ------------------------------------------------------------
+  // Лобби комнаты
+  // ------------------------------------------------------------
   $('copyCode').onclick = function () {
     if (!app.room) return;
     if (navigator.clipboard) navigator.clipboard.writeText(app.room.code).then(function () { toast('Код скопирован: ' + app.room.code); });
   };
-  $('leaveLobby').onclick = function () { Audio_.uiClick(); send('room.leave'); app.room = null; goto('menu'); };
+  $('leaveLobby').onclick = function () {
+    Audio_.uiClick(); send('room.leave'); app.room = null; app.roomMatch = null;
+    goto('rooms');
+  };
+  $('joinMatchBtn').onclick = function () { Audio_.uiClick(); send('match.join'); };
   $('startRoomBtn').onclick = function () { Audio_.uiClick(); send('room.start'); };
+  $('readyBtn').onclick = function () {
+    Audio_.uiClick();
+    send('room.ready', { ready: !myReady() });
+  };
+  function myReady() {
+    var r = app.room; if (!r) return false;
+    for (var i = 0; i < r.players.length; i++) if (r.players[i].id === app.me) return !!r.players[i].ready;
+    return false;
+  }
   function sendLobbyConfig() {
-    var gm = $('lobbyGameMode').value || 'pvp';
+    var r = app.room; if (!r) return;
+    var pve = isPve(r.gameMode);
     send('room.config', {
-      mode: +$('lobbyMode').value, arena: +$('lobbyArena').value,
-      gameMode: gm, campaign: $('lobbyCampaign').value === '1',
-      difficulty: +$('lobbyDifficulty').value
+      mode: +$('lobbyMode').value,
+      arena: pve ? r.arena : +$('lobbyArena').value,
+      gameMode: pve ? ($('lobbyGameMode').value || 'survival') : 'pvp',
+      campaign: $('lobbyCampaign').value === '1',
+      difficulty: +$('lobbyDifficulty').value,
+      visibility: $('lobbyVisibility').value
     });
   }
-  ['lobbyGameMode', 'lobbyMode', 'lobbyArena', 'lobbyCampaign', 'lobbyDifficulty'].forEach(function (id) {
+  ['lobbyGameMode', 'lobbyMode', 'lobbyArena', 'lobbyCampaign', 'lobbyDifficulty', 'lobbyVisibility'].forEach(function (id) {
     $(id).onchange = sendLobbyConfig;
   });
+  $('lobbyGameModeInfoBtn').onclick = function (e) {
+    e.preventDefault(); Audio_.uiClick();
+    var gm = $('lobbyGameMode').value || 'survival';
+    toggleInfo($('lobbyModeInfo'), gm, '<b>' + (GAME_MODE_NAMES[gm] || gm) + '.</b> ' + GAME_MODE_DESCRIPTIONS[gm]);
+  };
+  $('lobbyCampaignInfoBtn').onclick = function (e) {
+    e.preventDefault(); Audio_.uiClick();
+    var key = $('lobbyCampaign').value === '1' ? 'campaign' : 'endless';
+    toggleInfo($('lobbyModeInfo'), key, '<b>' + FORMAT_NAMES[key] + '.</b> ' + FORMAT_DESCRIPTIONS[key]);
+  };
 
   function renderLobby() {
     var r = app.room; if (!r) return;
     var isHost = r.hostId === app.me;
-    var gm = r.gameMode || 'pvp', pve = gm !== 'pvp';
+    var gm = r.gameMode || 'pvp', pve = isPve(gm);
+    app.section = pve ? 'pve' : 'pvp';
     $('lobbyCode').textContent = r.code;
     var gmSel = $('lobbyGameMode'), modeSel = $('lobbyMode'), arenaSel = $('lobbyArena');
-    var campSel = $('lobbyCampaign'), difSel = $('lobbyDifficulty');
-    gmSel.innerHTML = (Sim.GAME_MODES || ['pvp', 'survival', 'defense']).map(function (m) {
+    var campSel = $('lobbyCampaign'), difSel = $('lobbyDifficulty'), visSel = $('lobbyVisibility');
+    // В PvP-комнате выбора игры нет: она только про дуэли.
+    $('lobbyGameModeWrap').hidden = !pve;
+    gmSel.innerHTML = PVE_GAME_MODES.map(function (m) {
       return '<option value="' + m + '"' + (m === gm ? ' selected' : '') + '>' + (GAME_MODE_NAMES[m] || m) + '</option>';
     }).join('');
     modeSel.innerHTML = Sim.MODES.map(function (n) { return '<option value="' + n + '"' + (n === r.mode ? ' selected' : '') + '>' + (pve ? n + ' игр.' : n + '×' + n) + '</option>'; }).join('');
     arenaSel.innerHTML = Sim.ARENAS.map(function (a, i) { return '<option value="' + i + '"' + (i === r.arena ? ' selected' : '') + '>' + a.name + '</option>'; }).join('');
-    campSel.innerHTML = '<option value="1"' + (r.campaign ? ' selected' : '') + '>Кампания</option><option value="0"' + (!r.campaign ? ' selected' : '') + '>Эндлесс</option>';
-    difSel.innerHTML = (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).map(function (name, lvl) {
+    campSel.innerHTML = '<option value="1"' + (r.campaign ? ' selected' : '') + '>' + FORMAT_NAMES.campaign + '</option>' +
+      '<option value="0"' + (!r.campaign ? ' selected' : '') + '>' + FORMAT_NAMES.endless + '</option>';
+    difSel.innerHTML = botLevelNames().map(function (name, lvl) {
       return '<option value="' + lvl + '"' + (lvl === (r.difficulty || 0) ? ' selected' : '') + '>' + name + '</option>';
     }).join('');
-    [gmSel, modeSel, arenaSel, campSel, difSel].forEach(function (s) { s.disabled = !isHost; });
+    visSel.innerHTML = ['open', 'closed'].map(function (v) {
+      return '<option value="' + v + '"' + (v === (r.visibility || 'open') ? ' selected' : '') + '>' + VIS_NAMES[v] + '</option>';
+    }).join('');
+    [gmSel, modeSel, arenaSel, campSel, difSel, visSel].forEach(function (sel) { sel.disabled = !isHost || r.inMatch; });
     $('lobbyArenaWrap').hidden = pve;   // в PvE арену задаёт уровень
     $('lobbyCampaignWrap').hidden = !pve;
-    $('lobbyDifficultyWrap').hidden = !pve;
-    $('lobbyConfigHint').textContent = isHost
-      ? (pve ? 'Вы хост: пустые слоты займут союзные боты. Запускайте, когда готовы.' : 'Вы хост: меняйте режим и арену, выгоняйте игроков, запускайте матч.')
-      : 'Настройки комнаты меняет хост.';
+    $('lobbyConfigHint').textContent = r.inMatch
+      ? 'Идёт матч: настройки комнаты меняются после боя.'
+      : (isHost
+        ? 'Вы хост: настройки комнаты ваши, пустые слоты займут боты. Можно начать матч, не дожидаясь готовности.'
+        : 'Настройки комнаты меняет хост.');
     var res = $('lobbyResult');
     if (r.lastWinner) {
       res.hidden = false;
@@ -401,20 +585,38 @@
     } else res.hidden = true;
 
     $('slotsBCol').hidden = pve;
-    $('slotsALabel').textContent = pve ? 'Пати' : 'Команда A';
+    $('slotsALabel').textContent = pve ? 'Команда' : 'Команда A';
     var teams = pve ? ['A'] : ['A', 'B'];
     var byTeam = { A: {}, B: {} };
     r.players.forEach(function (p) { if (p.team) byTeam[p.team][p.index] = p; });
+    // Во время матча слот комнаты — это боец матча: сводка приходит отдельным room.match.
+    var mSlots = {};
+    if (r.inMatch && app.roomMatch && app.roomMatch.code === r.code) {
+      (app.roomMatch.slots || []).forEach(function (sl) { mSlots[sl.team + sl.index] = sl; });
+    }
+    var meSlot = null;
+    r.players.forEach(function (p) { if (p.id === app.me) meSlot = p; });
     teams.forEach(function (team) {
       var col = $('slots' + team); col.innerHTML = '';
       for (var i = 0; i < r.mode; i++) {
-        var p = byTeam[team][i];
+        var p = byTeam[team][i], sl = mSlots[team + i];
         var el = document.createElement('div');
+        var hp = sl ? ' <span class="slotHp">' + (sl.koed ? 'выбит' : sl.hp + ' HP') + '</span>' : '';
         if (p) {
-          el.className = 'slot taken' + (p.id === app.me ? ' me' : '');
+          el.className = 'slot taken' + (p.id === app.me ? ' me' : '') + (!r.inMatch && p.ready ? ' ready' : '');
+          var state = '';
+          if (r.inMatch) state = ' <span class="slotState">' + (p.inMatch ? 'в бою' : 'в лобби, за него играет бот') + '</span>';
+          else if (p.ready) state = ' <span class="readyMark">✓ готов</span>';
+          // В матче роль показывает боец слота: у участника в комнате она могла быть не выбрана.
+          var role = (r.inMatch && sl ? sl.role : p.role) || 'боец случайный';
           el.innerHTML = '<span>' + escapeHtml(p.nick) + (p.host ? '<span class="host">★ хост</span>' : '') + (p.connected ? '' : ' <span class="off">(нет связи)</span>') + '</span>' +
-            '<span class="role">' + (p.role || 'боец случайный') + '</span>' +
-            (isHost && p.id !== app.me ? '<button class="kick" data-id="' + p.id + '">выгнать</button>' : '');
+            '<span class="role">' + role + hp + state + '</span>' +
+            (isHost && p.id !== app.me && !r.inMatch ? '<button class="kick" data-id="' + p.id + '">выгнать</button>' : '');
+        } else if (r.inMatch) {
+          el.className = 'slot';
+          el.innerHTML = '<span>' + escapeHtml(sl ? sl.nick : 'Бот') + '</span>' +
+            '<span class="role">' + (sl ? sl.role : '') + hp + '</span>' +
+            '<button class="takeSlot" data-team="' + team + '" data-index="' + i + '">Занять место</button>';
         } else {
           el.className = 'slot';
           el.innerHTML = '<span class="botHint">свободно — займёт бот</span>';
@@ -426,16 +628,40 @@
     Array.prototype.forEach.call(document.querySelectorAll('.slot .kick'), function (b) {
       b.onclick = function (e) { e.stopPropagation(); Audio_.uiClick(); send('room.kick', { playerId: b.getAttribute('data-id') }); };
     });
+    Array.prototype.forEach.call(document.querySelectorAll('.slot .takeSlot'), function (b) {
+      b.onclick = function (e) {
+        e.stopPropagation(); Audio_.uiClick();
+        send('room.slot', { team: b.getAttribute('data-team'), index: +b.getAttribute('data-index') });
+      };
+    });
     var me = r.players.filter(function (p) { return p.id === app.me; })[0];
     var grid = $('lobbyHeroGrid'); grid.innerHTML = '';
     Sim.ALL_ROLES.forEach(function (role) {
       grid.appendChild(heroCard(role, me && me.role === role, function () { Audio_.uiClick(); send('room.role', { role: role }); }, $('lobbyHeroInfo')));
     });
-    $('startRoomBtn').hidden = !isHost;
-    $('startRoomBtn').disabled = r.inMatch || app.draining;
-    $('lobbyWait').textContent = r.inMatch ? 'Матч идёт…' : (isHost ? '' : 'Ждём, когда хост начнёт матч.');
+    var ready = myReady(), humans = r.players.filter(function (p) { return p.connected; }).length;
+    var rb = $('readyBtn');
+    rb.hidden = r.inMatch;
+    rb.textContent = ready ? 'Не готов' : 'Готов';
+    rb.className = 'menuBtn' + (ready ? ' ghost' : ' primary');
+    // В матче вместо «Готов» — вход в бой за своего бойца.
+    var jb = $('joinMatchBtn');
+    jb.hidden = !r.inMatch || !meSlot || !!(meSlot && meSlot.inMatch);
+    $('startRoomBtn').hidden = !isHost || r.inMatch;
+    $('startRoomBtn').disabled = app.draining;
+    $('lobbyReadyLine').textContent = r.inMatch ? ''
+      : 'Готовы ' + (r.readyCount || 0) + ' из ' + humans + ' — когда готовы все, матч начнётся сам.';
+    var info = $('lobbyMatchInfo');
+    if (r.inMatch) {
+      var left = app.roomMatch && app.roomMatch.code === r.code ? app.roomMatch.timeLeftMs : 0;
+      info.hidden = false;
+      info.innerHTML = '<span>Идёт матч</span>' + (left > 0 ? '<span>осталось <b>' + fmtTime(left) + '</b></span>' : '') +
+        (meSlot ? '<span>ваше место: <b>' + (pve ? 'команда' : 'команда ' + meSlot.team) + ', ' + (meSlot.index + 1) + '</b></span>' : '');
+    } else info.hidden = true;
+    $('lobbyWait').textContent = r.inMatch
+      ? 'Можно занять свободное место и войти в бой — боец достанется со своим HP.'
+      : (isHost ? '' : 'Хост может начать матч в любой момент.');
   }
-  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   // ------------------------------------------------------------
   // Матч: общая часть (ввод, HUD, рендер)
@@ -458,6 +684,12 @@
     return null;
   }
   function canAct(p) { return p && p.hp > 0 && !p.koed && p.stun <= 0; }
+  // Ник бойца: в снапшоте у слота, на который подсел живой игрок, остаётся ник бота —
+  // переименовывать бойцов симуляция не умеет, поэтому имена берём из состава матча.
+  function nickOf(p) {
+    var names = app.game && app.game.names;
+    return (names && names[p.id]) || p.nick;
+  }
   function radiusOf(p) { return (Sim.ROLE_STATS[p.role] || { radius: 15 }).radius; }
   function overMe(pt, me) { return !!me && Math.hypot(pt.x - me.x, pt.y - me.y) <= radiusOf(me) + 10; }
 
@@ -470,32 +702,32 @@
     canAct: canAct,
     blocked: function () { return !!(app.game && app.game.countdown > 0); }, // идёт отсчёт перед стартом
     onChargeStart: function () { chargeAudioStop = Audio_.chargeLoopStart(function () { return intent.local.power; }); },
-    onChargeEnd: function () { if (chargeAudioStop) { chargeAudioStop(); chargeAudioStop = null; } }
+    onChargeEnd: function () { if (chargeAudioStop) { chargeAudioStop(); chargeAudioStop = null; } },
+    // Обучение считает шаги по состоявшимся действиям: события applyInput до клиента не доходят.
+    onThrow: function (power) { if (tutorial) tutorial.onThrow(power); },
+    onSpecial: function () { if (tutorial) tutorial.onSpecial(); }
   });
   var local = intent.local;
 
   // ---- источник намерений: мышь и клавиатура (ПК) ----
-  // Режим wasd (по умолчанию): WASD/стрелки — движение, зажать ЛКМ в любой точке — замах в сторону
-  // курсора, отпустить — бросок, отпустить над своим бойцом — отмена; Q или ПКМ — способность.
-  // Режим classic: ЛКМ по бойцу — замах, отпустить снова над бойцом — отмена; ЛКМ мимо — идти в точку.
-  function pcMode() { return Settings.get('pcControls') === 'classic' ? 'classic' : 'wasd'; }
-  var mouse = { dragging: false };
+  // На ПК управление одно и то же и настройке больше не подлежит: WASD/стрелки — движение,
+  // зажать ЛКМ в любой точке — замах в сторону курсора, отпустить — бросок, отпустить над своим
+  // бойцом — отмена; Q или ПКМ — способность. Клик-ту-мув убран вместе с настройкой.
   canvas.addEventListener('mousedown', function (e) {
     if (Device.isTouch() || app.screen !== 'game' || !app.game || app.game.over) return;
     var pt = toLocal(e), me = myPlayer(app.game.lastSnap);
     lastMouse = pt;
     if (!canAct(me)) return;
-    if (e.button === 2) { if (pcMode() === 'wasd') intent.specialAt(pt.x, pt.y); return; }
+    if (e.button === 2) { intent.specialAt(pt.x, pt.y); return; }
     if (e.button !== 0) return;
-    if (pcMode() === 'wasd' || overMe(pt, me)) intent.chargeStartAt(pt.x, pt.y);
-    else { mouse.dragging = true; intent.moveTo(pt.x, pt.y, true); }
+    intent.chargeStartAt(pt.x, pt.y);
   });
   // Клавиатура: набор зажатых клавиш → нормированное направление в intent.setMoveDir (как стик).
   // По e.code, чтобы русская раскладка работала; повтор клавиши игнорируем.
   var KEYDIR = { KeyW: [0, -1], KeyS: [0, 1], KeyA: [-1, 0], KeyD: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
   var keys = {};
   function applyKeys() {
-    if (!app.game || Device.isTouch() || pcMode() !== 'wasd') { intent.setMoveDir(null); return; }
+    if (!app.game || Device.isTouch()) { intent.setMoveDir(null); return; }
     var x = 0, y = 0;
     for (var k in keys) if (keys[k]) { x += KEYDIR[k][0]; y += KEYDIR[k][1]; }
     intent.setMoveDir(x || y ? { x: x, y: y } : null);
@@ -506,7 +738,6 @@
     var pt = toLocal(e); lastMouse = pt;
     if (Device.isTouch() || app.screen !== 'game' || !app.game) return;
     if (local.charging) intent.aimAt(pt.x, pt.y);
-    else if (mouse.dragging) intent.moveTo(pt.x, pt.y, false);
   });
   window.addEventListener('mouseup', function (e) {
     if (!app.game) return;
@@ -515,7 +746,6 @@
       if (overMe(pt, me)) intent.cancelCharge();
       else intent.throwAt(local.aimX, local.aimY);
     }
-    if (mouse.dragging) { mouse.dragging = false; intent.moveTo(lastMouse.x, lastMouse.y, true); }
   });
   window.addEventListener('keydown', function (e) {
     if (app.screen !== 'game' || !app.game) return;
@@ -570,7 +800,7 @@
       for (var i = 0; i < 3; i++) pips += '<span class="pip ' + (i < p.hp ? 'on ' + p.team.toLowerCase() : '') + '"></span>';
       var cls = 'charname' + (p.id === app.game.meId ? ' me' : '') + (p.bot ? ' bot' : '');
       var lives = (pve && p.team === 'A' && p.lives != null) ? ' <span class="lives">♥' + p.lives + '</span>' : '';
-      var name = escapeHtml(p.nick) + ' · ' + p.role + (p.id === app.game.meId ? ' (вы)' : '') + lives;
+      var name = escapeHtml(nickOf(p)) + ' · ' + p.role + (p.id === app.game.meId ? ' (вы)' : '') + lives;
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'
         : '<div class="charrow"><span class="' + cls + '">' + name + '</span><span class="pips">' + pips + '</span></div>';
     }
@@ -681,7 +911,7 @@
     if (!fr || !fr.snap) return null;
     if (fr.events && fr.events.length) { render.handleEvents(fr.events, Audio_); myHitEvents(fr.events); }
     intent.tick(); // сила замаха, сброс при оглушении, переотправка цели движения по стику
-    render.frame(fr.snap, g.meId, local);
+    render.frame(fr.snap, g.meId, local, g.names);
     updateHUD(fr.snap);
     updateCountdown(g.countdown || 0);
     return fr;
@@ -701,14 +931,16 @@
     $('abilityHint').textContent = abilityHint;
     $('hint').textContent = isTouch
       ? 'Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.'
-      : (pcMode() === 'wasd'
-        ? 'WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.'
-        : 'ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.');
+      : 'WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.';
     $('netStat').hidden = !!g.offline; $('netStat').textContent = ''; $('netStat').className = '';
+    // В матче комнаты «Выйти» ведёт в лобби, а не в меню; в обучении таймера нет — бой не кончается.
+    $('btnToMenu').textContent = (!g.offline && g.roomCode) ? '← В лобби' : '← Выйти';
+    $('matchTimer').hidden = !!g.tutorial;
+    $('tutorialBox').hidden = !g.tutorial;
     var pve = g.gameMode && g.gameMode !== 'pvp';
     $('pveInfo').hidden = !pve;
     if (pve) {
-      $('teamALabel').textContent = 'Пати';
+      $('teamALabel').textContent = 'Команда';
       $('teamBLabel').textContent = 'Волна';
     } else {
       $('teamALabel').textContent = 'Команда A' + (g.myTeam === 'A' ? ' (вы)' : '');
@@ -763,56 +995,92 @@
       overlayText.textContent = 'ВРЕМЯ ВЫШЛО'; overlayText.style.color = '#ffd166';
       overlaySub.textContent = where; Audio_.drawChord();
     } else { // wiped
-      overlayText.textContent = 'ПАТИ ПОВЕРЖЕНА'; overlayText.style.color = '#ff8080';
+      overlayText.textContent = 'КОМАНДА ПОВЕРЖЕНА'; overlayText.style.color = '#ff8080';
       overlaySub.textContent = where; Audio_.defeatChord();
     }
   }
+  // Матч обучения не заканчивается сам (правило режима), поэтому табло показывает клиент.
+  function showTutorialResult() {
+    var g = app.game; if (!g) return;
+    g.over = true;
+    intent.reset(); touch.reset();
+    render.setMarks([]);
+    overlay.style.display = 'flex';
+    overlayText.textContent = 'ОБУЧЕНИЕ ПРОЙДЕНО 🎉';
+    overlayText.style.color = '#7CFFB2';
+    overlaySub.textContent = 'Дальше — комнаты в разделах PVP и PVE.';
+    $('againBtn').textContent = 'Пройти снова';
+    Audio_.victoryFanfare();
+  }
+
   function stopGame() {
     var g = app.game; if (!g) return;
     app.game = null;
     if (g.offline) sendTraining(false);
-    intent.reset(); touch.reset(); mouse.dragging = false; keys = {};
+    intent.reset(); touch.reset(); keys = {};
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     if (g.stop) g.stop();
   }
 
+  // «Выйти» из матча возвращает в лобби своей комнаты: место остаётся за игроком, и войти
+  // обратно можно за того же бойца. В главное меню ведёт только кнопка на табло результата.
   $('btnToMenu').onclick = function () {
     Audio_.uiClick();
     var g = app.game; if (!g) { goto('menu'); return; }
-    if (!g.offline && !g.over) send('match.leave');
-    else if (!g.offline && g.roomCode) send('room.leave');
+    if (g.tutorial) { stopTutorial(); goto('menu'); return; }
+    if (g.offline || !g.roomCode) { goto('menu'); return; }
+    // Сначала закрываем матч на клиенте: иначе пришедший room.state попадёт в ветку «идёт матч»
+    // и лобби не перерисуется — кнопка возврата в бой останется скрытой.
+    stopGame();
+    if (!g.over) send('match.leave');
+    goto('lobby');
+    if (app.room) renderLobby();
+  };
+  $('tutQuit').onclick = function () { Audio_.uiClick(); stopTutorial(); goto('menu'); };
+  $('tutSkipStep').onclick = function () { Audio_.uiClick(); tutorialSkipStep(); };
+  $('toMenuBtn').onclick = function () {
+    Audio_.uiClick();
+    var g = app.game;
+    if (g && !g.offline) {
+      if (!g.over) send('match.leave');
+      if (g.roomCode) send('room.leave');
+      app.room = null; app.roomMatch = null;
+    }
+    if (g && g.tutorial) stopTutorial();
     goto('menu');
   };
-  $('toMenuBtn').onclick = function () { Audio_.uiClick(); $('btnToMenu').click(); };
   $('againBtn').onclick = function () {
     Audio_.uiClick();
     var g = app.game; if (!g) return;
-    if (g.offline) { startOfflineMatch(); return; }
+    if (g.tutorial) { startTutorial(); return; }
+    if (g.offline) { startOfflineMatch({}); return; }
     if (g.roomCode) { stopGame(); goto('lobby'); if (app.room) renderLobby(); return; }
-    stopGame();
-    send('queue.join', { mode: app.qm.mode, role: app.qm.role });
-    $('searchCount').textContent = '1 / ' + (2 * app.qm.mode);
-    goto('search');
+    stopGame(); goto('menu');
   };
 
   // ------------------------------------------------------------
   // Оффлайн-матч
   // ------------------------------------------------------------
-  function startOfflineMatch() {
+  function startOfflineMatch(opts) {
     stopGame();
+    opts = opts || {};
     var o = app.offline;
     var drv = window.SBOffline.start({
       mode: o.mode, arena: o.arena, role: o.role, botLevel: o.botLevel,
-      gameMode: o.gameMode, campaign: o.campaign, difficulty: o.botLevel
+      gameMode: o.gameMode, campaign: o.campaign, difficulty: o.botLevel,
+      tutorial: !!opts.tutorial
     });
     sendTraining(true);
     var g = {
-      offline: true, meId: drv.meId, players: drv.players, myTeam: 'A', roomCode: '', over: false, countdown: 0,
+      offline: true, tutorial: !!opts.tutorial, meId: drv.meId, players: drv.players, names: nameMap(drv.players), myTeam: 'A',
+      roomCode: '', over: false, countdown: 0,
+      spawnEnemy: drv.spawnEnemy, removeEnemy: drv.removeEnemy, setBot: drv.setBot,
       gameMode: drv.gameMode || 'pvp',
       input: function (kind, x, y, power) { if (!g.over) drv.input(kind, x, y, power); },
       frame: function () {
         if (g.over) return { snap: g.lastSnap, events: [] };
         var fr = drv.frame(); g.lastSnap = fr.snap; g.countdown = fr.countdown || 0;
+        if (opts.onFrame) opts.onFrame(fr, g);
         if (drv.isOver()) {
           var reason = drv.reason && drv.reason();
           if (!reason) reason = drv.winner() ? 'ko' : 'timeout';
@@ -820,10 +1088,34 @@
         }
         return fr;
       },
-      stop: function () { drv.stop(); }
+      stop: function () { drv.stop(); if (opts.onStop) opts.onStop(); }
     };
     showGameScreen(g);
+    return g;
   }
+
+  // ------------------------------------------------------------
+  // Обучение (см. client/tutorial.js): оффлайн-бой 1×1 с пошаговыми задачами
+  // ------------------------------------------------------------
+  var tutorial = window.SBTutorial.create({
+    box: $('tutorialBox'), stepEl: $('tutStep'),
+    start: function (hooks) {
+      var saved = app.offline;
+      app.offline = { mode: 1, role: 'Раннер', arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true };
+      var g = startOfflineMatch({ tutorial: true, onFrame: hooks.onFrame, onStop: hooks.onStop });
+      app.offline = saved;
+      return g;
+    },
+    marks: function (list) { render.setMarks(list); },
+    obstacles: function (snap) { return render.obstaclesOf(snap); },
+    toast: toast,
+    finish: function () { showTutorialResult(); },
+    done: function () { store.set('sb.tutorialDone', '1'); renderTutorialBadge(); }
+  });
+  function startTutorial() { tutorial.start(); }
+  function stopTutorial() { tutorial.stop(); }
+  function tutorialSkipStep() { tutorial.skip(); }
+  function renderTutorialBadge() { $('tutorialBadge').hidden = store.get('sb.tutorialDone') === '1'; }
 
   // ------------------------------------------------------------
   // Сетевой матч
@@ -852,7 +1144,8 @@
     }, 1000);
     d.players.forEach(function (p) { if (p.id === d.yourId) myTeam = p.team; });
     var g = {
-      offline: false, matchId: d.matchId, meId: d.yourId, players: d.players, myTeam: myTeam, roomCode: d.roomCode || '', over: false,
+      offline: false, matchId: d.matchId, meId: d.yourId, players: d.players, names: nameMap(d.players),
+      gameMode: d.gameMode || 'pvp', myTeam: myTeam, roomCode: d.roomCode || '', over: false,
       lastSnap: null, countdown: 0,
       input: function (kind, x, y, power) {
         if (g.over) return;
@@ -890,7 +1183,7 @@
   // Старт
   // ------------------------------------------------------------
   // Отладочный хук для DevTools и автотестов: состояние приложения и ручной кадр.
-  window.SBApp = { state: app, renderOnce: renderOnce, send: send, intent: intent };
+  window.SBApp = { state: app, renderOnce: renderOnce, send: send, intent: intent, tutorial: tutorial };
 
   Device.apply();
   $('verBuild').textContent = BUILD;

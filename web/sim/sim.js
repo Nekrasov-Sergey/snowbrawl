@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.3.0';
+  var SIM_VERSION = '1.4.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -315,6 +315,7 @@
       winner: null,          // 'A' | 'B' | null (ничья/не закончен)
       endReason: '',          // '' | 'ko' | 'timeout' | PvE: 'cleared'|'wiped'|'objective'|'expired'
       pve: null,
+      tutorial: false,       // обучение: матч не кончается, человек не выбывает
       events: []
     };
   }
@@ -328,9 +329,15 @@
    *   difficulty?: 0|1|2,               // PvE — ручка сложности (боты пати + сдвиг врагов)
    *   campaign?: bool,                  // PvE — true (кампания) или false (эндлесс сразу)
    *   pve?: { levels?, waves? },        // PvE — урезание для тестов
+   *   tutorial?: bool,                  // обучение: см. правила ниже
    *   players: [{ id, team, role, bot, nick?, botLevel? }]
    * }
    * PvP: ровно 2*mode бойцов, команды A/B. PvE: 1..4 бойцов, все — команда A (люди + боты).
+   *
+   * Обучение (`tutorial: true`) — тот же PvP, но с тремя послаблениями: состав может быть
+   * неполным (хоть один боец), матч не заканчивается ни по KO, ни по таймеру, и боец-человек
+   * не опускается ниже 1 HP. Соперника ставит и убирает клиент через tutorialSpawn/tutorialRemove.
+   * Режима нет в GAME_MODES: комнаты с обучением не создаются, он только для оффлайн-клиента.
    */
   function createMatch(config, seed) {
     var rng = makeRng(seed);
@@ -342,9 +349,12 @@
 
     var arenaIndex = config.arenaIndex | 0;
     if (!ARENAS[arenaIndex]) throw new Error('sim: bad arenaIndex ' + arenaIndex);
-    if (!config.players || config.players.length !== 2 * n) throw new Error('sim: need ' + (2 * n) + ' players');
+    var tutorial = !!config.tutorial;
+    if (!config.players || !config.players.length) throw new Error('sim: need players');
+    if (!tutorial && config.players.length !== 2 * n) throw new Error('sim: need ' + (2 * n) + ' players');
 
     var state = baseState(seed, rng, 'pvp', n, arenaIndex, config.durationMs || DEFAULT_DURATION_MS);
+    state.tutorial = tutorial;
     var players = state.players, countA = 0, countB = 0, ysA = spawnYs(n), ysB = spawnYs(n);
     for (var i = 0; i < config.players.length; i++) {
       var pc = config.players[i];
@@ -868,6 +878,16 @@
       emit(state, { type: 'bubblePop', targetId: target.id, x: x, y: y });
       return;
     }
+    // Обучение: попадание по ученику (команда A) считается и оглушает, но последнее HP не
+    // снимается — новичок не должен вылетать из обучения из-за того, что соперник его добил.
+    // Соперники обучения стоят в команде B, их это правило не защищает: их надо уметь добить.
+    if (state.tutorial && target.team === 'A' && target.hp <= 1) {
+      target.hitAt = state.time; target.lastDamagedAt = state.time;
+      target.charging = false; target.dashUntil = 0;
+      target.stunTimer = (target.role === 'Танк' ? TANK_STUN_FACTOR : 1) * (1.0 + (freezeBonus || 0));
+      emit(state, { type: 'hit', targetId: target.id, x: x, y: y, freeze: !!freezeBonus, hp: target.hp });
+      return;
+    }
     target.hp -= 1;
     target.hitAt = state.time; target.lastDamagedAt = state.time;
     target.charging = false; target.dashUntil = 0; // после попадания боец теряет атаку и рывок
@@ -956,6 +976,7 @@
   }
   function checkWin(state) {
     if (state.gameOver) return;
+    if (state.tutorial) return;            // обучение заканчивает клиент, когда пройден последний шаг
     if (state.pve) return;                 // исход PvE — в checkPveWin (зовётся из updatePve)
     var aAlive = teamAlive(state, 'A').length, bAlive = teamAlive(state, 'B').length;
     if (bAlive === 0 && aAlive === 0) { state.gameOver = true; state.winner = null; state.endReason = 'timeout'; }
@@ -1342,6 +1363,38 @@
    * Продвинуть симуляцию на dt секунд (сервер зовёт с фиксированным шагом 1/20).
    * Возвращает массив событий, произошедших за шаг.
    */
+  // ============================================================
+  // Обучение: соперник по команде клиента
+  // ============================================================
+  /**
+   * tutorialSpawn(state, {role, x, y, botLevel?, bot?}) → id бойца команды B.
+   * Работает только в матче обучения. bot: false — боец стоит на месте (ИИ выключен).
+   */
+  function tutorialSpawn(state, opts) {
+    if (!state.tutorial) return null;
+    opts = opts || {};
+    var role = ROLE_STATS[opts.role] ? opts.role : ALL_ROLES[0];
+    var id = 'tut' + (state.nextEnemyId++);
+    var ch = makeChar(id, 'B', role, opts.x == null ? 740 : opts.x, opts.y == null ? H / 2 : opts.y,
+      opts.bot !== false, 'Соперник', clampInt(opts.botLevel, 0, 2, 0));
+    ch.ai.nextDecisionAt = state.time + 300;
+    state.players.push(ch);
+    return id;
+  }
+
+  /** tutorialRemove(state, id) — убрать бойца обучения и его снежки. */
+  function tutorialRemove(state, id) {
+    if (!state.tutorial) return false;
+    var found = false;
+    for (var i = state.players.length - 1; i >= 0; i--) {
+      if (state.players[i].id === id) { state.players.splice(i, 1); found = true; }
+    }
+    for (var s2 = state.snowballs.length - 1; s2 >= 0; s2--) {
+      if (state.snowballs[s2].ownerId === id) state.snowballs.splice(s2, 1);
+    }
+    return found;
+  }
+
   function step(state, dt) {
     state.events = [];
     if (state.gameOver) return state.events;
@@ -1479,6 +1532,8 @@
     createMatch: createMatch,
     applyInput: applyInput,
     setBot: setBot,
+    tutorialSpawn: tutorialSpawn,   // обучение: поставить соперника
+    tutorialRemove: tutorialRemove, // обучение: убрать соперника
     step: step,
     snapshot: snapshot,
     isOver: function (state) { return state.gameOver; },

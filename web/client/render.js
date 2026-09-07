@@ -99,11 +99,14 @@ window.SBRender = (function () {
     // Подписи бойцов (ник сверху, роль снизу) — спрайт на бойца, fillText со сменой шрифта
     // каждый кадр на телефонах заметно дорог (особенно эмодзи бота).
     var labels = {};
+    var names = null; // карта id → ник из состава матча (match.start / match.roster)
+    function nickOf(p) { return (names && names[p.id]) || p.nick; }
     function labelOf(p, isMe, r) {
-      var key = p.nick + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r;
+      var base = nickOf(p);
+      var key = base + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r;
       var l = labels[p.id];
       if (l && l.key === key) return l;
-      var nick = p.nick + (p.bot ? ' 🤖' : '');
+      var nick = base + (p.bot ? ' 🤖' : '');
       var oc = document.createElement('canvas'), c = oc.getContext('2d');
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
       var w = Math.ceil(Math.max(c.measureText(nick).width, 20)) + 8;
@@ -557,7 +560,8 @@ window.SBRender = (function () {
      * snap — снапшот sim.js (возможно интерполированный), meId — свой боец,
      * local — локальное состояние замаха {charging, power, aimX, aimY} для мгновенного отклика.
      */
-    function frame(snap, meId, local) {
+    function frame(snap, meId, local, nameMap) {
+      names = nameMap || null;
       var now = performance.now();
       var dt = Math.min((now - lastFrame) / 1000, 0.05);
       lastFrame = now;
@@ -565,6 +569,7 @@ window.SBRender = (function () {
       if (now < shake.until) { var rem = (shake.until - now) / shake.total; shakeX = (Math.random() - 0.5) * shake.mag * rem; shakeY = (Math.random() - 0.5) * shake.mag * rem; }
       ctx.save(); ctx.translate(shakeX, shakeY);
       drawArena(snap); drawSnowflakes(dt);
+      if (marks.length) drawMarks(now);
       var me = null;
       for (var i = 0; i < snap.players.length; i++) {
         var p = snap.players[i];
@@ -579,9 +584,33 @@ window.SBRender = (function () {
       ctx.restore();
     }
 
-    function reset() { particles = []; explosions = []; trails = {}; labels = {}; shake.until = 0; }
+    // Метки обучения: пульсирующие подсказки «иди сюда» и «целься сюда». К симуляции
+    // отношения не имеют. point — круг-цель, rect — подсветка препятствия.
+    var marks = [];
+    function setMarks(list) { marks = list && list.length ? list : []; }
+    function drawMarks(now) {
+      var puls = 1 + 0.12 * Math.sin(now / 260);
+      ctx.save();
+      ctx.lineWidth = 3;
+      for (var i = 0; i < marks.length; i++) {
+        var m = marks[i];
+        ctx.strokeStyle = 'rgba(124,255,178,0.95)';
+        if (m.type === 'rect') {
+          var pad = 6 * puls;
+          ctx.strokeRect(m.x - m.w / 2 - pad, m.y - m.h / 2 - pad, m.w + pad * 2, m.h + pad * 2);
+          continue;
+        }
+        var r = (m.r || 30) * puls;
+        ctx.beginPath(); ctx.arc(m.x, m.y, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(124,255,178,0.45)';
+        ctx.beginPath(); ctx.arc(m.x, m.y, r * 0.55, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.restore();
+    }
 
-    return { frame: frame, handleEvents: handleEvents, reset: reset };
+    function reset() { particles = []; explosions = []; trails = {}; labels = {}; shake.until = 0; marks = []; }
+
+    return { frame: frame, handleEvents: handleEvents, reset: reset, setMarks: setMarks, obstaclesOf: obstaclesOf };
   }
 
   /**

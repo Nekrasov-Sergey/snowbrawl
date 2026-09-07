@@ -69,6 +69,63 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .heroInfo b { color: #eaf2ff; }
 .navRow { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; justify-content: center; }
 
+/* список комнат */
+.panel.wide { max-width: 720px; }
+#roomsList { width: 100%; max-width: 720px; }
+.roomRow {
+  border: 1px solid #3a5a80; border-radius: 8px; padding: 10px 12px; background: #16283f;
+  display: grid; grid-template-columns: 1fr auto; grid-template-areas: "main act" "meta act";
+  gap: 2px 12px; align-items: center;
+}
+.roomRow.live { border-color: #6b3a4a; }
+.roomMain { grid-area: main; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.roomMeta { grid-area: meta; color: #a9c2e0; font-size: 12px; }
+.roomAct { grid-area: act; }
+.roomAct .menuBtn { width: auto; min-width: 0; padding: 8px 14px; font-size: 13px; }
+.roomCode { font: 700 16px 'Segoe UI', Arial, sans-serif; color: #eaf2ff; letter-spacing: 1px; }
+.roomGame { color: #cfe0f5; font-size: 13px; }
+.status { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
+.status.wait { color: #0d2418; background: #7CFFB2; }
+.status.live { color: #2a0d10; background: #ff8080; }
+/* вход по коду: карточка с четырьмя клетками под цифры */
+.codeCard {
+  background: #16283f; border: 1px solid #3a5a80; border-radius: 12px; padding: 14px 18px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; max-width: 360px;
+  box-sizing: border-box; box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+}
+.codeTitle { font: 700 16px 'Segoe UI', Arial, sans-serif; color: #eaf2ff; }
+.codeHint { font-size: 12px; color: #a9c2e0; text-align: center; line-height: 1.35; }
+.codeCells { display: flex; gap: 10px; }
+.codeCell {
+  width: 48px; height: 58px; text-align: center; background: #0e1a2b; color: #eaf2ff;
+  border: 2px solid #3a5a80; border-radius: 10px; caret-color: #4aa8ff;
+  font: 700 26px 'Segoe UI', Consolas, monospace; padding: 0;
+}
+.codeCell:focus { outline: none; border-color: #4aa8ff; background: #12233a; box-shadow: 0 0 0 3px rgba(74,168,255,0.18); }
+.codeCell.filled { border-color: #4aa8ff; }
+.codeCard .menuBtn { width: 100%; }
+.badge { background: #ffd166; color: #2a1e00; font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 6px; margin-left: 8px; vertical-align: middle; }
+
+/* лобби во время матча: сводка боя над кнопками */
+.lobbyMatch {
+  background: #16283f; border: 1px solid #6b3a4a; border-radius: 8px; padding: 8px 14px;
+  font-size: 13px; color: #cfe0f5; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; justify-content: center;
+}
+.lobbyMatch b { color: #eaf2ff; }
+.slot .slotHp { color: #ffd166; font-size: 11px; margin-left: 6px; }
+.slot .slotState { color: #6f89a8; font-size: 11px; margin-left: 6px; }
+.slot .takeSlot { background: none; border: 1px solid #4aa8ff; color: #cfe0f5; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 2px 8px; }
+.slot.picked { border-color: #4aa8ff; background: #1c3a58; }
+
+/* обучение: строка задачи под ареной */
+#tutorialBox {
+  width: 100%; max-width: 900px; background: #16283f; border: 1px solid #7CFFB2; border-radius: 8px;
+  padding: 8px 12px; display: flex; align-items: center; gap: 12px; justify-content: space-between; flex-wrap: wrap;
+}
+#tutStep { font-size: 14px; color: #eaf2ff; flex: 1; min-width: 200px; }
+.tutRow { display: flex; gap: 8px; }
+.tutRow .menuBtn { width: auto; padding: 6px 12px; font-size: 12px; }
+
 /* сегментированный переключатель (сложность ботов) */
 .segRow { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .segBtn { padding: 8px 16px; border-radius: 8px; border: 1px solid #3a5a80; background: #0e1a2b; color: #a9c2e0; font: 600 14px 'Segoe UI', Arial, sans-serif; cursor: pointer; }
@@ -87,7 +144,9 @@ html.touch .segBtn { min-height: 44px; }
 /* лобби */
 .lobbyHead { text-align: center; display: flex; flex-direction: column; gap: 6px; align-items: center; }
 .lobbyResult { background: #16283f; border: 1px solid #3a5a80; border-radius: 8px; padding: 8px 16px; font-weight: 700; color: #ffd166; }
-.lobbyConfig { display: flex; gap: 18px; align-items: center; font-size: 14px; color: #a9c2e0; }
+.lobbyConfig { display: flex; gap: 14px; align-items: center; font-size: 14px; color: #a9c2e0; flex-wrap: wrap; justify-content: center; }
+.lobbyConfig label { display: inline-flex; align-items: center; gap: 6px; }
+.lobbyConfig .heroInfoBtn { width: 22px; height: 22px; font-size: 12px; }
 .lobbyConfig select { background: #16283f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; padding: 4px 8px; font-size: 14px; }
 .teamsGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; width: 100%; max-width: 620px; }
 .teamCol { display: flex; flex-direction: column; gap: 6px; }
@@ -104,6 +163,8 @@ html.touch .segBtn { min-height: 44px; }
 .slot .host { color: #ffd166; font-size: 11px; margin-left: 6px; }
 .slot .kick { background: none; border: 1px solid #ff5b5b; color: #ff9d9d; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 2px 6px; }
 .slot .botHint { color: #6f89a8; font-size: 12px; }
+.slot.ready { border-color: #7CFFB2; box-shadow: 0 0 0 1px rgba(124,255,178,0.35) inset; }
+.slot .readyMark { color: #7CFFB2; font-size: 11px; margin-left: 6px; }
 .teamlabel { font-weight: 700; margin-bottom: 3px; }
 .teamlabel.a { color: #4aa8ff; }
 .teamlabel.b { color: #ff5b5b; }
@@ -178,7 +239,9 @@ canvas {
 #touchAbilityCd { font-size: 10px; line-height: 1; color: #b7a6ff; min-height: 10px; }
 
 /* сенсорный режим: игровой экран во весь вьюпорт, HUD поверх полей, меню под палец */
-html.touch .menuBtn, html.touch .modeCard, html.touch .heroCard, html.touch .mapCard, html.touch .slot { min-height: 44px; }
+html.touch .menuBtn, html.touch .modeCard, html.touch .heroCard, html.touch .mapCard, html.touch .slot,
+html.touch .roomRow .menuBtn, html.touch #readyBtn, html.touch .tutRow .menuBtn,
+html.touch .codeCell, html.touch .slot .takeSlot { min-height: 44px; }
 html.touch canvas { cursor: default; }
 html.touch .heroCard:not(.selected):hover, html.touch .mapCard:not(.selected):hover, html.touch .modeCard:not(.selected):hover { border-color: #3a5a80; background: #16283f; }
 html.touch .menuBtn:hover { background: #274363; }
@@ -219,6 +282,8 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   html.touch h1.title { display: none; }
   html.touch #app { padding: 8px 12px; }
   html.touch .panel { gap: 8px; }
+  .roomRow { grid-template-columns: 1fr; grid-template-areas: "main" "meta" "act"; gap: 6px; }
+  .roomAct .menuBtn { width: 100%; }
   html.touch .subtitle { font-size: 12px; }
   html.touch .menuBtn { padding: 10px; font-size: 15px; }
   html.touch .cardGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }

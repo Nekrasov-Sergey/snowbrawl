@@ -34,13 +34,12 @@
 
   <!-- Меню -->
   <div id="screen-menu" class="panel" hidden>
-    <div class="subtitle">Зашёл → выбрал бойца → нашёл соперников → бросай снежки → победи.</div>
+    <div class="subtitle">Зашёл → выбрал комнату → бросай снежки → победи.</div>
     <div class="who">Вы: <b id="menuNick"></b> <button class="linkBtn" id="changeNick">сменить</button></div>
     <div class="who" id="onlineInfo">Игроков онлайн: —</div>
-    <button class="menuBtn primary" id="btnQuickMatch">БЫСТРЫЙ МАТЧ</button>
-    <button class="menuBtn" id="btnCreateRoom">СОЗДАТЬ КОМНАТУ</button>
-    <button class="menuBtn" id="btnJoinRoom">ВОЙТИ В КОМНАТУ</button>
-    <button class="menuBtn ghost wide" id="btnOffline">Тренировка с ботами (оффлайн)</button>
+    <button class="menuBtn primary" id="btnPvp">РЕЖИМ PVP</button>
+    <button class="menuBtn" id="btnPve">РЕЖИМ PVE</button>
+    <button class="menuBtn ghost wide" id="btnTutorial">Обучение<span class="badge" id="tutorialBadge" hidden>новое</span></button>
     <button class="menuBtn ghost" id="btnSettings">Настройки</button>
   </div>
 
@@ -51,80 +50,53 @@
       <label class="setRow"><span>Вибрация при попадании<small>Работает на Android; iPhone не поддерживает.</small></span><input type="checkbox" id="setHaptics"></label>
       <label class="setRow"><span>Сенсорное управление<small>Стики вместо мыши. «Авто» — по типу устройства.</small></span>
         <select id="setTouch"><option value="auto">авто</option><option value="on">включено</option><option value="off">выключено</option></select></label>
-      <label class="setRow" id="pcRow"><span>Управление на ПК<small>WASD — движение, зажать ЛКМ в любой точке — замах и бросок. Классическое: клик — идти, ЛКМ на бойце — замах.</small></span>
-        <select id="setPc"><option value="wasd">WASD + мышь</option><option value="classic">классическое</option></select></label>
     </div>
     <div class="navRow"><button class="menuBtn ghost" id="backFromSettings">Назад</button></div>
   </div>
 
-  <!-- Quick Match: режим -->
-  <div id="screen-mode" class="panel" hidden>
-    <div class="subtitle">Выберите режим</div>
-    <div class="modeGrid" id="modeGrid"></div>
-    <div class="navRow">
-      <button class="menuBtn ghost" id="backFromMode">Назад</button>
-      <button class="menuBtn primary" id="nextFromMode" disabled>Далее</button>
-    </div>
-  </div>
-
-  <!-- Quick Match / оффлайн: боец -->
-  <div id="screen-character" class="panel" hidden>
-    <div class="subtitle">Выберите бойца. Кнопка «i» покажет описание.</div>
-    <div class="cardGrid" id="heroGrid"></div>
-    <div class="heroInfo" id="heroInfo" hidden></div>
-    <div class="navRow">
-      <button class="menuBtn ghost" id="backFromCharacter">Назад</button>
-      <button class="menuBtn primary" id="nextFromCharacter" disabled>Далее</button>
-    </div>
-  </div>
-
-  <!-- Оффлайн: арена -->
-  <div id="screen-map" class="panel" hidden>
-    <div class="subtitle">Режим игры</div>
-    <div class="segRow" id="gameModeSel"></div>
-    <div class="subtitle" id="pveCampaignLabel" hidden>Прохождение</div>
-    <div class="segRow" id="pveCampaignSel" hidden></div>
-    <div class="subtitle" id="mapArenaLabel">Выберите арену</div>
-    <div class="cardGrid" id="mapGrid"></div>
-    <div class="subtitle" id="botLevelLabel">Сложность ботов</div>
-    <div class="segRow" id="botLevelSel"></div>
-    <div class="navRow">
-      <button class="menuBtn ghost" id="backFromMap">Назад</button>
-      <button class="menuBtn primary" id="startOfflineBtn">Начать матч</button>
-    </div>
-  </div>
-
-  <!-- Quick Match: поиск -->
-  <div id="screen-search" class="panel" hidden>
-    <div class="stub-box">
-      <div class="searching">Ищем соперников…</div>
-      <div class="stub-code" id="searchCount">1 / 6</div>
-      <div class="subtitle" id="searchHint">Через <b id="searchTimer">15</b> с свободные места займут боты.</div>
-    </div>
-    <button class="menuBtn ghost" id="cancelSearch">Отмена</button>
+  <!-- Раздел PVP или PVE -->
+  <div id="screen-hub" class="panel" hidden>
+    <div class="subtitle" id="hubHint"></div>
+    <button class="menuBtn primary" id="btnCreateRoom">СОЗДАТЬ КОМНАТУ</button>
+    <button class="menuBtn" id="btnJoinRoom">ВОЙТИ В КОМНАТУ</button>
+    <div class="navRow"><button class="menuBtn ghost" id="backFromHub">Назад</button></div>
   </div>
 
   <!-- Создание комнаты -->
   <div id="screen-createroom" class="panel" hidden>
-    <div class="subtitle">Режим</div>
+    <div class="subtitle" id="createHead">Новая комната</div>
+    <div class="subtitle" id="createModeLabel">Размер</div>
     <div class="modeGrid small" id="createModeGrid"></div>
-    <div class="subtitle">Арена</div>
+    <div class="subtitle" id="createArenaLabel">Арена</div>
     <div class="cardGrid" id="createMapGrid"></div>
+    <div class="subtitle">Кто может войти</div>
+    <div class="segRow" id="createVisSel"></div>
+    <div class="subtitle">Сложность ботов<br><small>Боты занимают пустые слоты.</small></div>
+    <div class="segRow" id="createBotSel"></div>
     <div class="navRow">
       <button class="menuBtn ghost" id="backFromCreate">Назад</button>
       <button class="menuBtn primary" id="createRoomBtn">Создать комнату</button>
     </div>
   </div>
 
-  <!-- Вход по коду -->
-  <div id="screen-joinroom" class="panel" hidden>
-    <div class="stub-box">
-      <div>Введите код комнаты:</div>
-      <input type="text" id="joinCodeInput" placeholder="1234" maxlength="4" inputmode="numeric" pattern="[0-9]*" autocomplete="off">
-      <button class="menuBtn primary" id="btnJoinConfirm" style="width:100%">ВОЙТИ В КОМНАТУ</button>
-      <div class="stub-note" id="joinMsg"></div>
+  <!-- Список комнат -->
+  <div id="screen-rooms" class="panel wide" hidden>
+    <div class="subtitle" id="roomsHead">Комнаты</div>
+    <div class="slots" id="roomsList"></div>
+    <div class="stub-note" id="roomsMsg"></div>
+    <div class="segRow" id="roomsPager"></div>
+    <div class="codeCard">
+      <div class="codeTitle">Есть код от друга?</div>
+      <div class="codeCells" id="codeCells">
+        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="1-я цифра кода">
+        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="2-я цифра кода">
+        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="3-я цифра кода">
+        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="4-я цифра кода">
+      </div>
+      <div class="codeHint">Четыре цифры из его лобби — так попадают и в закрытые комнаты.</div>
+      <button class="menuBtn primary" id="btnJoinConfirm" disabled>Войти по коду</button>
     </div>
-    <button class="menuBtn ghost" id="backFromJoin">Назад</button>
+    <div class="navRow"><button class="menuBtn ghost" id="backFromRooms">Назад</button></div>
   </div>
 
   <!-- Лобби комнаты -->
@@ -135,13 +107,17 @@
       <div id="lobbyResult" class="lobbyResult" hidden></div>
     </div>
     <div class="lobbyConfig">
-      <label>Игра <select id="lobbyGameMode"></select></label>
+      <label id="lobbyGameModeWrap" hidden>Игра <select id="lobbyGameMode"></select>
+        <button type="button" class="heroInfoBtn" id="lobbyGameModeInfoBtn" title="Описание">i</button></label>
       <label>Размер <select id="lobbyMode"></select></label>
       <label id="lobbyArenaWrap">Арена <select id="lobbyArena"></select></label>
-      <label id="lobbyCampaignWrap" hidden>Ход <select id="lobbyCampaign"></select></label>
-      <label id="lobbyDifficultyWrap" hidden>Сложность <select id="lobbyDifficulty"></select></label>
+      <label id="lobbyCampaignWrap" hidden>Формат игры <select id="lobbyCampaign"></select>
+        <button type="button" class="heroInfoBtn" id="lobbyCampaignInfoBtn" title="Описание">i</button></label>
+      <label>Сложность ботов <select id="lobbyDifficulty"></select></label>
+      <label>Доступ <select id="lobbyVisibility"></select></label>
       <span class="subtitle" id="lobbyConfigHint"></span>
     </div>
+    <div class="heroInfo" id="lobbyModeInfo" hidden></div>
     <div class="teamsGrid">
       <div class="teamCol"><div class="teamlabel a" id="slotsALabel">Команда A</div><div id="slotsA" class="slots"></div></div>
       <div class="teamCol" id="slotsBCol"><div class="teamlabel b">Команда B</div><div id="slotsB" class="slots"></div></div>
@@ -149,10 +125,14 @@
     <div class="subtitle">Ваш боец (кликните, чтобы сменить):</div>
     <div class="cardGrid" id="lobbyHeroGrid"></div>
     <div class="heroInfo" id="lobbyHeroInfo" hidden></div>
+    <div class="lobbyMatch" id="lobbyMatchInfo" hidden></div>
     <div class="navRow">
       <button class="menuBtn ghost" id="leaveLobby">Выйти</button>
+      <button class="menuBtn" id="readyBtn">Готов</button>
+      <button class="menuBtn primary" id="joinMatchBtn" hidden>Присоединиться к матчу</button>
       <button class="menuBtn primary" id="startRoomBtn">Начать матч</button>
     </div>
+    <div class="subtitle" id="lobbyReadyLine"></div>
     <div class="subtitle" id="lobbyWait"></div>
   </div>
 
@@ -160,7 +140,7 @@
   <div id="screen-game" class="panel" hidden>
     <div id="topGameBar">
       <button id="btnToMenu">← Выйти</button>
-      <div id="hint" style="margin:0">ЛКМ на бойце — заряд броска, отпустить над бойцом — отмена. ЛКМ мимо — перемещение.</div>
+      <div id="hint" style="margin:0">WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.</div>
       <span id="netStat" title="Задержка сети" hidden></span>
       <div id="pveInfo" hidden></div>
       <div id="matchTimer">5:00</div>
@@ -180,6 +160,13 @@
           </div>
         </div>
         <div id="reconnectOverlay" hidden><div>Связь с сервером потеряна, переподключаемся…</div></div>
+      </div>
+      <div id="tutorialBox" hidden>
+        <div id="tutStep"></div>
+        <div class="tutRow">
+          <button class="menuBtn ghost" id="tutSkipStep">Пропустить шаг</button>
+          <button class="menuBtn ghost" id="tutQuit">Выйти из обучения</button>
+        </div>
       </div>
       <div id="bottomRow">
         <div id="hudA">
@@ -221,6 +208,7 @@
 <script src="client/device.js?v=__BUILD__"></script>
 <script src="client/intent.js?v=__BUILD__"></script>
 <script src="client/touch.js?v=__BUILD__"></script>
+<script src="client/tutorial.js?v=__BUILD__"></script>
 <script src="client/app.js?v=__BUILD__"></script>
 </body>
 </html>
