@@ -9,7 +9,7 @@ import (
 
 func TestJoinLeaveAndHostTransfer(t *testing.T) {
 	now := time.Now()
-	r := New("1234", "h", "1.1.1.1", 2, 0, "pvp", false, 0, now)
+	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "pvp"}, now)
 	if r.Capacity() != 4 {
 		t.Fatalf("capacity = %d", r.Capacity())
 	}
@@ -45,7 +45,7 @@ func TestJoinLeaveAndHostTransfer(t *testing.T) {
 
 func TestSlotsAndConfig(t *testing.T) {
 	now := time.Now()
-	r := New("1234", "h", "1.1.1.1", 3, 0, "pvp", false, 0, now)
+	r := New("1234", "h", "1.1.1.1", Config{Mode: 3, GameMode: "pvp"}, now)
 	_ = r.Join("a")
 	if err := r.SetSlot("a", "A", 0); !errors.Is(err, ErrSlotTaken) {
 		t.Fatalf("expected ErrSlotTaken, got %v", err)
@@ -87,7 +87,7 @@ func TestSlotsAndConfig(t *testing.T) {
 
 func TestPveRoomCapacityAndPlacement(t *testing.T) {
 	now := time.Now()
-	r := New("1234", "h", "1.1.1.1", 4, 0, "survival", true, 2, now)
+	r := New("1234", "h", "1.1.1.1", Config{Mode: 4, GameMode: "survival", Campaign: true, Difficulty: 2}, now)
 	if !r.IsPvE() || r.Capacity() != 4 { // пати из 4, только команда A
 		t.Fatalf("pve capacity = %d, isPvE = %v", r.Capacity(), r.IsPvE())
 	}
@@ -127,5 +127,100 @@ func TestGenerateCode(t *testing.T) {
 	}
 	if len(seen) < 190 {
 		t.Fatalf("codes are not random enough: %d unique of 200", len(seen))
+	}
+}
+
+func TestReadyAndVisibility(t *testing.T) {
+	now := time.Now()
+	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "pvp", Visibility: VisibilityClosed}, now)
+	if !r.IsClosed() || r.Section() != "pvp" {
+		t.Fatalf("visibility=%q section=%q", r.Visibility, r.Section())
+	}
+	_ = r.Join("a")
+	all := func(string) bool { return true }
+	if r.AllReady(all) {
+		t.Fatal("nobody is ready yet")
+	}
+	if err := r.SetReady("h", true); err != nil {
+		t.Fatal(err)
+	}
+	if ready, total := r.ReadyCount(all); ready != 1 || total != 2 {
+		t.Fatalf("ready=%d total=%d", ready, total)
+	}
+	if err := r.SetReady("a", true); err != nil {
+		t.Fatal(err)
+	}
+	if !r.AllReady(all) {
+		t.Fatal("everyone is ready")
+	}
+	// Отключённые в расчёт не идут: обрыв связи одного не должен блокировать старт.
+	onlyHost := func(id string) bool { return id == "h" }
+	_ = r.SetReady("a", false)
+	if !r.AllReady(onlyHost) {
+		t.Fatal("disconnected member must not block auto start")
+	}
+	// Смена настроек снимает готовность со всех, смена бойца — только у себя.
+	_ = r.SetReady("a", true)
+	if err := r.SetConfig("h", Config{Mode: 3, Arena: 1, GameMode: "pvp", Visibility: VisibilityClosed}, 5); err != nil {
+		t.Fatal(err)
+	}
+	if ready, _ := r.ReadyCount(all); ready != 0 {
+		t.Fatalf("config change must reset ready, got %d", ready)
+	}
+	if !r.IsClosed() {
+		t.Fatal("visibility must survive config change")
+	}
+	_ = r.SetReady("h", true)
+	_ = r.SetReady("a", true)
+	_ = r.SetRole("a", "Танк")
+	if r.Member("a").Ready {
+		t.Fatal("hero change must drop own ready")
+	}
+	if !r.Member("h").Ready {
+		t.Fatal("hero change must not touch others")
+	}
+}
+
+func TestSlotsDuringMatch(t *testing.T) {
+	now := time.Now()
+	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "pvp"}, now)
+	// Автоместо ведёт туда, где меньше людей (то есть больше ботов).
+	if m := r.Member("h"); m.Team != "A" || m.Index != 0 {
+		t.Fatalf("host slot: %+v", m)
+	}
+	_ = r.Join("a")
+	if m := r.Member("a"); m.Team != "B" || m.Index != 0 {
+		t.Fatalf("second player must go to the emptier team: %+v", m)
+	}
+	_ = r.Join("b")
+	if m := r.Member("b"); m.Team != "A" || m.Index != 1 {
+		t.Fatalf("third player: %+v", m)
+	}
+
+	// Во время матча слот комнаты — это боец матча: войти и перейти на свободное место можно.
+	r.InMatch = true
+	if err := r.Join("c"); err != nil {
+		t.Fatalf("join during match: %v", err)
+	}
+	if m := r.Member("c"); m.Team != "B" || m.Index != 1 {
+		t.Fatalf("joined during match: %+v", m)
+	}
+	if err := r.Join("d"); !errors.Is(err, ErrFull) {
+		t.Fatalf("room must be full: %v", err)
+	}
+	if err := r.SetSlot("c", "A", 0); !errors.Is(err, ErrSlotTaken) {
+		t.Fatalf("occupied slot must be rejected: %v", err)
+	}
+	// Место освободилось — его занимает другой участник.
+	r.Leave("h", now)
+	if err := r.SetSlot("c", "A", 0); err != nil {
+		t.Fatalf("free slot during match: %v", err)
+	}
+	if m := r.Member("c"); m.Team != "A" || m.Index != 0 {
+		t.Fatalf("slot change during match: %+v", m)
+	}
+	// Настройки комнаты в матче менять всё равно нельзя.
+	if err := r.SetConfig(r.HostID, Config{Mode: 3, GameMode: "pvp"}, 5); !errors.Is(err, ErrInMatch) {
+		t.Fatalf("config during match must be rejected: %v", err)
 	}
 }

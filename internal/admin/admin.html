@@ -40,7 +40,6 @@ button { background: #274363; border: none; color: #eaf2ff; padding: 5px 12px; b
 <h3>Игроки</h3><div id="sessions"></div>
 <h3>Матчи</h3><div id="matches"></div>
 <h3>Комнаты</h3><div id="rooms"></div>
-<h3>Очереди</h3><div id="queues"></div>
 
 <script>
 const token = new URLSearchParams(location.search).get('token') || '';
@@ -73,7 +72,6 @@ function place(p) {
       ' (' + secs(p.trainingMs || 0) + ')';
   }
   if (p.place === 'menu') return 'в меню';
-  if (p.place === 'queue') return 'в очереди ' + mode(+p.where || 0);
   if (p.place === 'room') return 'в комнате ' + esc(p.where);
   if (p.place === 'match') return 'в матче ' + esc(p.where);
   return esc(p.place);
@@ -131,21 +129,15 @@ async function load() {
         m.roomCode || '—', new Date(m.created).toLocaleTimeString()],
     })), 'Матчей нет.');
 
-  table('rooms', ['код', 'участники', 'режим', 'арена', 'в матче'],
+  table('rooms', ['код', 'участники', 'игра', 'режим', 'арена', 'доступ', 'в матче'],
     (s.rooms || []).map(r => ({
       cells: [esc(r.code),
         (r.players || []).map(p => esc(p.nick || p.id) + (p.host ? ' ★' : '') +
-          (p.team ? ' (' + p.team + ')' : '') + (p.online ? '' : ' ⚠')).join(', ') || '—',
-        mode(r.mode), r.arena, r.inMatch ? 'да' : 'нет'],
+          (p.team ? ' (' + p.team + ')' : '') + (p.ready ? ' ✓' : '') + (p.online ? '' : ' ⚠')).join(', ') || '—',
+        esc(r.gameMode || 'pvp'), mode(r.mode), r.arena,
+        r.visibility === 'closed' ? '🔒 закрытая' : 'открытая',
+        r.inMatch ? 'да' : 'нет'],
     })), 'Комнат нет.');
-
-  table('queues', ['режим', 'кто ждёт', 'до добора ботами'],
-    (s.queues || []).map(q => ({
-      cells: [mode(q.mode),
-        (q.waiting || []).map(p => esc(p.nick || p.id) + (p.role ? ' — ' + esc(p.role) : '') +
-          ' (' + secs(p.waitsMs) + ')').join(', ') || '—',
-        Math.ceil(q.waitLeftMs / 1000) + ' с'],
-    })), 'Очереди пусты.');
 }
 
 document.getElementById('pause').onclick = function () {

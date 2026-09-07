@@ -16,14 +16,21 @@ window.SBOffline = (function () {
 
   var COUNTDOWN_MS = 3000; // как на сервере: матч начинается после отсчёта
 
-  /** start({mode, arena, role, botLevel, gameMode, campaign, difficulty}) → драйвер, совместимый с сетевым матчем. */
+  /**
+   * start({mode, arena, role, botLevel, gameMode, campaign, difficulty, tutorial}) → драйвер,
+   * совместимый с сетевым матчем. tutorial: true — матч обучения (правила см. SIM_CONTRACT):
+   * один боец, матч не кончается, соперника ставит клиент через spawnEnemy.
+   */
   function start(cfg) {
     var seed = (Math.random() * 0xffffffff) >>> 0;
     var rng = Sim.makeRng(seed);
     var gameMode = cfg.gameMode || 'pvp';
     var pve = gameMode !== 'pvp';
-    var players = buildPlayers(cfg.mode, cfg.role, rng, pve ? cfg.difficulty : cfg.botLevel, pve);
+    var players = cfg.tutorial
+      ? [{ id: 'me', team: 'A', role: cfg.role, bot: false, nick: 'Вы' }]
+      : buildPlayers(cfg.mode, cfg.role, rng, pve ? cfg.difficulty : cfg.botLevel, pve);
     var mcfg = { gameMode: gameMode, mode: cfg.mode, arenaIndex: cfg.arena, players: players };
+    if (cfg.tutorial) mcfg.tutorial = true;
     if (pve) { mcfg.difficulty = cfg.difficulty == null ? 1 : (cfg.difficulty | 0); mcfg.campaign = cfg.campaign !== false; }
     var state = Sim.createMatch(mcfg, seed);
     var lastT = performance.now();
@@ -50,6 +57,18 @@ window.SBOffline = (function () {
         lastT = now;
         var events = Sim.step(state, dt);
         return { snap: Sim.snapshot(state), events: events };
+      },
+      /** Обучение: поставить соперника; возвращает его id. */
+      spawnEnemy: function (opts) { return Sim.tutorialSpawn(state, opts); },
+      /** Обучение: убрать соперника. */
+      removeEnemy: function (id) { return Sim.tutorialRemove(state, id); },
+      /**
+       * Включить или выключить ИИ бойца. Выключенный стоит на месте; замах перед заморозкой
+       * гасим, иначе боец навсегда останется в позе замаха (см. SIM_CONTRACT).
+       */
+      setBot: function (id, on) {
+        if (!on) Sim.applyInput(state, id, { kind: 'cancelCharge' });
+        return Sim.setBot(state, id, !!on);
       },
       isOver: function () { return Sim.isOver(state); },
       winner: function () { return Sim.winner(state); },

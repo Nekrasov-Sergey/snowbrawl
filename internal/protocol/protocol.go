@@ -13,7 +13,7 @@ import (
 )
 
 // Version — версия протокола. Клиент присылает её в hello.
-const Version = 1
+const Version = 2
 
 // Envelope — конверт любого сообщения.
 type Envelope struct {
@@ -24,16 +24,18 @@ type Envelope struct {
 // Типы сообщений клиент → сервер.
 const (
 	CHello      = "hello"
-	CQueueJoin  = "queue.join"
-	CQueueLeave = "queue.leave"
 	CRoomCreate = "room.create"
 	CRoomJoin   = "room.join"
 	CRoomSlot   = "room.slot"
 	CRoomRole   = "room.role"
 	CRoomConfig = "room.config"
+	CRoomReady  = "room.ready"
 	CRoomKick   = "room.kick"
 	CRoomStart  = "room.start"
 	CRoomLeave  = "room.leave"
+	CRoomList   = "room.list"   // он же подписка на обновления списка
+	CRoomUnlist = "room.unlist" // уход с экрана списка
+	CMatchJoin  = "match.join"  // войти в идущий матч за бойца своего слота
 	CMatchLeave = "match.leave"
 	CInput      = "input"
 	CTraining   = "training"
@@ -44,10 +46,12 @@ const (
 const (
 	SWelcome     = "welcome"
 	SError       = "error"
-	SQueueStatus = "queue.status"
 	SRoomState   = "room.state"
 	SRoomLeft    = "room.left"
+	SRoomList    = "room.list"
+	SRoomMatch   = "room.match"
 	SMatchStart  = "match.start"
+	SMatchRoster = "match.roster"
 	SSnapshot    = "snapshot"
 	SMatchEnd    = "match.end"
 	SDrain       = "drain"
@@ -72,6 +76,11 @@ const (
 	ErrBadRole      = "bad_role"
 	ErrBadGameMode  = "bad_gamemode"
 	ErrBadSlot      = "bad_slot"
+	ErrCodeRequired = "code_required"
+	ErrBadCode      = "bad_code"
+	ErrTooManyTries = "too_many_tries"
+	ErrSlotTaken    = "slot_taken"
+	ErrNoSlots      = "no_slots"
 	ErrServerFull   = "server_full"
 	ErrInternal     = "internal"
 )
@@ -94,7 +103,7 @@ type Welcome struct {
 	Proto      int    `json:"proto"`
 	Draining   bool   `json:"draining,omitempty"`
 	Online     int    `json:"online"` // сколько игроков сейчас на сервере, включая этого
-	// Куда клиент должен вернуться после реконнекта: "menu" | "queue" | "room" | "match".
+	// Куда клиент должен вернуться после реконнекта: "menu" | "room" | "match".
 	Resume string `json:"resume"`
 }
 
@@ -110,12 +119,6 @@ type Error struct {
 	Message string `json:"msg,omitempty"`
 }
 
-// QueueJoin — встать в очередь Quick Match.
-type QueueJoin struct {
-	Mode int    `json:"mode"`
-	Role string `json:"role"`
-}
-
 // Training — клиент сообщает, что играет тренировку с ботами. Тренировка целиком в браузере,
 // сервер в ней не участвует и знает о ней только отсюда — чтобы админка показывала, чем занят игрок.
 type Training struct {
@@ -125,24 +128,20 @@ type Training struct {
 	Role  string `json:"role,omitempty"`
 }
 
-// QueueStatus — состояние очереди для игрока.
-type QueueStatus struct {
-	InQueue  bool `json:"inQueue"`
-	Mode     int  `json:"mode,omitempty"`
-	Players  int  `json:"players,omitempty"`  // живых игроков в очереди
-	Needed   int  `json:"needed,omitempty"`   // всего мест
-	WaitLeft int  `json:"waitLeft,omitempty"` // мс до добора ботами
-}
-
 // RoomCreate — создать комнату.
 type RoomCreate struct {
 	Mode  int `json:"mode"`
 	Arena int `json:"arena"`
-	// PvE: gameMode "" | "pvp" | "survival" | "defense"; campaign — кампания (иначе эндлесс);
-	// difficulty 0..2 (ручка сложности: боты пати + сдвиг врагов).
+	// PvE: gameMode "" | "pvp" | "survival" | "defense"; campaign — кампания (иначе эндлесс).
+	// Difficulty 0..2 — сложность ботов (в PvP они занимают пустые слоты, в PvE это ещё и
+	// сдвиг уровня врагов). Указатель, чтобы отличить «не прислали» от «Лёгкий»: без него
+	// комната по умолчанию получала бы самых слабых ботов.
 	GameMode   string `json:"gameMode,omitempty"`
 	Campaign   bool   `json:"campaign,omitempty"`
-	Difficulty int    `json:"difficulty,omitempty"`
+	Difficulty *int   `json:"difficulty,omitempty"`
+	// Visibility "open" — комната видна в списке и открыта для входа; "closed" — видна со
+	// замочком, войти можно только по коду. Пустое значение считается "open".
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // RoomJoin — войти по коду.
@@ -161,13 +160,79 @@ type RoomRole struct {
 	Role string `json:"role"`
 }
 
-// RoomConfig — хост меняет режим/арену.
+// RoomConfig — хост меняет настройки комнаты. Любое изменение сбрасывает готовность всех.
 type RoomConfig struct {
 	Mode       int    `json:"mode"`
 	Arena      int    `json:"arena"`
 	GameMode   string `json:"gameMode,omitempty"`
 	Campaign   bool   `json:"campaign,omitempty"`
-	Difficulty int    `json:"difficulty,omitempty"`
+	Difficulty *int   `json:"difficulty,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
+}
+
+// RoomReady — игрок отмечает готовность. Когда готовы все люди в комнате, включая хоста,
+// матч стартует сам.
+type RoomReady struct {
+	Ready bool `json:"ready"`
+}
+
+// RoomList — запросить страницу списка комнат и подписаться на её обновления.
+// Section: "pvp" | "pve". Страницы нумеруются с нуля.
+type RoomList struct {
+	Section string `json:"section"`
+	Page    int    `json:"page"`
+}
+
+// RoomBrief — строка списка комнат.
+type RoomBrief struct {
+	Code       string `json:"code"`
+	Section    string `json:"section"`
+	GameMode   string `json:"gameMode,omitempty"`
+	Campaign   bool   `json:"campaign,omitempty"`
+	Mode       int    `json:"mode"`
+	Arena      int    `json:"arena"`
+	Humans     int    `json:"humans"`   // людей в комнате
+	Bots       int    `json:"bots"`     // слотов, которые занимают боты
+	Capacity   int    `json:"capacity"` // всего мест
+	InMatch    bool   `json:"inMatch"`
+	Visibility string `json:"visibility"`
+	HostNick   string `json:"hostNick,omitempty"`
+	AgeMs      int64  `json:"ageMs"`              // сколько комната существует
+	Joinable   bool   `json:"joinable"`           // есть куда сесть
+	NeedCode   bool   `json:"needCode,omitempty"` // закрытая: нужен код
+}
+
+// RoomListPage — страница списка комнат. Сортировка по времени создания, старые первыми.
+type RoomListPage struct {
+	Section string      `json:"section"`
+	Page    int         `json:"page"`
+	Pages   int         `json:"pages"`
+	Total   int         `json:"total"`
+	Rooms   []RoomBrief `json:"rooms"`
+}
+
+// RoomMatchSlot — боец идущего матча в разрезе слота комнаты.
+type RoomMatchSlot struct {
+	Team  string `json:"team"`
+	Index int    `json:"index"`
+	Nick  string `json:"nick"`
+	Role  string `json:"role"`
+	Bot   bool   `json:"bot"` // сейчас ведётся ботом: слот свободен или его человек в лобби
+	HP    int    `json:"hp"`
+	Koed  bool   `json:"koed,omitempty"`
+}
+
+// RoomMatch — состояние идущего матча для тех, кто сидит в лобби этой комнаты.
+// Рассылается, пока содержимое меняется (раз в секунду по таймеру матча).
+type RoomMatch struct {
+	Code       string          `json:"code"`
+	TimeLeftMs int             `json:"timeLeftMs"`
+	Slots      []RoomMatchSlot `json:"slots"`
+}
+
+// MatchRoster — состав матча изменился: кто-то подсел на место бота или вышел.
+type MatchRoster struct {
+	Players []MatchPlayer `json:"players"`
 }
 
 // RoomKick — хост выгоняет игрока.
@@ -184,6 +249,8 @@ type RoomPlayer struct {
 	Role      string `json:"role,omitempty"`
 	Host      bool   `json:"host,omitempty"`
 	Connected bool   `json:"connected"`
+	Ready     bool   `json:"ready,omitempty"`
+	InMatch   bool   `json:"inMatch,omitempty"` // играет в идущем матче (иначе сидит в лобби)
 }
 
 // RoomState — полное состояние лобби, рассылается всем при любом изменении.
@@ -195,19 +262,23 @@ type RoomState struct {
 	GameMode   string       `json:"gameMode,omitempty"`
 	Campaign   bool         `json:"campaign,omitempty"`
 	Difficulty int          `json:"difficulty,omitempty"`
+	Visibility string       `json:"visibility"`
 	Players    []RoomPlayer `json:"players"`
 	InMatch    bool         `json:"inMatch"`
+	ReadyCount int          `json:"readyCount"` // сколько людей нажали «Готов»
 	// Результат последнего матча комнаты (для экрана лобби после боя).
 	LastWinner string `json:"lastWinner,omitempty"`
 }
 
 // MatchPlayer — участник матча.
 type MatchPlayer struct {
-	ID   string `json:"id"`
-	Nick string `json:"nick"`
-	Team string `json:"team"`
-	Role string `json:"role"`
-	Bot  bool   `json:"bot"`
+	ID       string `json:"id"`
+	Nick     string `json:"nick"`
+	Team     string `json:"team"`
+	Index    int    `json:"index"` // слот комнаты, за которым закреплён этот боец
+	Role     string `json:"role"`
+	Bot      bool   `json:"bot"`
+	BotLevel *int   `json:"botLevel,omitempty"` // уровень бота 0..2; nil — уровень по умолчанию
 }
 
 // MatchStart — матч начался (или переподключение к идущему матчу).

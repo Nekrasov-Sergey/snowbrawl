@@ -329,3 +329,71 @@ func BenchmarkFullLoad(b *testing.B) {
 	// Доля одного ядра, нужная для симуляции 17 матчей в реальном времени.
 	b.ReportMetric(float64(el)/float64(time.Second)/float64(b.N)*100, "%cpu-of-one-core")
 }
+
+// TestTutorialMode — правила режима обучения: состав из одного бойца, матч не заканчивается
+// ни по таймеру, ни по KO, боец-человек не опускается ниже 1 HP, соперник ставится и убирается.
+func TestTutorialMode(t *testing.T) {
+	p := loadProgram(t)
+	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true,
+		Players: []sim.PlayerConfig{{ID: "me", Team: "A", Role: p.Roles()[0], Bot: false}}}
+	m, err := p.NewMatch(cfg, 7)
+	if err != nil {
+		t.Fatalf("tutorial match with a single fighter must be allowed: %v", err)
+	}
+	// Пять минут — штатный таймер PvP; в обучении он не срабатывает.
+	for i := 0; i < 20*60*6; i++ {
+		if _, err := m.Step(1.0 / 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if m.IsOver() {
+		t.Fatal("tutorial match must not end by timer")
+	}
+
+	id, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Снайпер", X: 320, Y: 200, BotLevel: 2, Bot: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := 0
+	for i := 0; i < 20*150; i++ {
+		raw, err := m.Step(1.0 / 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var events []struct {
+			Type     string `json:"type"`
+			TargetID string `json:"targetId"`
+		}
+		_ = json.Unmarshal(raw, &events)
+		for _, e := range events {
+			if e.Type == "hit" && e.TargetID == "me" {
+				hits++
+			}
+			if e.Type == "ko" && e.TargetID == "me" {
+				t.Fatal("human must not be knocked out in tutorial")
+			}
+		}
+	}
+	if hits == 0 {
+		t.Fatal("enemy must be able to hit the player")
+	}
+	raw, _ := m.Snapshot()
+	var s snap
+	_ = json.Unmarshal(raw, &s)
+	me := s.Players[0]
+	if me.ID != "me" || me.HP != 1 {
+		t.Fatalf("human hp must floor at 1, got %+v", me)
+	}
+	if m.IsOver() {
+		t.Fatal("tutorial match must not end while the human is alive")
+	}
+	if err := m.TutorialRemove(id); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = m.Snapshot()
+	s = snap{}
+	_ = json.Unmarshal(raw, &s)
+	if len(s.Players) != 1 {
+		t.Fatalf("enemy must be removed, got %d fighters", len(s.Players))
+	}
+}

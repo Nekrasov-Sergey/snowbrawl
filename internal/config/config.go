@@ -21,7 +21,6 @@ type Config struct {
 	LogPretty    bool          // человекочитаемые логи (для разработки)
 	BuildVersion string        // версия сборки, подставляется при линковке
 	TickRate     int           // тиков симуляции в секунду
-	QueueWait    time.Duration // ожидание живых игроков в Quick Match до добора ботами
 	ReconnectTTL time.Duration // сколько держим место за отключившимся игроком
 	AFKTimeout   time.Duration // без ввода столько — бойца ведёт бот
 	Countdown    time.Duration // отсчёт перед стартом матча
@@ -40,7 +39,6 @@ func Defaults() Config {
 		LogLevel:     "info",
 		BuildVersion: "dev",
 		TickRate:     20,
-		QueueWait:    10 * time.Second,
 		ReconnectTTL: 60 * time.Second,
 		AFKTimeout:   20 * time.Second,
 		Countdown:    3 * time.Second,
@@ -80,7 +78,6 @@ func Load(args []string, buildVersion string) (Config, error) {
 		dst *time.Duration
 		key string
 	}{
-		{&c.QueueWait, "SNOWBRAWL_QUEUE_WAIT"},
 		{&c.ReconnectTTL, "SNOWBRAWL_RECONNECT_TTL"},
 		{&c.AFKTimeout, "SNOWBRAWL_AFK_TIMEOUT"},
 		{&c.Countdown, "SNOWBRAWL_COUNTDOWN"},
@@ -100,7 +97,6 @@ func Load(args []string, buildVersion string) (Config, error) {
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "уровень логов")
 	fs.BoolVar(&c.LogPretty, "log-pretty", c.LogPretty, "человекочитаемые логи")
 	fs.BoolVar(&c.TrustProxy, "trust-proxy", c.TrustProxy, "брать IP из X-Forwarded-For")
-	fs.DurationVar(&c.QueueWait, "queue-wait", c.QueueWait, "ожидание игроков в Quick Match")
 	fs.DurationVar(&c.ReconnectTTL, "reconnect-ttl", c.ReconnectTTL, "время на переподключение")
 	fs.DurationVar(&c.AFKTimeout, "afk-timeout", c.AFKTimeout, "таймаут бездействия")
 	fs.DurationVar(&c.Countdown, "countdown", c.Countdown, "отсчёт перед стартом матча")

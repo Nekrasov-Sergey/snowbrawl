@@ -1,10 +1,11 @@
 /* Настройки игрока на устройстве (localStorage). Только клиент. */
 window.SBSettings = (function () {
   var KEY = 'sb.settings';
+  // Управление на ПК больше не настраивается: WASD + мышь на постоянной основе. Старый ключ
+  // pcControls в хранилище просто игнорируется — читаются только ключи из DEFAULTS.
   var DEFAULTS = {
-    haptics: true,     // вибрация при попадании (где поддерживается)
-    touch: 'auto',     // сенсорное управление: auto | on | off
-    pcControls: 'wasd' // ПК: wasd (WASD + бросок удержанием ЛКМ) | classic (мышь: клик — идти, ЛКМ на бойце — замах)
+    haptics: true, // вибрация при попадании (где поддерживается)
+    touch: 'auto'  // сенсорное управление: auto | on | off
   };
   var cur = load();
 

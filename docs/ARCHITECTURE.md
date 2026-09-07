@@ -32,12 +32,12 @@ cmd/snowbrawl-server   main: конфиг, логгер, gin-роутер, grace
 internal/config        флаги + переменные окружения SNOWBRAWL_*
 internal/protocol      типы сообщений, версия протокола, валидация ника и кода комнаты
 internal/ws            WebSocket-соединение: лимит частоты, очередь отправки, heartbeat, учёт соединений
-internal/session       Player: токен, ник, где находится (menu/queue/room/match)
-internal/room          комната с кодом из 4 цифр и лобби (чистые данные)
-internal/matchmaking   очереди Quick Match по режимам (чистые данные)
+internal/session       Player: токен, ник, где находится (menu/room/match)
+internal/room          комната с кодом из 4 цифр и лобби: слоты, готовность, видимость (чистые данные)
 internal/sim           goja-раннер: Compile(sim.js) → Program, Program.NewMatch → Match
 internal/match         цикл матча: тик, ввод → sim, снапшоты → игрокам, AFK/дисконнект → бот
 internal/hub           всё вместе под одним мьютексом + фоновые таймауты + дренаж + Stats
+internal/hub/browse.go список комнат и сводка матча в лобби (подписки), лимит попыток кода, вход в матч
 internal/admin         /healthz, /api/version, /api/online (для мониторинга), /admin/* (token)
 internal/web           отдача клиента: embed или --web-dir, подстановка __BUILD__ в index.html
 web.go                 go:embed web  (корень модуля, потому что embed не ходит наверх)
@@ -45,7 +45,7 @@ web.go                 go:embed web  (корень модуля, потому ч
 
 ## Потоки и блокировки
 
-- `hub.Hub` — один мьютекс на все комнаты, очереди, сессии. Все обработчики сообщений
+- `hub.Hub` — один мьютекс на все комнаты и сессии. Все обработчики сообщений
   короткие, поэтому одного мьютекса достаточно и он исключает гонки между комнатами.
 - `match.Match` — своя горутина с тикером и свой мьютекс. Публичные методы (`Input`,
   `Attach`, `Detach`, `Leave`, `Stop`) берут только мьютекс матча, наружу из-под него ничего
@@ -59,12 +59,20 @@ web.go                 go:embed web  (корень модуля, потому ч
 
 ```
 hello ─► welcome(resume) ─► menu
-  menu ─► queue.join ─► queue.status… ─► match.start ─► snapshot… ─► match.end ─► menu
-  menu ─► room.create/join ─► room.state… ─► (host) room.start ─► match … ─► room.state (лобби)
+  menu ─► room.create ─► room.state… ─► room.ready (все готовы) или (host) room.start
+                                    ─► match.start ─► snapshot… ─► match.end ─► room.state (лобби)
+  menu ─► room.list… ─► room.join ─► room.state… ─► (как выше)
+  menu ─► room.list… ─► room.join (матч идёт) ─► room.state + room.match… ─► match.join
+                                              ─► match.start (за бойца своего слота)
 ```
 
+- Матч комнаты стартует двумя путями: хост нажал «Начать матч» или все люди в комнате
+  отметились готовыми (`room.ready`). Отдельного отсчёта в лобби нет — он есть в начале матча.
+- Список комнат — подписка: клиент присылает `room.list`, hub в своём тике (500 мс) пересобирает
+  страницу подписчика и отправляет её заново, только если содержимое изменилось. Так не нужен
+  ни опрос клиентом, ни рассылка на каждый вход-выход в любой комнате.
 - Сессия = токен в localStorage. По нему игрок возвращается после F5 или обрыва
-  в ту же очередь/комнату/матч (`welcome.resume`).
+  в ту же комнату/матч (`welcome.resume`).
 - Обрыв связи в матче: бойца сразу ведёт бот, место держится `ReconnectTTL` (60 с).
   Сознательный выход (`match.leave`) — бот до конца матча.
 - Нет ввода `AFKTimeout` (20 с) при живом соединении — бот; любой ввод возвращает управление.

@@ -17,6 +17,8 @@ window.SBIntent = (function () {
    *  o.getMe(snap)   → мой боец из снапшота
    *  o.canAct(p)     → может ли боец действовать (жив, не оглушён)
    *  o.onChargeStart(), o.onChargeEnd() — хуки (звук замаха)
+ *  o.onThrow(power), o.onSpecial() — хуки состоявшегося действия: события applyInput до клиента
+ *    не доходят (step обнуляет state.events), поэтому обучение считает шаги по ним
    *  o.blocked()     → true, пока команды принимать нельзя (отсчёт перед стартом)
    * Возвращает api; api.local — {charging, power, aimX, aimY, pending} для мгновенного отклика
    * в рендере. pending — нажатие во время перезарядки: замах начнётся сам, как только она пройдёт.
@@ -77,6 +79,7 @@ window.SBIntent = (function () {
         var pw = chargePower();
         endCharge();
         send('throw', x, y, pw);
+        if (o.onThrow) o.onThrow(pw);
       },
       cancelCharge: function () {
         if (pending) { clearPending(); return; }
@@ -84,7 +87,7 @@ window.SBIntent = (function () {
         endCharge();
         send('cancelCharge', 0, 0);
       },
-      specialAt: function (x, y) { send('special', x, y); },
+      specialAt: function (x, y) { send('special', x, y); if (o.onSpecial) o.onSpecial(); },
 
       // ---- направления (стики); dir — нормированный вектор или null ----
       /** Держать направление движения; null — остановиться. */
