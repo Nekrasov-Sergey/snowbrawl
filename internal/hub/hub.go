@@ -48,6 +48,9 @@ type Hub struct {
 	matchPush map[string]string
 	// lastOnline — последнее разосланное число игроков: рассылаем только при изменении.
 	lastOnline int
+	// chat — общий чат меню: сообщения в памяти, TTL = cfg.ChatTTL.
+	chat    []protocol.ChatMessage
+	chatSeq uint64
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -166,6 +169,8 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.handleInput(p, env.Data)
 	case protocol.CTraining:
 		h.handleTraining(p, env.Data)
+	case protocol.CChatSend:
+		h.handleChatSend(p, env.Data)
 	default:
 		h.sendErr(c, protocol.ErrBadMessage, "unknown type "+env.Type)
 	}
@@ -251,6 +256,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 	if h.draining {
 		c.Send(h.drainMessage())
 	}
+	h.sendChatHistory(p)
 	// Восстановление места.
 	switch p.Place {
 	case session.InRoom:
@@ -797,6 +803,8 @@ func (h *Hub) tick() {
 			delete(h.codeTries, ip)
 		}
 	}
+
+	h.pruneChat(now)
 
 	for code, r := range h.rooms {
 		if r.IsEmpty() && !r.InMatch && now.Sub(r.EmptySince) > h.cfg.RoomTTL {

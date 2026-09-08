@@ -39,6 +39,8 @@ type Player struct {
 	RoomCode string // если Place == InRoom или матч из комнаты
 	MatchID  string // если Place == InMatch
 
+	LastChatAt time.Time // антифлуд общего чата
+
 	// Тренировка с ботами идёт целиком в браузере, сервер в ней не участвует: для него игрок
 	// остаётся в меню. Эти поля заполнены со слов клиента и нужны только админке.
 	Training      bool

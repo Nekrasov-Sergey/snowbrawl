@@ -41,6 +41,28 @@
     <button class="menuBtn" id="btnPve">РЕЖИМ PVE</button>
     <button class="menuBtn ghost wide" id="btnTutorial">Обучение<span class="badge" id="tutorialBadge" hidden>новое</span></button>
     <button class="menuBtn ghost" id="btnSettings">Настройки</button>
+    <div id="chatPanel">
+      <button id="chatToggle" type="button">Чат <span class="badge" id="chatUnread" hidden>0</span><span class="chevron">▾</span></button>
+      <div id="chatBody" hidden>
+        <div id="chatLog"></div>
+        <div id="chatInputRow">
+          <input type="text" id="chatInput" maxlength="300" placeholder="Сообщение в общий чат…" autocomplete="off">
+          <button class="menuBtn primary" id="chatSend" type="button">→</button>
+        </div>
+        <div class="chatNote">Сообщения видны всем и хранятся час.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Выбор класса перед обучением -->
+  <div id="screen-tutrole" class="panel" hidden>
+    <div class="subtitle">Каким классом пройти обучение?</div>
+    <div class="cardGrid" id="tutRoleGrid"></div>
+    <div class="heroInfo" id="tutRoleInfo" hidden></div>
+    <div class="navRow">
+      <button class="menuBtn ghost" id="tutRoleBack">Назад</button>
+      <button class="menuBtn primary" id="tutRoleStart">Начать обучение</button>
+    </div>
   </div>
 
   <!-- Настройки -->
@@ -151,6 +173,7 @@
       <div id="stage">
         <canvas id="c" width="900" height="560"></canvas>
         <div id="countdown" hidden>3</div>
+        <div id="tutFlash" hidden></div>
         <div id="overlay">
           <h2 id="overlayText">ПОБЕДА</h2>
           <div id="overlaySub"></div>
@@ -164,8 +187,8 @@
       <div id="tutorialBox" hidden>
         <div id="tutStep"></div>
         <div class="tutRow">
-          <button class="menuBtn ghost" id="tutSkipStep">Пропустить шаг</button>
-          <button class="menuBtn ghost" id="tutQuit">Выйти из обучения</button>
+          <button class="menuBtn ghost" id="tutSkipStep">Пропустить</button>
+          <button class="menuBtn ghost" id="tutQuit">Выйти</button>
         </div>
       </div>
       <div id="bottomRow">
@@ -198,6 +221,8 @@
   <div id="toast" hidden></div>
   <div class="footer">SnowBrawl <span id="verBuild">__BUILD__</span> · sim <span id="verSim">—</span></div>
 </div>
+<!-- Мобильный бой только в ландшафте: показывается через CSS в портрете во время матча/обучения -->
+<div id="rotateGate"><div><div class="rotIcon">📱↻</div>Поверни телефон<br><small>Бой в SnowBrawl идёт в горизонтальном положении.</small></div></div>
 
 <script src="sim/sim.js?v=__BUILD__"></script>
 <script src="client/audio.js?v=__BUILD__"></script>

@@ -29,6 +29,8 @@ type Config struct {
 	MsgRate      int           // сообщений в секунду на соединение
 	DrainTimeout time.Duration // сколько дренаж ждёт окончания матчей
 	TrustProxy   bool          // брать IP клиента из X-Forwarded-For (за Caddy/nginx)
+	ChatTTL      time.Duration // сколько живёт сообщение общего чата
+	ChatCooldown time.Duration // минимальная пауза между сообщениями чата от одного игрока
 }
 
 // Defaults возвращает конфигурацию по умолчанию.
@@ -46,6 +48,8 @@ func Defaults() Config {
 		RoomsPerIP:   3,
 		MsgRate:      30,
 		DrainTimeout: 3 * time.Minute,
+		ChatTTL:      time.Hour,
+		ChatCooldown: 1500 * time.Millisecond,
 	}
 }
 
@@ -83,6 +87,7 @@ func Load(args []string, buildVersion string) (Config, error) {
 		{&c.Countdown, "SNOWBRAWL_COUNTDOWN"},
 		{&c.RoomTTL, "SNOWBRAWL_ROOM_TTL"},
 		{&c.DrainTimeout, "SNOWBRAWL_DRAIN_TIMEOUT"},
+		{&c.ChatTTL, "SNOWBRAWL_CHAT_TTL"},
 	} {
 		if err := envDur(d.dst, d.key); err != nil {
 			return c, err

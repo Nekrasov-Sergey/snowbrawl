@@ -33,6 +33,7 @@
 | `match.leave` | — | выйти из боя, оставшись в комнате: место сохраняется, бойца ведёт бот |
 | `input` | `{kind, x, y, power?}` | ввод в матче, пробрасывается в `sim.applyInput` как есть |
 | `training` | `{on, mode?, arena?, role?}` | клиент играет тренировку с ботами; сервер в ней не участвует, отметка нужна только админке |
+| `chat.send` | `{text}` | сообщение в общий чат меню; текст чистится, ≤ 300 символов, не чаще 1 раза в 1.5 с |
 
 `input.kind`: `move`, `chargeStart`, `aim`, `throw` (с `power` 0..1), `cancelCharge`, `special`.
 Координаты в системе арены 900×560. Клиент шлёт `aim`/`move` не чаще ~15 раз в секунду.
@@ -57,6 +58,8 @@
 | `match.end` | `{winner: "A"\|"B"\|"", yourTeam, reason, roomCode?}` | `reason` PvP ∈ `ko\|timeout\|abandoned\|shutdown`, PvE ∈ `cleared\|wiped\|objective\|expired` |
 | `pong` | — | ответ на `ping` |
 | `online` | `{n}` | число игроков на сервере; шлётся при каждом изменении |
+| `chat.msg` | `{id, nick, text, ts}` | одно сообщение общего чата, рассылается всем подключённым; `ts` — unix-мс |
+| `chat.history` | `{messages[]}` | последние сообщения чата (за час), приходят сразу после `welcome` |
 
 `room.state.players[]`: `{id, nick, team, index, role, host, connected, ready, inMatch}`.
 `match.start.players[]` и `match.roster.players[]`: `{id, nick, team, index, role, bot, botLevel?}` —
@@ -86,7 +89,7 @@ inMatch, visibility, hostNick, ageMs, joinable, needCode?}`. Комнаты ид
 `room_limit`, `busy` (сначала выйдите из комнаты/матча), `draining`, `bad_mode`,
 `bad_arena`, `bad_role`, `bad_gamemode`, `bad_slot`, `bad_code`, `too_many_tries`
 (не больше пяти неудачных попыток кода с адреса в минуту — защита от перебора закрытых комнат),
-`slot_taken`, `no_slots`, `server_full`, `internal`.
+`slot_taken`, `no_slots`, `chat_flood` (сообщения в чат чаще раза в 1.5 с), `server_full`, `internal`.
 
 ## Сессия и переподключение
 
@@ -94,6 +97,13 @@ inMatch, visibility, hostNick, ageMs, joinable, needCode?}`. Комнаты ид
 игрока `ReconnectTTL` (60 с) после обрыва. Если пришёл `hello` с токеном, пока старое
 соединение ещё живо, старое закрывается с причиной `replaced by new connection`
 (две вкладки одного браузера = один игрок).
+
+## Общий чат
+
+Один чат на весь сервер, панель в главном меню. Сообщения лежат в памяти hub, живут
+`SNOWBRAWL_CHAT_TTL` (по умолчанию час) и теряются при перезапуске — БД в проекте нет.
+Буфер обрезается до 300 сообщений. `chat.msg` рассылается всем подключённым независимо от
+того, открыта ли у них панель; клиент показывает счётчик непрочитанных. Ник берётся из сессии.
 
 ## Лимиты
 

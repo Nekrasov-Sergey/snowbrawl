@@ -867,3 +867,48 @@ func TestTrainingShownInStats(t *testing.T) {
 	}
 	t.Fatal("пометка тренировки не снялась")
 }
+
+// TestChat — сообщение доходит до всех, история приходит новому клиенту, флуд отклоняется.
+func TestChat(t *testing.T) {
+	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 20 * time.Millisecond })
+	a := s.connect(t, "Аня", "")
+	b := s.connect(t, "Боря", "")
+
+	a.send(protocol.CChatSend, protocol.ChatSend{Text: "  привет   всем\n\n"})
+	var m protocol.ChatMessage
+	a.expect(protocol.SChatMsg, &m)
+	if m.Nick != "Аня" || m.Text != "привет всем" || m.ID == 0 || m.TS == 0 {
+		t.Fatalf("chat.msg = %+v", m)
+	}
+	b.expect(protocol.SChatMsg, &m)
+	if m.Nick != "Аня" || m.Text != "привет всем" {
+		t.Fatalf("второй клиент получил %+v", m)
+	}
+
+	// Флуд: сразу второе сообщение — отклонение.
+	a.send(protocol.CChatSend, protocol.ChatSend{Text: "ещё"})
+	var e protocol.Error
+	a.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrChatFlood {
+		t.Fatalf("ожидался chat_flood, got %s", e.Code)
+	}
+
+	// Пустое сообщение после пауз — bad_message.
+	time.Sleep(30 * time.Millisecond)
+	a.send(protocol.CChatSend, protocol.ChatSend{Text: "   "})
+	a.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrBadMessage {
+		t.Fatalf("ожидался bad_message на пустое, got %s", e.Code)
+	}
+
+	// Новый клиент получает историю.
+	c := s.connect(t, "Вика", "")
+	var hist protocol.ChatHistory
+	c.expect(protocol.SChatHistory, &hist)
+	if len(hist.Messages) != 1 || hist.Messages[0].Text != "привет всем" {
+		t.Fatalf("история = %+v", hist.Messages)
+	}
+	a.close()
+	b.close()
+	c.close()
+}

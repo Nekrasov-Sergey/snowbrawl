@@ -227,9 +227,14 @@ type pveSnap struct {
 
 // TestPveWaveMode — PvE-матч создаётся, идут волны, враги появляются на команде B,
 // снапшот несёт блок pve, матч завершается с PvE-причиной в пределах потолка.
+// Эндлесс + одинокий боец на «Сложном»: волны рано или поздно его выносят (wiped),
+// и это не зависит от того, добьют ли боты босса.
 func TestPveWaveMode(t *testing.T) {
 	p := loadProgram(t)
-	m, err := p.NewMatch(pveConfig("survival", 2, p.Roles()), 99)
+	endless := false
+	cfg := sim.MatchConfig{GameMode: "survival", Mode: 1, Difficulty: 2, Campaign: &endless}
+	cfg.Players = append(cfg.Players, sim.PlayerConfig{ID: "a0", Team: "A", Role: p.Roles()[0], Bot: true})
+	m, err := p.NewMatch(cfg, 99)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,5 +400,90 @@ func TestTutorialMode(t *testing.T) {
 	_ = json.Unmarshal(raw, &s)
 	if len(s.Players) != 1 {
 		t.Fatalf("enemy must be removed, got %d fighters", len(s.Players))
+	}
+}
+
+// TestTutorialLockEnemy — на последнем шаге соперника нельзя добить обычным попаданием,
+// пока держится замок; после tutorialLock(false) следующее попадание его выносит.
+func TestTutorialLockEnemy(t *testing.T) {
+	p := loadProgram(t)
+	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true,
+		Players: []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Снайпер", Bot: false}}}
+	m, err := p.NewMatch(cfg, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Уводим бойца от колонны у спавна на чистую линию (y=150).
+	if ok, _ := m.ApplyInput("me", json.RawMessage(`{"kind":"move","x":300,"y":150}`)); !ok {
+		t.Fatal("move rejected")
+	}
+	for i := 0; i < 80; i++ {
+		if _, err := m.Step(1.0 / 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eid, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Танк", X: 560, Y: 150, Bot: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.TutorialLock(true); err != nil {
+		t.Fatal(err)
+	}
+
+	enemyHP := func() (int, bool) {
+		raw, _ := m.Snapshot()
+		var s struct {
+			Players []struct {
+				ID   string `json:"id"`
+				HP   int    `json:"hp"`
+				Koed bool   `json:"koed"`
+			} `json:"players"`
+		}
+		_ = json.Unmarshal(raw, &s)
+		for _, pl := range s.Players {
+			if pl.ID == eid {
+				return pl.HP, pl.Koed
+			}
+		}
+		return 0, true
+	}
+	fire := func(pw float64) {
+		m.ApplyInput("me", json.RawMessage(`{"kind":"chargeStart","x":560,"y":150}`))
+		for i := 0; i < 9; i++ {
+			m.Step(1.0 / 20)
+		}
+		body, _ := json.Marshal(map[string]any{"kind": "throw", "x": 560, "y": 150, "power": pw})
+		m.ApplyInput("me", body)
+		for i := 0; i < 16; i++ {
+			m.Step(1.0 / 20)
+		}
+	}
+
+	sawFloor := false
+	for i := 0; i < 14; i++ {
+		fire(0.34)
+		hp, koed := enemyHP()
+		if koed || hp < 1 {
+			t.Fatalf("locked enemy went down after %d shots (hp=%d koed=%v)", i+1, hp, koed)
+		}
+		if hp == 1 {
+			sawFloor = true
+		}
+	}
+	if !sawFloor {
+		t.Fatal("enemy never took damage — throw geometry is off, test is not exercising the rule")
+	}
+
+	if err := m.TutorialLock(false); err != nil {
+		t.Fatal(err)
+	}
+	down := false
+	for i := 0; i < 6 && !down; i++ {
+		fire(0.34)
+		hp, koed := enemyHP()
+		down = koed || hp <= 0
+	}
+	if !down {
+		t.Fatal("after tutorialLock(false) the enemy must be finishable")
 	}
 }
