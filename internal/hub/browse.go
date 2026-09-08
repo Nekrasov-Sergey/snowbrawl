@@ -267,7 +267,7 @@ func (h *Hub) handleMatchJoin(p *session.Player) {
 		h.sendErrP(p, protocol.ErrBusy, "match is over")
 		return
 	}
-	if err := m.Replace(mem.Team, mem.Index, p.ID, p.Nick, p.Conn); err != nil {
+	if err := m.Replace(mem.Team, mem.Index, p.ID, p.Nick, h.rank(p.IP), p.Conn); err != nil {
 		h.sendErrP(p, protocol.ErrSlotTaken, err.Error())
 		return
 	}

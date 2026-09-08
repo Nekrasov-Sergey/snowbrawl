@@ -100,10 +100,14 @@ window.SBRender = (function () {
     // каждый кадр на телефонах заметно дорог (особенно эмодзи бота).
     var labels = {};
     var names = null; // карта id → ник из состава матча (match.start / match.roster)
+    var ranks = null; // карта id → роль модерации: ник рисуется её цветом
+    // Роли модерации в бою: на белом снегу цветной ник читается только с тёмной обводкой.
+    var RANK_COLORS = { creator: '#ffc94d', admin: '#b478ff' };
     function nickOf(p) { return (names && names[p.id]) || p.nick; }
+    function rankOf(p) { return (ranks && ranks[p.id]) || ''; }
     function labelOf(p, isMe, r) {
-      var base = nickOf(p);
-      var key = base + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r;
+      var base = nickOf(p), rank = rankOf(p);
+      var key = base + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r + '|' + rank;
       var l = labels[p.id];
       if (l && l.key === key) return l;
       var nick = base + (p.bot ? ' 🤖' : '');
@@ -115,7 +119,15 @@ window.SBRender = (function () {
       var top = r + 16, h = top + r + 16; // ник на базовой линии top-10, роль на top + 2r + 12
       oc.width = w; oc.height = h;
       c = oc.getContext('2d'); c.textAlign = 'center';
-      c.fillStyle = '#0b1622'; c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial'; c.fillText(nick, w / 2, top - 6);
+      c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
+      var rc = RANK_COLORS[rank];
+      if (rc) { // цветной ник по роли, с тёмной обводкой — иначе тонет в снегу
+        c.lineWidth = 2.5; c.strokeStyle = '#0b1622'; c.strokeText(nick, w / 2, top - 6);
+        c.fillStyle = rc;
+      } else {
+        c.fillStyle = '#0b1622';
+      }
+      c.fillText(nick, w / 2, top - 6);
       c.fillStyle = '#3c5a7c'; c.font = '9px Segoe UI, Arial'; c.fillText(p.role, w / 2, top + r + 12);
       l = labels[p.id] = { key: key, canvas: oc, w: w, top: top };
       return l;
@@ -382,13 +394,51 @@ window.SBRender = (function () {
       for (var j = 0; j < src.length; j++) if (src[j].hp == null) obs.push(src[j]); // неразрушимые — как есть
       if (snap.destr) for (var d = 0; d < snap.destr.length; d++) {
         var g = snap.destr[d];
-        if (g.hp > 0) obs.push({ type: g.type, x: g.x, y: g.y, w: g.w, h: g.h, r: g.r, height: 24 });
+        // height берём у самого препятствия арены по индексу g.i: у разрушаемых она разная
+        // (16..30), и подставленная «на глаз» врала бы про перелёт снежка над укрытием.
+        if (g.hp > 0) obs.push({ type: g.type, x: g.x, y: g.y, w: g.w, h: g.h, r: g.r, height: (src[g.i] && src[g.i].height) || 24 });
       }
       for (var i = 0; i < snap.walls.length; i++) {
         var w = snap.walls[i];
         obs.push({ type: 'rect', x: w.x, y: w.y, w: w.w, h: w.h, height: 20 });
       }
       return obs;
+    }
+
+    // Луч прицела: путь снежка считает симуляция (Sim.aimPath), поэтому конец луча — настоящее
+    // место падения, с учётом пассива Снайпера и заряженного выстрела. Насыщенным рисуются
+    // участки, где снежок идёт у земли и может задеть бойца, полупрозрачным — где он высоко или
+    // уже сбит преградой. Буфер переиспользуется: луч рисуется каждый кадр замаха, и свежий
+    // массив точек давал GC-паузы на телефонах.
+    var AIM_BLUE = 'rgba(74,168,255,0.95)';      // долетит
+    var AIM_BLUE_DIM = 'rgba(74,168,255,0.30)';  // высоко над землёй или уже после преграды
+    var AIM_RED = 'rgba(255,80,80,0.9)';         // упрётся в препятствие
+    var AIM_RED_DIM = 'rgba(255,80,80,0.32)';
+    var aimBuf = {};
+    function drawAim(snap, p, aimX, aimY, power) {
+      var path = Sim.aimPath(obstaclesOf(snap), p, aimX, aimY, power, aimBuf);
+      var col = path.blocked ? AIM_RED : AIM_BLUE;
+      // Два stroke на кадр: сперва тусклый слой, потом насыщенный поверх него.
+      ctx.lineWidth = 2; ctx.strokeStyle = path.blocked ? AIM_RED_DIM : AIM_BLUE_DIM;
+      strokeAimRun(path, false);
+      ctx.lineWidth = 3; ctx.strokeStyle = col;
+      strokeAimRun(path, true);
+      ctx.strokeStyle = col; ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(path.endX, path.endY, path.blocked ? 6 : 12, 0, Math.PI * 2);
+      ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.beginPath(); ctx.arc(path.endX, path.endY, 2.5, 0, Math.PI * 2); ctx.fill();
+    }
+    /** Одним stroke обвести все отрезки пути, попадающие (want=true) или нет. */
+    function strokeAimRun(path, want) {
+      ctx.beginPath();
+      var open = false;
+      for (var i = 1; i < path.n; i++) {
+        var a = path.pts[i - 1], b = path.pts[i];
+        if ((a.hit && b.hit) !== want) { open = false; continue; }
+        if (!open) { ctx.moveTo(a.x, a.y); open = true; }
+        ctx.lineTo(b.x, b.y);
+      }
+      ctx.stroke();
     }
 
     function drawCharacter(snap, p, isMe, local) {
@@ -497,18 +547,7 @@ window.SBRender = (function () {
       ctx.restore();
 
       if (charging) {
-        if (isMe) {
-          // Луч только у себя: длина равна дальности полёта (140 + power·380), конец — место падения
-          // снежка; красный, если по дороге снежок упрётся в препятствие или стену.
-          var adx = aimX - p.x, ady = aimY - p.y, ad = Math.hypot(adx, ady) || 1;
-          var range = 140 + power * 380, ex = p.x + adx / ad * range, ey = p.y + ady / ad * range;
-          var blocked = !Sim.canHitTarget(obstaclesOf(snap), p, ex, ey, power);
-          var col = blocked ? 'rgba(255,80,80,0.9)' : 'rgba(255,224,102,0.9)'; // красный — не долетит, жёлтый — долетит
-          ctx.strokeStyle = col; ctx.fillStyle = col;
-          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey); ctx.lineWidth = 2; ctx.stroke();
-          ctx.beginPath(); ctx.arc(ex, ey, 12, 0, Math.PI * 2); ctx.lineWidth = 1.5; ctx.stroke();
-          ctx.beginPath(); ctx.arc(ex, ey, 2.5, 0, Math.PI * 2); ctx.fill();
-        }
+        if (isMe) drawAim(snap, p, aimX, aimY, power);
         var bw = 40;
         ctx.fillStyle = '#0b1622'; ctx.fillRect(p.x - bw / 2, p.y - r - 20, bw, 6);
         ctx.fillStyle = p.special ? '#b478ff' : (power > 0.7 ? '#ff5b5b' : '#ffd166');
@@ -560,8 +599,9 @@ window.SBRender = (function () {
      * snap — снапшот sim.js (возможно интерполированный), meId — свой боец,
      * local — локальное состояние замаха {charging, power, aimX, aimY} для мгновенного отклика.
      */
-    function frame(snap, meId, local, nameMap) {
+    function frame(snap, meId, local, nameMap, rankMap) {
       names = nameMap || null;
+      ranks = rankMap || null;
       var now = performance.now();
       var dt = Math.min((now - lastFrame) / 1000, 0.05);
       lastFrame = now;
@@ -610,7 +650,8 @@ window.SBRender = (function () {
 
     function reset() { particles = []; explosions = []; trails = {}; labels = {}; shake.until = 0; marks = []; }
 
-    return { frame: frame, handleEvents: handleEvents, reset: reset, setMarks: setMarks, obstaclesOf: obstaclesOf };
+    return { frame: frame, handleEvents: handleEvents, reset: reset, setMarks: setMarks,
+      obstaclesOf: obstaclesOf };
   }
 
   /**

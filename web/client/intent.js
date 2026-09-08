@@ -20,6 +20,8 @@ window.SBIntent = (function () {
  *  o.onThrow(power), o.onSpecial() — хуки состоявшегося действия: события applyInput до клиента
  *    не доходят (step обнуляет state.events), поэтому обучение считает шаги по ним
    *  o.blocked()     → true, пока команды принимать нельзя (отсчёт перед стартом)
+   *  o.holding()     → зажата ли кнопка (стик) замаха прямо сейчас; без неё отложенный
+   *    перезарядкой замах начинался бы сам при уже отпущенной кнопке
    * Возвращает api; api.local — {charging, power, aimX, aimY, pending} для мгновенного отклика
    * в рендере. pending — нажатие во время перезарядки: замах начнётся сам, как только она пройдёт.
    */
@@ -146,6 +148,7 @@ window.SBIntent = (function () {
         var p = me();
         if (pending) {
           if (!p || !o.canAct(p) || blocked()) clearPending();
+          else if (o.holding && !o.holding()) clearPending(); // кнопку уже отпустили — замаха не будет
           else if (!(p.rl > 0)) { // перезарядка закончилась — начинаем отложенный замах
             var pt = pending.dir ? aimPoint(lastAimDir, p) : { x: pending.x, y: pending.y };
             clearPending();

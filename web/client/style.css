@@ -82,28 +82,48 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .roomMeta { grid-area: meta; color: #a9c2e0; font-size: 12px; }
 .roomAct { grid-area: act; }
 .roomAct .menuBtn { width: auto; min-width: 0; padding: 8px 14px; font-size: 13px; }
+/* Карточка обучения: та же раскладка, что у строки комнаты, — подхватывает и мобильные правила. */
+.tutCard { border: 1px solid #3a5a80; border-radius: 8px; padding: 10px 12px; background: #16283f;
+  display: grid; grid-template-columns: 1fr auto; grid-template-areas: "main act" "meta act";
+  gap: 2px 12px; align-items: center; }
+.tutCard.done { border-color: #2f6b4a; }
+.tutCard .tutTitle { grid-area: main; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font: 600 15px 'Segoe UI', Arial, sans-serif; color: #eaf2ff; }
+.tutCard .tutAbout { grid-area: meta; color: #a9c2e0; font-size: 12px; }
+.tutCard .tutAct { grid-area: act; }
+.tutCard .tutAct .menuBtn { width: auto; min-width: 0; padding: 8px 14px; font-size: 13px; margin: 0; }
+.tutProgress { color: #a9c2e0; font-size: 13px; }
 .roomCode { font: 700 16px 'Segoe UI', Arial, sans-serif; color: #eaf2ff; letter-spacing: 1px; }
 .roomGame { color: #cfe0f5; font-size: 13px; }
 .status { font-size: 11px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
 .status.wait { color: #0d2418; background: #7CFFB2; }
 .status.live { color: #2a0d10; background: #ff8080; }
 /* вход по коду: карточка с четырьмя клетками под цифры */
-.codeCard {
-  background: #16283f; border: 1px solid #3a5a80; border-radius: 12px; padding: 14px 18px;
-  display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; max-width: 360px;
-  box-sizing: border-box; box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+/* Шапка списка комнат: код друга слева, «Создать комнату» справа. Форма кода в карточке и
+   широкий зазор между ними — иначе кнопка читалась как часть формы. Акцент остаётся на списке. */
+.roomsTools {
+  display: grid; grid-template-columns: 1fr auto; gap: 28px; align-items: center;
+  width: 100%; max-width: 720px; margin: 4px 0 10px;
 }
-.codeTitle { font: 700 16px 'Segoe UI', Arial, sans-serif; color: #eaf2ff; }
-.codeHint { font-size: 12px; color: #a9c2e0; text-align: center; line-height: 1.35; }
-.codeCells { display: flex; gap: 10px; }
+.codeMini {
+  display: flex; align-items: center; gap: 10px; justify-self: start;
+  background: #16283f; border: 1px solid #3a5a80; border-radius: 10px; padding: 8px 12px;
+}
+.codeMini .codeLabel { font-size: 13px; color: #a9c2e0; white-space: nowrap; }
+.codeCells { display: flex; gap: 8px; }
 .codeCell {
-  width: 48px; height: 58px; text-align: center; background: #0e1a2b; color: #eaf2ff;
-  border: 2px solid #3a5a80; border-radius: 10px; caret-color: #4aa8ff;
-  font: 700 26px 'Segoe UI', Consolas, monospace; padding: 0;
+  width: 38px; height: 46px; text-align: center; background: #0e1a2b; color: #eaf2ff;
+  border: 2px solid #3a5a80; border-radius: 8px; caret-color: #4aa8ff;
+  font: 700 20px 'Segoe UI', Consolas, monospace; padding: 0;
 }
 .codeCell:focus { outline: none; border-color: #4aa8ff; background: #12233a; box-shadow: 0 0 0 3px rgba(74,168,255,0.18); }
 .codeCell.filled { border-color: #4aa8ff; }
-.codeCard .menuBtn { width: 100%; }
+.roomsTools .menuBtn { width: auto; padding: 9px 16px; margin: 0; }
+@media (max-width: 560px) {
+  .roomsTools { grid-template-columns: 1fr; gap: 16px; }
+  .codeMini { justify-self: stretch; justify-content: center; }
+  .roomsTools .menuBtn { width: 100%; }
+}
 .badge { background: #ffd166; color: #2a1e00; font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 6px; margin-left: 8px; vertical-align: middle; }
 
 /* лобби во время матча: сводка боя над кнопками */
@@ -240,7 +260,7 @@ canvas {
 
 /* сенсорный режим: игровой экран во весь вьюпорт, HUD поверх полей, меню под палец */
 html.touch .menuBtn, html.touch .modeCard, html.touch .heroCard, html.touch .mapCard, html.touch .slot,
-html.touch .roomRow .menuBtn, html.touch #readyBtn, html.touch .tutRow .menuBtn,
+html.touch .roomRow .menuBtn, html.touch #readyBtn, html.touch .tutRow .menuBtn, html.touch .tutCard .menuBtn,
 html.touch .codeCell, html.touch .slot .takeSlot { min-height: 44px; }
 html.touch canvas { cursor: default; }
 html.touch .heroCard:not(.selected):hover, html.touch .mapCard:not(.selected):hover, html.touch .modeCard:not(.selected):hover { border-color: #3a5a80; background: #16283f; }
@@ -282,8 +302,8 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   html.touch h1.title { display: none; }
   html.touch #app { padding: 8px 12px; }
   html.touch .panel { gap: 8px; }
-  .roomRow { grid-template-columns: 1fr; grid-template-areas: "main" "meta" "act"; gap: 6px; }
-  .roomAct .menuBtn { width: 100%; }
+  .roomRow, .tutCard { grid-template-columns: 1fr; grid-template-areas: "main" "meta" "act"; gap: 6px; }
+  .roomAct .menuBtn, .tutCard .tutAct .menuBtn { width: 100%; }
   html.touch .subtitle { font-size: 12px; }
   html.touch .menuBtn { padding: 10px; font-size: 15px; }
   html.touch .cardGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -302,7 +322,11 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   #bottomRow { flex-wrap: wrap; gap: 8px; }
 }
 #soundToggle { position:absolute; top:10px; right:10px; background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; z-index:5; }
-#connState { position:absolute; top:14px; left:14px; font-size: 14px; color: #6f89a8; z-index: 5; }
+#connState { position:absolute; top:14px; left:14px; font-size: 14px; color: #6f89a8; z-index: 5;
+             display: flex; align-items: baseline; gap: 6px; }
+/* Задержка рядом с точкой: цвет не зависит от состояния соединения, красный — только про лаг. */
+#connPing { font-size: 12px; color: #a9c2e0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#connPing.bad { color: #ff6b6b; font-weight: 600; }
 #connState.on { color: #7CFFB2; }
 #connState.off { color: #ff5b5b; }
 #drainBanner { background: #3a2f10; border: 1px solid #ffd166; color: #ffd166; border-radius: 8px; padding: 8px 14px; font-size: 13px; margin-bottom: 12px; text-align: center; }
@@ -386,6 +410,15 @@ html.touch.ingame #rotateGate .rotIcon { font-size: 48px; margin-bottom: 14px; a
 .chatRow .chatT { color: #4b6a8a; font-size: 11px; }
 .chatRow .chatN { color: #7fd4ff; }
 .chatRow.mine .chatN { color: #7CFFB2; }
+/* Роли модерации: создатель — золотой, админ — фиолетовый. Цвет только у ника. */
+.rank-creator { color: #ffc94d !important; text-shadow: 0 0 6px rgba(255,201,77,0.35); }
+.rank-admin { color: #b478ff !important; }
+.chatDel {
+  background: none; border: none; color: #4b6a8a; cursor: pointer; font-size: 12px;
+  padding: 0 4px; margin-left: 4px; line-height: 1;
+}
+.chatDel:hover { color: #ff8b8b; }
+html.touch .chatDel { min-width: 32px; min-height: 28px; }
 #chatInputRow { display: flex; gap: 6px; }
 #chatInput { flex: 1; background: #16283f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; padding: 8px 10px; font-size: 14px; }
 #chatSend { width: auto; padding: 8px 14px; }

@@ -18,7 +18,7 @@
 <body>
 <div id="app">
   <button id="soundToggle" title="Звук">🔊</button>
-  <div id="connState" title="Соединение с сервером">●</div>
+  <div id="connState" title="Соединение с сервером"><span>●</span><span id="connPing"></span></div>
   <h1 class="title">❄️ SNOWBRAWL</h1>
   <div id="drainBanner" hidden>⚠️ Сервер скоро перезапустится для обновления. Новые матчи не начинаются, текущие доигрываются.</div>
 
@@ -41,6 +41,8 @@
     <button class="menuBtn" id="btnPve">РЕЖИМ PVE</button>
     <button class="menuBtn ghost wide" id="btnTutorial">Обучение<span class="badge" id="tutorialBadge" hidden>новое</span></button>
     <button class="menuBtn ghost" id="btnSettings">Настройки</button>
+    <!-- Видна только «Создателю»: сервер пускает его в админку по адресу, без токена -->
+    <button class="menuBtn ghost" id="btnAdmin" hidden>Админка</button>
     <div id="chatPanel">
       <button id="chatToggle" type="button">Чат <span class="badge" id="chatUnread" hidden>0</span><span class="chevron">▾</span></button>
       <div id="chatBody" hidden>
@@ -54,15 +56,18 @@
     </div>
   </div>
 
-  <!-- Выбор класса перед обучением -->
-  <div id="screen-tutrole" class="panel" hidden>
-    <div class="subtitle">Каким классом пройти обучение?</div>
-    <div class="cardGrid" id="tutRoleGrid"></div>
-    <div class="heroInfo" id="tutRoleInfo" hidden></div>
-    <div class="navRow">
-      <button class="menuBtn ghost" id="tutRoleBack">Назад</button>
-      <button class="menuBtn primary" id="tutRoleStart">Начать обучение</button>
+  <!-- Список обучений: основы плюс по одному на героя -->
+  <div id="screen-tutlist" class="panel wide" hidden>
+    <div class="subtitle">Обучение <span class="tutProgress" id="tutProgress"></span></div>
+    <div class="slots" id="tutList"></div>
+    <!-- Выбор класса для «Основ» раскрывается внутри её карточки -->
+    <div id="tutBasicsPick" hidden>
+      <div class="subtitle">Каким классом пройти основы?</div>
+      <div class="cardGrid" id="tutRoleGrid"></div>
+      <div class="heroInfo" id="tutRoleInfo" hidden></div>
+      <div class="navRow"><button class="menuBtn primary" id="tutRoleStart">Начать основы</button></div>
     </div>
+    <div class="navRow"><button class="menuBtn ghost" id="tutRoleBack">Назад</button></div>
   </div>
 
   <!-- Настройки -->
@@ -74,14 +79,6 @@
         <select id="setTouch"><option value="auto">авто</option><option value="on">включено</option><option value="off">выключено</option></select></label>
     </div>
     <div class="navRow"><button class="menuBtn ghost" id="backFromSettings">Назад</button></div>
-  </div>
-
-  <!-- Раздел PVP или PVE -->
-  <div id="screen-hub" class="panel" hidden>
-    <div class="subtitle" id="hubHint"></div>
-    <button class="menuBtn primary" id="btnCreateRoom">СОЗДАТЬ КОМНАТУ</button>
-    <button class="menuBtn" id="btnJoinRoom">ВОЙТИ В КОМНАТУ</button>
-    <div class="navRow"><button class="menuBtn ghost" id="backFromHub">Назад</button></div>
   </div>
 
   <!-- Создание комнаты -->
@@ -104,20 +101,22 @@
   <!-- Список комнат -->
   <div id="screen-rooms" class="panel wide" hidden>
     <div class="subtitle" id="roomsHead">Комнаты</div>
-    <div class="slots" id="roomsList"></div>
-    <div class="stub-note" id="roomsMsg"></div>
-    <div class="segRow" id="roomsPager"></div>
-    <div class="codeCard">
-      <div class="codeTitle">Есть код от друга?</div>
-      <div class="codeCells" id="codeCells">
-        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="1-я цифра кода">
-        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="2-я цифра кода">
-        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="3-я цифра кода">
-        <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="4-я цифра кода">
+    <!-- Одна строка сверху: код друга и создание комнаты. Акцент — на списке ниже. -->
+    <div class="roomsTools" id="roomsTools">
+      <div class="codeMini">
+        <span class="codeLabel">Введи код комнаты</span>
+        <div class="codeCells" id="codeCells">
+          <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="1-я цифра кода">
+          <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="2-я цифра кода">
+          <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="3-я цифра кода">
+          <input class="codeCell" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" autocomplete="off" aria-label="4-я цифра кода">
+        </div>
       </div>
-      <div class="codeHint">Четыре цифры из его лобби — так попадают и в закрытые комнаты.</div>
-      <button class="menuBtn primary" id="btnJoinConfirm" disabled>Войти по коду</button>
+      <button class="menuBtn primary" id="btnCreateRoomTop">Создать комнату</button>
     </div>
+    <div class="stub-note" id="roomsMsg"></div>
+    <div class="slots" id="roomsList"></div>
+    <div class="segRow" id="roomsPager"></div>
     <div class="navRow"><button class="menuBtn ghost" id="backFromRooms">Назад</button></div>
   </div>
 
@@ -162,7 +161,7 @@
   <div id="screen-game" class="panel" hidden>
     <div id="topGameBar">
       <button id="btnToMenu">← Выйти</button>
-      <div id="hint" style="margin:0">WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.</div>
+      <div id="hint" style="margin:0">WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом или E — отмена. Q или ПКМ — способность.</div>
       <span id="netStat" title="Задержка сети" hidden></span>
       <div id="pveInfo" hidden></div>
       <div id="matchTimer">5:00</div>

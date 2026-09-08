@@ -46,3 +46,16 @@ func TestEncodeDecode(t *testing.T) {
 		t.Fatal("empty type must fail")
 	}
 }
+
+func TestNormalizeNickRejectsProfanity(t *testing.T) {
+	for _, bad := range []string{"хуй", "ХуЙ", "п1здец", "мудак"} {
+		if _, err := NormalizeNick(bad); err == nil {
+			t.Errorf("ник %q должен быть отклонён", bad)
+		}
+	}
+	for _, ok := range []string{"Аня", "Команда 1", "Хутор"} {
+		if _, err := NormalizeNick(ok); err != nil {
+			t.Errorf("ник %q должен приниматься: %v", ok, err)
+		}
+	}
+}

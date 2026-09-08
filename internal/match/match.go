@@ -186,7 +186,7 @@ func (m *Match) FreeSlot(team string, index int) bool {
 }
 
 // Replace сажает живого игрока за бойца слота (team, index).
-func (m *Match) Replace(team string, index int, playerID, nick string, conn session.Sender) error {
+func (m *Match) Replace(team string, index int, playerID, nick, rank string, conn session.Sender) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.done {
@@ -221,6 +221,7 @@ func (m *Match) Replace(team string, index int, playerID, nick string, conn sess
 	m.humans[playerID] = h
 	m.setBot(h, false)
 	m.Players[idx].Nick = nick
+	m.Players[idx].Rank = rank // роль модерации: цвет ника в бою
 	m.Players[idx].Bot = false
 	m.broadcast(m.rosterMessage())
 	return nil
@@ -368,14 +369,17 @@ func (m *Match) Stop(reason string) {
 
 // Info — сводка для админки.
 type Info struct {
-	ID       string       `json:"id"`
-	RoomCode string       `json:"roomCode,omitempty"`
-	Mode     int          `json:"mode"`
-	Arena    int          `json:"arena"`
-	Tick     int          `json:"tick"`
-	Humans   int          `json:"humans"`
-	Online   int          `json:"online"`
-	Created  time.Time    `json:"created"`
+	ID       string    `json:"id"`
+	RoomCode string    `json:"roomCode,omitempty"`
+	Mode     int       `json:"mode"`
+	Arena    int       `json:"arena"`
+	Tick     int       `json:"tick"`
+	Humans   int       `json:"humans"`
+	Online   int       `json:"online"`
+	Created  time.Time `json:"created"`
+	// StartsAt — конец отсчёта: до него симуляция стоит. Админке нужно, чтобы отличить
+	// «идёт отсчёт» от «идёт бой» и показать честную длительность боя.
+	StartsAt time.Time    `json:"startsAt"`
 	Players  []PlayerInfo `json:"players"`
 }
 
@@ -395,7 +399,8 @@ type PlayerInfo struct {
 func (m *Match) Info() Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	info := Info{ID: m.ID, RoomCode: m.RoomCode, Mode: m.Mode, Arena: m.Arena, Tick: m.tick, Created: m.Created}
+	info := Info{ID: m.ID, RoomCode: m.RoomCode, Mode: m.Mode, Arena: m.Arena, Tick: m.tick,
+		Created: m.Created, StartsAt: m.StartsAt}
 	for _, p := range m.Players {
 		pi := PlayerInfo{ID: p.ID, Nick: p.Nick, Team: p.Team, Role: p.Role, Bot: p.Bot}
 		if h := m.humanBySim(p.ID); h != nil {

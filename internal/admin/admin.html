@@ -19,6 +19,14 @@ tr.off td { opacity: .5 }
 .bar { display: flex; align-items: center; gap: 10px; margin: 12px 0; font-size: 12px; color: #86a0bd }
 button { background: #274363; border: none; color: #eaf2ff; padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer }
 .team-A { color: #7cc4ff } .team-B { color: #ffb37c }
+.rank-creator { color: #ffc94d; font-weight: 600 }
+.rank-admin { color: #b478ff; font-weight: 600 }
+.act { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
+.act select { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 12px; padding: 3px 6px }
+input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 13px; padding: 5px 8px }
+.danger { background: #6b2230 }
+.tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 }
+.warn { display: block; margin: 10px 0; padding: 10px 12px; border-radius: 8px; background: #4a1f26; color: #ff9aa6; font-size: 13px }
 .ip { color: #86a0bd; font-variant-numeric: tabular-nums }
 .err { color: #ff8b8b }
 @media (max-width: 700px) {
@@ -35,15 +43,30 @@ button { background: #274363; border: none; color: #eaf2ff; padding: 5px 12px; b
 <h1>❄️ SnowBrawl — админка</h1>
 <div id="sum"></div>
 <div id="drain"></div>
-<div class="bar"><span id="fresh">загрузка…</span><button id="pause">Пауза</button></div>
+<div id="modbroken"></div>
+<div class="bar"><span id="conn">подключаемся…</span><button id="pause">Пауза</button></div>
 
 <h3>Игроки</h3><div id="sessions"></div>
 <h3>Матчи</h3><div id="matches"></div>
 <h3>Комнаты</h3><div id="rooms"></div>
+<h3>Роли по IP</h3><div id="ranks"></div>
+<div class="tools">
+  <input type="text" id="rankIp" placeholder="IP адрес" size="16">
+  <select id="rankVal"><option value="admin">Админ</option><option value="creator">Создатель</option><option value="">Игрок (снять)</option></select>
+  <button id="rankSet">Выдать роль</button>
+</div>
+<h3>Баны по IP</h3><div id="bans"></div>
+<div class="tools">
+  <input type="text" id="banIp" placeholder="IP адрес" size="16">
+  <input type="text" id="banReason" placeholder="причина (необязательно)" size="24">
+  <button id="banSet" class="danger">Забанить</button>
+</div>
+<h3>Чат</h3>
+<div class="tools"><span id="chatSize" class="empty"></span><button id="chatClear" class="danger">Очистить чат</button></div>
 
 <script>
 const token = new URLSearchParams(location.search).get('token') || '';
-let paused = false, lastAt = 0;
+let paused = false, es = null, last = null;
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const secs = ms => {
@@ -53,6 +76,10 @@ const secs = ms => {
   return m < 60 ? m + ' мин' : Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
 };
 const mode = n => n + '×' + n;
+const when = t => t ? new Date(t).toLocaleString('ru-RU') : '—';
+const RANKS = { creator: 'Создатель', admin: 'Админ' };
+// Ник цветом роли — как в игре: создатель золотой, админ фиолетовый.
+const nickHtml = p => p.rank ? '<span class="rank-' + p.rank + '">' + esc(p.nick) + '</span>' : esc(p.nick);
 
 // Таблица или строка «сейчас никого», если данных нет.
 function table(id, head, rows, empty) {
@@ -64,12 +91,12 @@ function table(id, head, rows, empty) {
     '</tbody></table>';
 }
 
-function place(p) {
+function place(p, now) {
   // Тренировка идёт в браузере игрока: сервер знает о ней со слов клиента и держит его в меню.
   if (p.training) {
     return 'тренировка с ботами ' + mode(p.trainingMode) +
       (p.trainingRole ? ', ' + esc(p.trainingRole) : '') + ', арена ' + (p.trainingArena || 0) +
-      ' (' + secs(p.trainingMs || 0) + ')';
+      ' (' + secs(now - new Date(p.trainingSince).getTime()) + ')';
   }
   if (p.place === 'menu') return 'в меню';
   if (p.place === 'room') return 'в комнате ' + esc(p.where);
@@ -90,18 +117,40 @@ function roster(players) {
   return '<span class="team-A">' + side('A') + '</span> против <span class="team-B">' + side('B') + '</span>';
 }
 
-async function load() {
-  let s;
-  try {
-    const r = await fetch('/admin/state?token=' + encodeURIComponent(token));
-    if (!r.ok) { document.getElementById('sum').innerHTML = '<span class="err">Ошибка ' + r.status + '</span>'; return; }
-    s = await r.json();
-  } catch (e) {
-    document.getElementById('sum').innerHTML = '<span class="err">Сервер не отвечает</span>';
-    return;
-  }
-  lastAt = Date.now();
+// Действия модерации: файл ролей и банов правит сервер, страница только вызывает ручки.
+async function post(path, body, method) {
+  const r = await fetch('/admin' + path + (path.indexOf('?') < 0 ? '?' : '&') + 'token=' + encodeURIComponent(token), {
+    method: method || 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : null,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Ошибка: ' + (data.error || r.status)); return null; }
+  return data;
+}
+function nicksAt(ip) {
+  return ((last && last.sessions) || []).filter(p => p.ip === ip).map(p => p.nick);
+}
+async function setRank(ip, rank) {
+  const who = nicksAt(ip);
+  const what = rank ? 'выдать роль «' + RANKS[rank] + '»' : 'снять роль';
+  if (!confirm('Адрес ' + ip + (who.length ? ' (сейчас: ' + who.join(', ') + ')' : '') + '\n' + what + '?')) return;
+  await post('/rank', { ip: ip, rank: rank });
+}
+async function ban(ip, reason) {
+  const who = nicksAt(ip);
+  // За одним адресом может сидеть несколько человек (NAT) — показываем всех, кого затронет.
+  if (!confirm('Забанить адрес ' + ip + '?' + (who.length ? '\nСейчас с него играют: ' + who.join(', ') : ''))) return;
+  const res = await post('/ban', { ip: ip, reason: reason || '' });
+  if (res) alert('Забанено. Выкинуто сессий: ' + res.kicked);
+}
+async function unban(ip) {
+  if (!confirm('Разбанить адрес ' + ip + '?')) return;
+  await post('/ban?ip=' + encodeURIComponent(ip), null, 'DELETE');
+}
 
+function render(s) {
+  last = s;
   document.getElementById('sum').innerHTML =
     '<span class="pill">build ' + esc(s.build) + '</span>' +
     '<span class="pill">sim ' + esc(s.sim) + '</span>' +
@@ -114,19 +163,36 @@ async function load() {
     ? '<div class="drain">Идёт выкладка новой версии (с ' + new Date(s.drainSince).toLocaleTimeString() +
       '). Новые матчи не начинаются, текущие доигрываются. Снимется само после перезапуска сервера.</div>'
     : '';
+  document.getElementById('modbroken').innerHTML = s.modBroken
+    ? '<div class="warn">Файл ролей и банов при старте был повреждён: он отложен рядом с суффиксом .bad, ' +
+      'роли и баны сброшены. Выдайте их заново.</div>'
+    : '';
 
-  table('sessions', ['ник', 'где', 'связь', 'в игре', 'IP', 'id'],
+  const now = new Date(s.now).getTime();
+  table('sessions', ['ник', 'роль', 'где', 'связь', 'зашёл', 'в игре', 'IP', 'действия'],
     (s.sessions || []).map(p => ({
       off: !p.online,
-      cells: [esc(p.nick), place(p),
-        p.online ? 'онлайн' : 'нет связи ' + secs(p.offlineForMs || 0),
-        secs(p.ageMs), '<span class="ip">' + esc(p.ip) + '</span>', esc(p.id)],
+      cells: [nickHtml(p), (RANKS[p.rank] || 'Игрок') + (p.banned ? ' 🚫' : ''), place(p, now),
+        p.online ? 'онлайн' : 'нет связи ' + secs(now - new Date(p.offlineSince).getTime()),
+        when(p.since), secs(now - new Date(p.since).getTime()),
+        '<span class="ip">' + esc(p.ip) + '</span>',
+        '<div class="act"><select data-ip="' + esc(p.ip) + '" class="rankPick">' +
+          ['', 'admin', 'creator'].map(v => '<option value="' + v + '"' + (v === (p.rank || '') ? ' selected' : '') + '>' +
+            (RANKS[v] || 'Игрок') + '</option>').join('') + '</select>' +
+          (p.banned
+            ? '<button class="unbanBtn" data-ip="' + esc(p.ip) + '">Разбанить</button>'
+            : '<button class="banBtn danger" data-ip="' + esc(p.ip) + '">Бан</button>') + '</div>'],
     })), 'Сейчас никого нет.');
 
-  table('matches', ['состав', 'режим', 'арена', 'людей', 'на связи', 'тик', 'комната', 'начат'],
+  table('matches', ['состав', 'режим', 'арена', 'людей', 'на связи', 'начат', 'длительность', 'комната'],
     (s.matches || []).map(m => ({
-      cells: [roster(m.players), mode(m.mode), m.arena, m.humans, m.online, m.tick,
-        m.roomCode || '—', new Date(m.created).toLocaleTimeString()],
+      cells: [roster(m.players), mode(m.mode), m.arena, m.humans, m.online,
+        new Date(m.created).toLocaleTimeString(),
+        // До конца отсчёта боя ещё нет: показываем это отдельно, иначе длительность врёт.
+        now < new Date(m.startsAt).getTime()
+          ? 'отсчёт'
+          : secs(now - new Date(m.startsAt).getTime()),
+        m.roomCode || '—'],
     })), 'Матчей нет.');
 
   table('rooms', ['код', 'участники', 'игра', 'режим', 'арена', 'доступ', 'в матче'],
@@ -138,21 +204,61 @@ async function load() {
         r.visibility === 'closed' ? '🔒 закрытая' : 'открытая',
         r.inMatch ? 'да' : 'нет'],
     })), 'Комнат нет.');
+
+  table('ranks', ['IP', 'роль', 'ник при выдаче', 'выдана', 'действия'],
+    (s.ranks || []).map(e => ({
+      cells: ['<span class="ip">' + esc(e.ip) + '</span>', RANKS[e.rank] || esc(e.rank),
+        esc(e.nick || '—'), when(e.since),
+        '<div class="act"><button class="rankOff" data-ip="' + esc(e.ip) + '">Снять</button></div>'],
+    })), 'Роли никому не выданы.');
+
+  table('bans', ['IP', 'ник при бане', 'причина', 'когда', 'действия'],
+    (s.bans || []).map(b => ({
+      cells: ['<span class="ip">' + esc(b.ip) + '</span>', esc(b.nick || '—'), esc(b.reason || '—'), when(b.at),
+        '<div class="act"><button class="unbanBtn" data-ip="' + esc(b.ip) + '">Разбанить</button></div>'],
+    })), 'Банов нет.');
+
+  document.getElementById('chatSize').textContent = 'сообщений в чате: ' + (s.chatSize || 0);
+
+  // Обработчики навешиваем после перерисовки: таблицы собираются целиком заново.
+  document.querySelectorAll('.rankPick').forEach(el => { el.onchange = () => setRank(el.dataset.ip, el.value); });
+  document.querySelectorAll('.rankOff').forEach(el => { el.onclick = () => setRank(el.dataset.ip, ''); });
+  document.querySelectorAll('.banBtn').forEach(el => { el.onclick = () => ban(el.dataset.ip, ''); });
+  document.querySelectorAll('.unbanBtn').forEach(el => { el.onclick = () => unban(el.dataset.ip); });
 }
+
+// Состояние приходит потоком: сервер шлёт сводку сразу, как она изменилась. Опроса нет,
+// поэтому и надписи «обновлено N с назад» нет — данные всегда свежие. Переподключение
+// EventSource делает сам.
+function connect() {
+  es = new EventSource('/admin/stream?token=' + encodeURIComponent(token));
+  es.onopen = () => { document.getElementById('conn').textContent = 'связь есть, состояние приходит сразу'; };
+  es.onmessage = e => { try { render(JSON.parse(e.data)); } catch (err) { /* игнор битого кадра */ } };
+  es.onerror = () => { document.getElementById('conn').innerHTML = '<span class="err">нет связи с сервером</span>'; };
+}
+function disconnect() { if (es) { es.close(); es = null; } }
 
 document.getElementById('pause').onclick = function () {
   paused = !paused;
   this.textContent = paused ? 'Продолжить' : 'Пауза';
-  if (!paused) load();
+  if (paused) { disconnect(); document.getElementById('conn').textContent = 'обновление на паузе'; }
+  else connect();
+};
+document.getElementById('rankSet').onclick = () => {
+  const ip = document.getElementById('rankIp').value.trim();
+  if (ip) setRank(ip, document.getElementById('rankVal').value);
+};
+document.getElementById('banSet').onclick = () => {
+  const ip = document.getElementById('banIp').value.trim();
+  if (ip) ban(ip, document.getElementById('banReason').value.trim());
+};
+document.getElementById('chatClear').onclick = async () => {
+  if (!confirm('Удалить все сообщения общего чата у всех игроков?')) return;
+  const res = await post('/chat/clear');
+  if (res) alert('Удалено сообщений: ' + res.cleared);
 };
 
-setInterval(function () {
-  const el = document.getElementById('fresh');
-  if (paused) { el.textContent = 'обновление на паузе'; return; }
-  el.textContent = lastAt ? 'обновлено ' + Math.round((Date.now() - lastAt) / 1000) + ' с назад' : 'загрузка…';
-}, 500);
-setInterval(function () { if (!paused) load(); }, 2000);
-load();
+connect();
 </script>
 </body>
 </html>
