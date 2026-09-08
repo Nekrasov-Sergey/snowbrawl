@@ -10,7 +10,7 @@
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { /* игнор */ } }
   };
 
-  var SCREENS = ['nick', 'menu', 'hub', 'createroom', 'rooms', 'lobby', 'game', 'settings'];
+  var SCREENS = ['nick', 'menu', 'hub', 'createroom', 'rooms', 'lobby', 'game', 'settings', 'tutrole'];
   var app = {
     screen: 'nick',
     nav: [],                  // стек экранов для кнопки «Назад»
@@ -25,6 +25,8 @@
     // Список комнат: страница приходит пушем от сервера.
     rooms: { page: 0, data: null },
     roomMatch: null,          // последнее room.match — состояние идущего матча для лобби
+    chat: { msgs: [], unread: 0, open: false }, // общий чат меню
+    tut: { role: store.get('sb.tutRole') || 'Раннер' }, // выбранный класс для обучения
     offline: { mode: 1, role: 'Раннер', arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true },
     room: null,               // последнее room.state
     game: null                // активный матч (см. startNetMatch / startOfflineMatch)
@@ -45,13 +47,14 @@
     if (name === 'hub') renderHub();
     if (name === 'createroom') buildCreateScreen();
     if (name === 'rooms') openRooms();
+    if (name === 'tutrole') buildTutRoleGrid();
     if (name === 'menu') { $('menuNick').textContent = app.nick; renderOnline(); renderTutorialBadge(); }
     if (name === 'settings') renderSettings();
     if (name !== 'game' && app.game) stopGame();
     document.documentElement.classList.toggle('ingame', name === 'game');
   }
   // Экраны, на которые имеет смысл возвращаться кнопкой «Назад».
-  var CAN_RETURN = { menu: 1, hub: 1, createroom: 1, rooms: 1, settings: 1 };
+  var CAN_RETURN = { menu: 1, hub: 1, createroom: 1, rooms: 1, settings: 1, tutrole: 1 };
   function goBack() {
     Audio_.uiClick();
     var to = app.nav.pop() || 'menu';
@@ -85,6 +88,7 @@
     server_full: 'Сервер переполнен, попробуйте позже.',
     bad_version: 'Версия игры устарела, обновите страницу.',
     not_allowed: 'Действие недоступно.',
+    chat_flood: 'Не так быстро — подождите пару секунд.',
     kicked: 'Вас выгнали из комнаты.'
   };
   function fmtTime(ms) { var s = Math.ceil(ms / 1000); return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); }
@@ -193,6 +197,12 @@
       case 'match.end':
         if (app.game && !app.game.offline) app.game.onEnd(d);
         break;
+      case 'chat.history':
+        chatSetHistory(d.messages || []);
+        break;
+      case 'chat.msg':
+        chatAdd(d);
+        break;
       default: break;
     }
   }
@@ -214,7 +224,7 @@
 
   $('btnPvp').onclick = function () { Audio_.uiClick(); app.section = 'pvp'; goto('hub'); };
   $('btnPve').onclick = function () { Audio_.uiClick(); app.section = 'pve'; goto('hub'); };
-  $('btnTutorial').onclick = function () { Audio_.uiClick(); startTutorial(); };
+  $('btnTutorial').onclick = function () { Audio_.uiClick(); goto('tutrole'); };
   $('btnSettings').onclick = function () { Audio_.uiClick(); goto('settings'); };
 
   // ------------------------------------------------------------
@@ -933,12 +943,14 @@
       ? 'Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.'
       : 'WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом — отмена. Q или ПКМ — способность.';
     $('netStat').hidden = !!g.offline; $('netStat').textContent = ''; $('netStat').className = '';
+    $('tutFlash').hidden = true;
     // В матче комнаты «Выйти» ведёт в лобби, а не в меню; в обучении таймера нет — бой не кончается.
     $('btnToMenu').textContent = (!g.offline && g.roomCode) ? '← В лобби' : '← Выйти';
     $('matchTimer').hidden = !!g.tutorial;
     $('tutorialBox').hidden = !g.tutorial;
     var pve = g.gameMode && g.gameMode !== 'pvp';
     $('pveInfo').hidden = !pve;
+    $('hint').hidden = pve && !g.offline; // в сетевом PvE пинг и инфо волн делят панель — подсказку убираем
     if (pve) {
       $('teamALabel').textContent = 'Команда';
       $('teamBLabel').textContent = 'Волна';
@@ -1074,7 +1086,7 @@
     var g = {
       offline: true, tutorial: !!opts.tutorial, meId: drv.meId, players: drv.players, names: nameMap(drv.players), myTeam: 'A',
       roomCode: '', over: false, countdown: 0,
-      spawnEnemy: drv.spawnEnemy, removeEnemy: drv.removeEnemy, setBot: drv.setBot,
+      spawnEnemy: drv.spawnEnemy, removeEnemy: drv.removeEnemy, setBot: drv.setBot, tutorialLock: drv.tutorialLock,
       gameMode: drv.gameMode || 'pvp',
       input: function (kind, x, y, power) { if (!g.over) drv.input(kind, x, y, power); },
       frame: function () {
@@ -1098,10 +1110,11 @@
   // Обучение (см. client/tutorial.js): оффлайн-бой 1×1 с пошаговыми задачами
   // ------------------------------------------------------------
   var tutorial = window.SBTutorial.create({
-    box: $('tutorialBox'), stepEl: $('tutStep'),
+    box: $('tutorialBox'), stepEl: $('tutStep'), flash: tutFlash,
     start: function (hooks) {
       var saved = app.offline;
-      app.offline = { mode: 1, role: 'Раннер', arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true };
+      var role = Sim.ROLE_STATS[app.tut.role] ? app.tut.role : 'Раннер';
+      app.offline = { mode: 1, role: role, arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true };
       var g = startOfflineMatch({ tutorial: true, onFrame: hooks.onFrame, onStop: hooks.onStop });
       app.offline = saved;
       return g;
@@ -1116,6 +1129,85 @@
   function stopTutorial() { tutorial.stop(); }
   function tutorialSkipStep() { tutorial.skip(); }
   function renderTutorialBadge() { $('tutorialBadge').hidden = store.get('sb.tutorialDone') === '1'; }
+
+  // Короткая плашка поверх арены (в обучении вместо нижнего тоста, чтобы не улетала за край).
+  var tutFlashTimer = null;
+  function tutFlash(msg) {
+    var el = $('tutFlash'); if (!el) { toast(msg); return; }
+    el.textContent = msg; el.hidden = false;
+    clearTimeout(tutFlashTimer);
+    tutFlashTimer = setTimeout(function () { el.hidden = true; }, 1400);
+  }
+
+  // Выбор класса перед обучением (раньше был жёстко «Раннер»).
+  function buildTutRoleGrid() {
+    var grid = $('tutRoleGrid'); grid.innerHTML = '';
+    Sim.ALL_ROLES.forEach(function (role) {
+      grid.appendChild(heroCard(role, app.tut.role === role, function () {
+        Audio_.uiClick(); app.tut.role = role; store.set('sb.tutRole', role); buildTutRoleGrid();
+      }, $('tutRoleInfo')));
+    });
+  }
+  $('tutRoleBack').onclick = goBack;
+  $('tutRoleStart').onclick = function () { Audio_.uiClick(); startTutorial(); };
+
+  // ------------------------------------------------------------
+  // Общий чат главного меню
+  // ------------------------------------------------------------
+  var CHAT_KEEP = 200;
+  function chatTime(ts) {
+    var d = new Date(ts || Date.now());
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+  function chatRowHtml(m) {
+    var mine = m.nick === app.nick;
+    return '<div class="chatRow' + (mine ? ' mine' : '') + '">' +
+      '<span class="chatT">' + chatTime(m.ts) + '</span> ' +
+      '<b class="chatN">' + escapeHtml(m.nick) + '</b>: ' +
+      '<span class="chatX">' + escapeHtml(m.text) + '</span></div>';
+  }
+  function chatRender() {
+    var log = $('chatLog'); if (!log) return;
+    log.innerHTML = app.chat.msgs.map(chatRowHtml).join('');
+    log.scrollTop = log.scrollHeight;
+  }
+  function chatSetHistory(list) {
+    app.chat.msgs = list.slice(-CHAT_KEEP);
+    if (app.chat.open) { app.chat.unread = 0; chatRender(); }
+    else app.chat.unread = 0; // история — не «непрочитанное»
+    chatBadge();
+  }
+  function chatAdd(m) {
+    if (!m || !m.text) return;
+    app.chat.msgs.push(m);
+    if (app.chat.msgs.length > CHAT_KEEP) app.chat.msgs.splice(0, app.chat.msgs.length - CHAT_KEEP);
+    if (app.chat.open && app.screen === 'menu') { chatRender(); }
+    else if (m.nick !== app.nick) { app.chat.unread++; }
+    chatBadge();
+  }
+  function chatBadge() {
+    var b = $('chatUnread'); if (!b) return;
+    b.hidden = !(app.chat.unread > 0);
+    b.textContent = app.chat.unread > 99 ? '99+' : String(app.chat.unread);
+  }
+  function chatSetOpen(open) {
+    app.chat.open = open;
+    $('chatBody').hidden = !open;
+    $('chatToggle').classList.toggle('open', open);
+    if (open) { app.chat.unread = 0; chatBadge(); chatRender(); setTimeout(function () { $('chatInput').focus(); }, 0); }
+    try { localStorage.setItem('sb.chatOpen', open ? '1' : '0'); } catch (e) { /* игнор */ }
+  }
+  function chatSubmit() {
+    var el = $('chatInput'), text = (el.value || '').trim();
+    if (!text) return;
+    if (text.length > 300) text = text.slice(0, 300);
+    send('chat.send', { text: text });
+    el.value = '';
+  }
+  $('chatToggle').onclick = function () { Audio_.uiClick(); chatSetOpen(!app.chat.open); };
+  $('chatSend').onclick = function () { chatSubmit(); };
+  $('chatInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); chatSubmit(); } });
+  chatSetOpen(store.get('sb.chatOpen') === '1');
 
   // ------------------------------------------------------------
   // Сетевой матч

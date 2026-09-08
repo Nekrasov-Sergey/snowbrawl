@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.4.0';
+  var SIM_VERSION = '1.5.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -174,11 +174,13 @@
   // role — базовая роль для ROLE_STATS/ROLE_AI/RELOAD_MS/ABILITIES и модели отрисовки.
   // contact — контактный урон (−1 HP при касании), knockResist — доля гашения откида,
   // scripted — прямолинейное движение (ком). role: '*' у core выбирается случайно при спавне.
-  var ENEMY_CORE_ROLES = ['Раннер', 'Снайпер', 'Бомбер', 'Фризер'];
+  // «Раннер» исключён: у него перезарядка выстрела 500 мс, и рядовой враг-раннер
+  // расстреливал пати очередями — в PvE обычные снежколёты не должны частить так.
+  var ENEMY_CORE_ROLES = ['Снайпер', 'Бомбер', 'Фризер'];
   var ENEMY_STATS = {
     core:   { role: '*',       speed: 150, radius: 15, hp: 3, contact: 0, knockResist: 0 },
-    swarm:  { role: 'Раннер',  speed: 232, radius: 12, hp: 1, contact: 1, knockResist: 0 },
-    tank:   { role: 'Танк',    speed: 118, radius: 24, hp: 7, contact: 0, knockResist: 0.8 },
+    swarm:  { role: 'Раннер',  speed: 198, radius: 12, hp: 1, contact: 1, knockResist: 0 },
+    tank:   { role: 'Танк',    speed: 118, radius: 24, hp: 5, contact: 0, knockResist: 0.8 },
     roller: { role: 'Танк',    speed: 300, radius: 20, hp: 3, contact: 1, knockResist: 1, scripted: true },
     boss:   { role: 'Танк',    speed: 120, radius: 34, hp: 12, contact: 0, knockResist: 1 }
   };
@@ -316,6 +318,7 @@
       endReason: '',          // '' | 'ko' | 'timeout' | PvE: 'cleared'|'wiped'|'objective'|'expired'
       pve: null,
       tutorial: false,       // обучение: матч не кончается, человек не выбывает
+      tutorialLockEnemy: false, // обучение: соперник не опускается ниже 1 HP (последний шаг)
       events: []
     };
   }
@@ -880,8 +883,10 @@
     }
     // Обучение: попадание по ученику (команда A) считается и оглушает, но последнее HP не
     // снимается — новичок не должен вылетать из обучения из-за того, что соперник его добил.
-    // Соперники обучения стоят в команде B, их это правило не защищает: их надо уметь добить.
-    if (state.tutorial && target.team === 'A' && target.hp <= 1) {
+    // На последнем шаге то же правило защищает и соперника (команда B, tutorialLockEnemy):
+    // добить его можно только после применения способности — клиент снимает замок по onSpecial.
+    if (state.tutorial && target.hp <= 1 &&
+        (target.team === 'A' || (target.team === 'B' && state.tutorialLockEnemy))) {
       target.hitAt = state.time; target.lastDamagedAt = state.time;
       target.charging = false; target.dashUntil = 0;
       target.stunTimer = (target.role === 'Танк' ? TANK_STUN_FACTOR : 1) * (1.0 + (freezeBonus || 0));
@@ -1382,6 +1387,13 @@
     return id;
   }
 
+  /** tutorialLock(state, on) — на последнем шаге соперник держится на 1 HP, пока on=true. */
+  function tutorialLock(state, on) {
+    if (!state.tutorial) return false;
+    state.tutorialLockEnemy = !!on;
+    return true;
+  }
+
   /** tutorialRemove(state, id) — убрать бойца обучения и его снежки. */
   function tutorialRemove(state, id) {
     if (!state.tutorial) return false;
@@ -1534,6 +1546,7 @@
     setBot: setBot,
     tutorialSpawn: tutorialSpawn,   // обучение: поставить соперника
     tutorialRemove: tutorialRemove, // обучение: убрать соперника
+    tutorialLock: tutorialLock,     // обучение: держать соперника на 1 HP (последний шаг)
     step: step,
     snapshot: snapshot,
     isOver: function (state) { return state.gameOver; },

@@ -39,6 +39,7 @@ const (
 	CMatchLeave = "match.leave"
 	CInput      = "input"
 	CTraining   = "training"
+	CChatSend   = "chat.send" // сообщение в общий чат главного меню
 	CPing       = "ping"
 )
 
@@ -57,6 +58,8 @@ const (
 	SDrain       = "drain"
 	SOnline      = "online"
 	SReload      = "reload"
+	SChatMsg     = "chat.msg"     // одно сообщение чата (рассылка всем)
+	SChatHistory = "chat.history" // последние сообщения чата (после welcome)
 	SPong        = "pong"
 )
 
@@ -81,6 +84,7 @@ const (
 	ErrTooManyTries = "too_many_tries"
 	ErrSlotTaken    = "slot_taken"
 	ErrNoSlots      = "no_slots"
+	ErrChatFlood    = "chat_flood" // слишком часто пишете в чат
 	ErrServerFull   = "server_full"
 	ErrInternal     = "internal"
 )
@@ -322,6 +326,50 @@ type Input struct {
 	X     float64  `json:"x"`
 	Y     float64  `json:"y"`
 	Power *float64 `json:"power,omitempty"`
+}
+
+// ChatSend — сообщение игрока в общий чат.
+type ChatSend struct {
+	Text string `json:"text"`
+}
+
+// ChatMessage — одно сообщение чата.
+type ChatMessage struct {
+	ID   uint64 `json:"id"`
+	Nick string `json:"nick"`
+	Text string `json:"text"`
+	TS   int64  `json:"ts"` // unix-время в мс
+}
+
+// ChatHistory — пачка последних сообщений (после welcome).
+type ChatHistory struct {
+	Messages []ChatMessage `json:"messages"`
+}
+
+// MaxChatRunes — предел длины сообщения чата.
+const MaxChatRunes = 300
+
+// NormalizeChat чистит текст сообщения чата: схлопывает пробелы, убирает управляющие
+// символы, ограничивает длину. Пустой результат — сообщение отклоняется.
+func NormalizeChat(text string) (string, error) {
+	var b strings.Builder
+	for _, r := range text {
+		if r == '\n' || r == '\t' {
+			r = ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	if out == "" {
+		return "", errors.New("empty message")
+	}
+	if utf8.RuneCountInString(out) > MaxChatRunes {
+		out = string([]rune(out)[:MaxChatRunes])
+	}
+	return out, nil
 }
 
 // Encode упаковывает сообщение в конверт.

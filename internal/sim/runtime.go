@@ -156,6 +156,7 @@ type Match struct {
 
 	tutorialSpawn  goja.Callable
 	tutorialRemove goja.Callable
+	tutorialLock   goja.Callable
 }
 
 // NewMatch создаёт матч: новая VM, вызов createMatch(config, seed).
@@ -181,6 +182,7 @@ func (p *Program) NewMatch(cfg MatchConfig, seed uint32) (*Match, error) {
 		"applyInput": &m.applyInput, "step": &m.step, "snapshot": &m.snapshot,
 		"setBot": &m.setBot, "isOver": &m.isOver, "winner": &m.winner, "reason": &m.reason,
 		"tutorialSpawn": &m.tutorialSpawn, "tutorialRemove": &m.tutorialRemove,
+		"tutorialLock": &m.tutorialLock,
 	} {
 		fn, err := get(name)
 		if err != nil {
@@ -262,6 +264,14 @@ func (m *Match) TutorialSpawn(opts TutorialSpawnOpts) (string, error) {
 func (m *Match) TutorialRemove(id string) error {
 	if _, err := m.tutorialRemove(goja.Undefined(), m.state, m.vm.ToValue(id)); err != nil {
 		return wrapJS(err, "tutorialRemove")
+	}
+	return nil
+}
+
+// TutorialLock включает/выключает защиту соперника обучения на 1 HP (последний шаг).
+func (m *Match) TutorialLock(on bool) error {
+	if _, err := m.tutorialLock(goja.Undefined(), m.state, m.vm.ToValue(on)); err != nil {
+		return wrapJS(err, "tutorialLock")
 	}
 	return nil
 }

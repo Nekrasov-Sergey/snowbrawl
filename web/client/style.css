@@ -329,3 +329,65 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   35% { transform: scale(1); opacity: 1; }
   100% { transform: scale(1); opacity: 1; }
 }
+
+/* Верхняя панель боя: пинг и инфо про уровни PvE больше не налезают друг на друга. */
+#topGameBar { gap: 8px; }
+#netStat { flex: none; }
+#pveInfo { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* Обучение: короткая плашка «Готово!» по центру арены вместо нижнего тоста. */
+#tutFlash {
+  position: absolute; left: 50%; top: 22%; transform: translateX(-50%);
+  background: rgba(22, 40, 63, 0.92); border: 1px solid #7CFFB2; color: #d6ffe8;
+  padding: 8px 18px; border-radius: 10px; font-size: 16px; font-weight: 700;
+  z-index: 7; pointer-events: none; white-space: nowrap; box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+}
+
+/* Обучение: строка задачи. z-index выше слоя стиков, чтобы кнопки нажимались на телефоне. */
+#tutorialBox { margin: 10px auto 4px; position: relative; z-index: 5; }
+.tutRow .menuBtn { position: relative; z-index: 6; }
+html.touch.ingame #tutorialBox {
+  position: absolute; left: 6px; right: 6px; top: 42px; margin: 0;
+  background: rgba(22, 40, 63, 0.94); font-size: 12px; padding: 6px 10px; gap: 6px;
+}
+html.touch.ingame #tutStep { flex: 1 1 100%; min-width: 0; font-size: 12px; }
+html.touch.ingame .tutRow { flex: 0 0 auto; }
+html.touch.ingame .tutRow .menuBtn { padding: 6px 10px; font-size: 12px; min-height: 36px; }
+
+/* Мобильный бой только в ландшафте. */
+#rotateGate { display: none; }
+html.touch.ingame #rotateGate {
+  position: fixed; inset: 0; z-index: 50; background: #0e1a2b;
+  align-items: center; justify-content: center; text-align: center;
+  color: #eaf2ff; font-size: 20px; font-weight: 700; padding: 24px;
+}
+html.touch.ingame #rotateGate small { display: block; margin-top: 8px; font-size: 13px; font-weight: 400; color: #a9c2e0; }
+html.touch.ingame #rotateGate .rotIcon { font-size: 48px; margin-bottom: 14px; animation: rotHint 1.6s ease-in-out infinite; }
+@keyframes rotHint { 0%,100% { transform: rotate(-12deg); } 50% { transform: rotate(78deg); } }
+@media (orientation: landscape) { html.touch.ingame #rotateGate { display: none !important; } }
+@media (orientation: portrait) { html.touch.ingame #rotateGate { display: flex; } }
+
+/* Общий чат главного меню. */
+#chatPanel { width: 100%; max-width: 360px; margin-top: 10px; }
+#chatToggle {
+  width: 100%; display: flex; align-items: center; gap: 8px; justify-content: flex-start;
+  background: #16283f; border: 1px solid #3a5a80; color: #cfe2fb; border-radius: 8px;
+  padding: 10px 14px; font: 600 14px 'Segoe UI', Arial, sans-serif; cursor: pointer;
+}
+#chatToggle .chevron { margin-left: auto; transition: transform 0.2s; }
+#chatToggle.open .chevron { transform: rotate(180deg); }
+#chatToggle .badge { background: #ff5b5b; color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 12px; }
+#chatBody {
+  border: 1px solid #3a5a80; border-top: none; border-radius: 0 0 8px 8px;
+  background: #0e1a2b; padding: 8px; display: flex; flex-direction: column; gap: 8px;
+}
+#chatLog { height: 200px; overflow-y: auto; font-size: 13px; line-height: 1.5; color: #cfe2fb; word-break: break-word; }
+.chatRow { padding: 1px 0; }
+.chatRow .chatT { color: #4b6a8a; font-size: 11px; }
+.chatRow .chatN { color: #7fd4ff; }
+.chatRow.mine .chatN { color: #7CFFB2; }
+#chatInputRow { display: flex; gap: 6px; }
+#chatInput { flex: 1; background: #16283f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; padding: 8px 10px; font-size: 14px; }
+#chatSend { width: auto; padding: 8px 14px; }
+.chatNote { font-size: 11px; color: #4b6a8a; }
+html.touch #chatInput, html.touch #chatSend, html.touch #chatToggle { min-height: 44px; }

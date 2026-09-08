@@ -77,12 +77,17 @@ window.SBTutorial = (function () {
         leave: function (c) { ensureEnemy(c.snap, false); }
       },
       {
-        text: 'Последнее: примените способность (Q, ПКМ или кнопка справа) и добейте соперника.',
-        enter: function (c) { st.special = false; ensureEnemy(c.snap, false); },
+        text: 'Последнее: примените способность (Q, ПКМ или кнопка справа) и добейте соперника. До способности он держится на 1 HP.',
+        enter: function (c) {
+          st.special = false;
+          ensureEnemy(c.snap, false);
+          var g = drv(); if (g && g.tutorialLock) g.tutorialLock(true);
+        },
         check: function (c) {
           var e = enemyOf(c.snap);
           return st.special && (!e || e.koed || c.event('ko', function (ev) { return ev.targetId === st.enemyId; }));
-        }
+        },
+        leave: function () { var g = drv(); if (g && g.tutorialLock) g.tutorialLock(false); }
       }
     ];
 
@@ -123,7 +128,7 @@ window.SBTutorial = (function () {
         cfg.finish();
         return;
       }
-      cfg.toast('Готово!');
+      (cfg.flash || cfg.toast)('Готово!');
       var next = STEPS[st.step];
       if (next.enter) next.enter(c);
       render(c);
@@ -150,9 +155,16 @@ window.SBTutorial = (function () {
         st.throws++;
         if (power >= 0.9) st.fullThrow = true;
       },
-      onSpecial: function () { if (st.game) st.special = true; },
+      onSpecial: function () {
+        if (!st.game) return;
+        st.special = true;
+        if (st.game.tutorialLock) st.game.tutorialLock(false); // способность применена — соперника можно добить
+      },
       skip: function () { if (st.game && st.step < STEPS.length) advance(ctx(null)); },
-      stop: function () { st.game = null; cfg.box.hidden = true; cfg.marks([]); },
+      stop: function () {
+        if (st.game && st.game.tutorialLock) st.game.tutorialLock(false);
+        st.game = null; cfg.box.hidden = true; cfg.marks([]);
+      },
       active: function () { return !!st.game; }
     };
   }

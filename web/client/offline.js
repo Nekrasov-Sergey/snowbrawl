@@ -62,6 +62,8 @@ window.SBOffline = (function () {
       spawnEnemy: function (opts) { return Sim.tutorialSpawn(state, opts); },
       /** Обучение: убрать соперника. */
       removeEnemy: function (id) { return Sim.tutorialRemove(state, id); },
+      /** Обучение: держать соперника на 1 HP (последний шаг, до применения способности). */
+      tutorialLock: function (on) { return Sim.tutorialLock ? Sim.tutorialLock(state, on) : false; },
       /**
        * Включить или выключить ИИ бойца. Выключенный стоит на месте; замах перед заморозкой
        * гасим, иначе боец навсегда останется в позе замаха (см. SIM_CONTRACT).

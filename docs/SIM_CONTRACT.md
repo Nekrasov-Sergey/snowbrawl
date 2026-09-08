@@ -22,7 +22,7 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.4.0',                 // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.5.0',                 // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, CHARGE_FULL_MS, KO_ANIM_MS,
   ARENAS, ROLE_STATS, SPECIALS, ABILITIES, BOT_LEVEL_NAMES, MODES,
   GAME_MODES: ['pvp','survival','defense'],   // с 1.3.0
@@ -35,6 +35,7 @@ SnowBrawlSim = {
   setBot(state, playerId, isBot) -> bool,
   tutorialSpawn(state, opts) -> id | null,     // с 1.4.0, только в матче обучения
   tutorialRemove(state, id) -> bool,           // с 1.4.0
+  tutorialLock(state, on) -> bool,             // с 1.5.0, соперник держится на 1 HP
   step(state, dtSeconds) -> events[],
   snapshot(state) -> object,
   isOver(state) -> bool,
@@ -85,6 +86,9 @@ SnowBrawlSim = {
   вместе с его снежками. Вне матча обучения обе функции ничего не делают.
 - Оживить и заморозить соперника по ходу — обычный `setBot`. Замораживать посреди замаха нельзя:
   `charging` останется висеть, сначала `applyInput(..., {kind:'cancelCharge'})`.
+- `tutorialLock(state, true)` (с 1.5.0) распространяет правило «не ниже 1 HP» и на соперников
+  команды `B`: на последнем шаге его нельзя добить обычным попаданием, пока клиент не снимет
+  замок (`tutorialLock(state, false)`) после применения способности.
 
 ### PvE-режим «Волны» (с 1.3.0)
 
@@ -103,7 +107,9 @@ SnowBrawlSim = {
   абсолютный потолок 60 мин. В кампании `wiped`/`objective` не заканчивают матч, а
   перезапускают уровень с первой волны; в эндлессе — заканчивают.
 - Типы врагов: `core` (снежколёт), `swarm`, `tank`, `roller` (урон контактом у `swarm`/`roller`),
-  `boss` (`golem` / `blizzard` / `yeti`, две фазы). События: `waveStart`, `waveCleared`,
+  `boss` (`golem` / `blizzard` / `yeti`, две фазы). С 1.5.0 рядовые враги ослаблены: `core` больше
+  не берут роль «Раннер» (не расстреливают очередями), `swarm` медленнее (198), `tank` — 5 HP.
+  События: `waveStart`, `waveCleared`,
   `enemySpawn`, `bossPhase`, `contactHit`, `objectiveHit`, `levelStart`, `levelRestart`,
   `partyDown`, `partyRespawn` — все опциональны, клиент игнорирует незнакомые.
 
