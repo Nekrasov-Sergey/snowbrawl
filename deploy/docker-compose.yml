@@ -15,6 +15,10 @@ services:
       SNOWBRAWL_MAX_CONNS: ${SNOWBRAWL_MAX_CONNS:-200}
       SNOWBRAWL_LOG_LEVEL: ${SNOWBRAWL_LOG_LEVEL:-info}
       SNOWBRAWL_TRUST_PROXY: ${SNOWBRAWL_TRUST_PROXY:-false}
+      # Роли и баны по IP: единственное состояние, которое сервер пишет на диск.
+      SNOWBRAWL_MODERATION_FILE: ${SNOWBRAWL_MODERATION_FILE:-/data/moderation.json}
+    volumes:
+      - snowbrawl_data:/data
     ports:
       # Без Caddy сервер слушает 80-й порт напрямую. С профилем tls этот порт
       # переопределяется в override ниже, чтобы не конфликтовать с Caddy.
@@ -47,5 +51,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  snowbrawl_data:   # /data сервера: роли и баны по IP (docker compose down -v их снесёт)
   caddy_data:
   caddy_config:

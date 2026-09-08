@@ -8,8 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	snowbrawl "github.com/Nekrasov-Sergey/snowbrawl"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
@@ -30,6 +33,7 @@ type testServer struct {
 	hub *hub.Hub
 	srv *httptest.Server
 	cfg config.Config
+	mod *moderation.Store
 }
 
 func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
@@ -50,14 +54,21 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 		mutate(&cfg)
 	}
 	log := zerolog.Nop()
-	h := hub.New(cfg, prog, log)
+	if cfg.ModerationFile == "" {
+		cfg.ModerationFile = filepath.Join(t.TempDir(), "moderation.json")
+	}
+	mod, err := moderation.Open(cfg.ModerationFile, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hub.New(cfg, prog, log, mod)
 	h.Run()
 	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: 1000, Log: log}, h)
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsServer)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(func() { h.Shutdown(); srv.Close() })
-	return &testServer{hub: h, srv: srv, cfg: cfg}
+	return &testServer{hub: h, srv: srv, cfg: cfg, mod: mod}
 }
 
 type client struct {
@@ -72,7 +83,7 @@ type client struct {
 
 func (s *testServer) connect(t *testing.T, nick, token string) *client {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	url := "ws" + strings.TrimPrefix(s.srv.URL, "http") + "/ws"
 	c, _, err := websocket.Dial(ctx, url, nil)
@@ -112,7 +123,14 @@ func (cl *client) send(typ string, data any) {
 // expect ждёт сообщение типа typ (пропуская остальные) и разбирает его в dst.
 func (cl *client) expect(typ string, dst any) protocol.Envelope {
 	cl.t.Helper()
-	deadline := time.After(20 * time.Second)
+	return cl.expectWithin(20*time.Second, typ, dst)
+}
+
+// expectWithin — то же с явным сроком: бою до KO двадцати секунд мало, а быстрым проверкам
+// столько ждать незачем.
+func (cl *client) expectWithin(wait time.Duration, typ string, dst any) protocol.Envelope {
+	cl.t.Helper()
+	deadline := time.After(wait)
 	for {
 		select {
 		case env, ok := <-cl.inbox:
@@ -243,42 +261,256 @@ func TestRoomMatchWithBotsToEnd(t *testing.T) {
 	guest.close()
 }
 
-func TestHumanInputAndMatchEnd(t *testing.T) {
-	s := newServer(t, nil)
+// snapshotPlayers достаёт бойцов из очередного снапшота. Снапшоты идут 40 раз в секунду,
+// поэтому проверять состояние симуляции удобнее по ним, а не по таймингам.
+func (cl *client) snapshotPlayers(wait time.Duration) []struct {
+	ID       string  `json:"id"`
+	Team     string  `json:"team"`
+	Role     string  `json:"role"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	HP       int     `json:"hp"`
+	Charging bool    `json:"charging"`
+	RL       float64 `json:"rl"`
+	Koed     bool    `json:"koed"`
+} {
+	cl.t.Helper()
+	var snap struct {
+		S struct {
+			Players []struct {
+				ID       string  `json:"id"`
+				Team     string  `json:"team"`
+				Role     string  `json:"role"`
+				X        float64 `json:"x"`
+				Y        float64 `json:"y"`
+				HP       int     `json:"hp"`
+				Charging bool    `json:"charging"`
+				RL       float64 `json:"rl"`
+				Koed     bool    `json:"koed"`
+			} `json:"players"`
+			Balls []struct {
+				Team string `json:"team"`
+			} `json:"balls"`
+		} `json:"s"`
+	}
+	cl.expectWithin(wait, protocol.SSnapshot, &snap)
+	return snap.S.Players
+}
+
+// TestHumanInputReachesSim — детерминированная часть: ввод игрока доходит до симуляции.
+// Ни боя, ни KO: только движение, замах и появившийся снежок. Отсчёт выключен, иначе ввод
+// первые три секунды отбрасывается сервером.
+func TestHumanInputReachesSim(t *testing.T) {
+	s := newServer(t, func(c *config.Config) { c.Countdown = 0 })
 	p := s.connect(t, "Игрок", "")
 	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
 	var rs protocol.RoomState
 	p.expect(protocol.SRoomState, &rs)
+	p.send(protocol.CRoomRole, protocol.RoomRole{Role: "Раннер"})
+	p.waitRoom("роль выбрана", func(st protocol.RoomState) bool {
+		return len(st.Players) > 0 && st.Players[0].Role == "Раннер"
+	})
 	p.send(protocol.CRoomStart, nil)
 	var ms protocol.MatchStart
 	p.expect(protocol.SMatchStart, &ms)
 
-	// Игрок двигается и бросает, бот отвечает: матч 1×1 должен закончиться KO кого-то из них.
-	go func() {
-		for i := 0; i < 400; i++ {
-			time.Sleep(60 * time.Millisecond)
-			_ = p.c.Write(p.ctx, websocket.MessageText, protocol.MustEncode(protocol.CInput, protocol.Input{Kind: "move", X: 450, Y: 100}))
-			_ = p.c.Write(p.ctx, websocket.MessageText, protocol.MustEncode(protocol.CInput, protocol.Input{Kind: "chargeStart", X: 740, Y: 280}))
-			time.Sleep(600 * time.Millisecond)
-			pw := 0.5
-			_ = p.c.Write(p.ctx, websocket.MessageText, protocol.MustEncode(protocol.CInput, protocol.Input{Kind: "throw", X: 740, Y: 280, Power: &pw}))
+	me := func(list []struct {
+		ID       string  `json:"id"`
+		Team     string  `json:"team"`
+		Role     string  `json:"role"`
+		X        float64 `json:"x"`
+		Y        float64 `json:"y"`
+		HP       int     `json:"hp"`
+		Charging bool    `json:"charging"`
+		RL       float64 `json:"rl"`
+		Koed     bool    `json:"koed"`
+	}) *struct {
+		ID       string  `json:"id"`
+		Team     string  `json:"team"`
+		Role     string  `json:"role"`
+		X        float64 `json:"x"`
+		Y        float64 `json:"y"`
+		HP       int     `json:"hp"`
+		Charging bool    `json:"charging"`
+		RL       float64 `json:"rl"`
+		Koed     bool    `json:"koed"`
+	} {
+		for i := range list {
+			if list[i].ID == ms.YourID {
+				return &list[i]
+			}
 		}
-	}()
+		return nil
+	}
+
+	start := me(p.snapshotPlayers(5 * time.Second))
+	if start == nil {
+		t.Fatal("своего бойца нет в снапшоте")
+	}
+	// Цель движения — вниз по свободному коридору: точка (450,100) занята укрытием арены,
+	// в него боец упирается и «не двигается».
+	p.send(protocol.CInput, protocol.Input{Kind: "move", X: start.X, Y: 480})
+	moved := false
+	for i := 0; i < 200 && !moved; i++ {
+		if cur := me(p.snapshotPlayers(5 * time.Second)); cur != nil && cur.Y > start.Y+30 {
+			moved = true
+		}
+	}
+	if !moved {
+		t.Fatal("боец не поехал к цели: ввод move не дошёл до симуляции")
+	}
+
+	// Замах виден в снапшоте, бросок создаёт снежок команды A.
+	p.send(protocol.CInput, protocol.Input{Kind: "chargeStart", X: 740, Y: 280})
+	charging := false
+	for i := 0; i < 100 && !charging; i++ {
+		if cur := me(p.snapshotPlayers(5 * time.Second)); cur != nil && cur.Charging {
+			charging = true
+		}
+	}
+	if !charging {
+		t.Fatal("замах не дошёл до симуляции")
+	}
+	pw := 0.6
+	p.send(protocol.CInput, protocol.Input{Kind: "throw", X: 740, Y: 280, Power: &pw})
+	if !p.waitBall(5*time.Second, "A") {
+		t.Fatal("снежок не появился: бросок не дошёл до симуляции")
+	}
+	p.close()
+}
+
+// waitBall ждёт в снапшотах снежок нужной команды.
+func (cl *client) waitBall(wait time.Duration, team string) bool {
+	cl.t.Helper()
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		var snap struct {
+			S struct {
+				Balls []struct {
+					Team string `json:"team"`
+				} `json:"balls"`
+			} `json:"s"`
+		}
+		cl.expectWithin(time.Until(deadline), protocol.SSnapshot, &snap)
+		for _, b := range snap.S.Balls {
+			if b.Team == team {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestMatchEndsWithKO — бой до KO и сообщение match.end. Чтобы это не было лотереей:
+// отсчёт выключен, бот самого слабого уровня (уклоняется в 10 % случаев вместо 62 %), игрок
+// играет Раннером (перезарядка 500 мс) и целится по снапшотам с силой, посчитанной по
+// дистанции. Всё в одной горутине: второй читатель inbox мог бы проглотить сам match.end.
+func TestMatchEndsWithKO(t *testing.T) {
+	s := newServer(t, func(c *config.Config) { c.Countdown = 0 })
+	p := s.connect(t, "Игрок", "")
+	easy := 0
+	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0, Difficulty: &easy})
+	var rs protocol.RoomState
+	p.expect(protocol.SRoomState, &rs)
+	p.send(protocol.CRoomRole, protocol.RoomRole{Role: "Раннер"})
+	p.waitRoom("роль выбрана", func(st protocol.RoomState) bool {
+		return len(st.Players) > 0 && st.Players[0].Role == "Раннер"
+	})
+	p.send(protocol.CRoomStart, nil)
+	var ms protocol.MatchStart
+	p.expect(protocol.SMatchStart, &ms)
+
+	type snapPlayer struct {
+		ID   string  `json:"id"`
+		Team string  `json:"team"`
+		X    float64 `json:"x"`
+		Y    float64 `json:"y"`
+		RL   float64 `json:"rl"`
+		Stun float64 `json:"stun"`
+		Koed bool    `json:"koed"`
+	}
 	var end protocol.MatchEnd
-	p.expect(protocol.SMatchEnd, &end)
+	deadline := time.After(60 * time.Second)
+	var throwAt time.Time // когда отпускать замах; ноль — замаха нет
+	var aimX, aimY float64
+	got := false
+	for !got {
+		select {
+		case <-deadline:
+			t.Fatal("матч не закончился за 60 секунд")
+		case env, ok := <-p.inbox:
+			if !ok {
+				t.Fatal("соединение закрылось до конца матча")
+			}
+			switch env.Type {
+			case protocol.SMatchEnd:
+				if err := json.Unmarshal(env.Data, &end); err != nil {
+					t.Fatalf("match.end: %v", err)
+				}
+				got = true
+			case protocol.SError:
+				var e protocol.Error
+				_ = json.Unmarshal(env.Data, &e)
+				t.Fatalf("ошибка сервера в бою: %s (%s)", e.Code, e.Message)
+			case protocol.SSnapshot:
+				var snap struct {
+					S struct {
+						Players []snapPlayer `json:"players"`
+					} `json:"s"`
+				}
+				if json.Unmarshal(env.Data, &snap) != nil {
+					continue
+				}
+				var me, enemy *snapPlayer
+				for i := range snap.S.Players {
+					q := &snap.S.Players[i]
+					if q.ID == ms.YourID {
+						me = q
+					} else if !q.Koed {
+						enemy = q
+					}
+				}
+				if me == nil || enemy == nil {
+					continue
+				}
+				if !throwAt.IsZero() { // замах идёт — ждём нужной силы и бросаем
+					if time.Now().After(throwAt) {
+						pw := math.Min(1, math.Max(0, (math.Hypot(aimX-me.X, aimY-me.Y)+20-140)/380))
+						p.send(protocol.CInput, protocol.Input{Kind: "throw", X: aimX, Y: aimY, Power: &pw})
+						throwAt = time.Time{}
+					}
+					continue
+				}
+				if me.RL > 0 || me.Stun > 0 || me.Koed {
+					continue // перезарядка, оглушение или уже выбит
+				}
+				dist := math.Hypot(enemy.X-me.X, enemy.Y-me.Y)
+				if dist > 340 { // дальше максимальной дальности броска (140 + 380) — сближаемся
+					p.send(protocol.CInput, protocol.Input{Kind: "move", X: enemy.X, Y: enemy.Y})
+					continue
+				}
+				aimX, aimY = enemy.X, enemy.Y
+				// Сила по дистанции — та же формула, что у ИИ (updateAI в sim.js).
+				power := math.Min(1, math.Max(0, (math.Hypot(aimX-me.X, aimY-me.Y)+20-140)/380))
+				p.send(protocol.CInput, protocol.Input{Kind: "chargeStart", X: aimX, Y: aimY})
+				throwAt = time.Now().Add(time.Duration(power*1200+60) * time.Millisecond)
+			}
+		}
+	}
+
+	// Кто именно победил — не проверяем: даже слабый бот иногда попадает первым. Важно, что
+	// матч закончился по KO и сообщение доехало.
 	if end.Reason != "ko" || end.Winner == "" || end.YourTeam != "A" {
 		t.Fatalf("unexpected match end: %+v", end)
 	}
 	// После матча из комнаты приходит room.state с результатом.
-	p.expect(protocol.SRoomState, &rs)
-	if rs.InMatch || rs.LastWinner == "" {
-		t.Fatalf("room after match: %+v", rs)
+	st := p.waitRoom("матч закончен", func(st protocol.RoomState) bool { return !st.InMatch })
+	if st.LastWinner == "" {
+		t.Fatalf("room after match: %+v", st)
 	}
+	p.close()
 }
 
-// TestPveRoomMatch — комната переключается в PvE, хост стартует: match.start несёт
-// gameMode, состав — только пати (команда A, пустые слоты добиты ботами, команды B нет),
-// снапшоты несут блок pve, и первая волна выпускает врагов на команду B.
 func TestPveRoomMatch(t *testing.T) {
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")

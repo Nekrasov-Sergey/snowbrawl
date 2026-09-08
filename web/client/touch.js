@@ -119,6 +119,8 @@ window.SBTouch = (function () {
     });
 
     return {
+      /** Держит ли игрок правый стик (замах) — слою намерений, см. o.holding(). */
+      isCharging: function () { return !!R; },
       /** Сбросить касания (конец матча, смена экрана). */
       reset: function () {
         L = R = S = null;

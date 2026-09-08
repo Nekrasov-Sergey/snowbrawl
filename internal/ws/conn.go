@@ -265,6 +265,11 @@ func (c *Conn) run(h Handler, log zerolog.Logger, pingPeriod, pongTimeout time.D
 	log.Debug().Int64("conn", c.ID).Str("ip", c.ip).Str("reason", text).Msg("ws closed")
 }
 
+// ClientIP — адрес клиента запроса. Отдельная функция, а не gin-овский c.ClientIP(): тот по
+// умолчанию доверяет X-Forwarded-For от кого угодно, а здесь заголовкам верим только при
+// trustProxy (то есть когда перед сервером действительно стоит наш прокси).
+func ClientIP(r *http.Request, trustProxy bool) string { return clientIP(r, trustProxy) }
+
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {

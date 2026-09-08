@@ -9,11 +9,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/censor"
+
 	"github.com/pkg/errors"
 )
 
 // Version — версия протокола. Клиент присылает её в hello.
-const Version = 2
+const Version = 3
 
 // Envelope — конверт любого сообщения.
 type Envelope struct {
@@ -40,6 +42,7 @@ const (
 	CInput      = "input"
 	CTraining   = "training"
 	CChatSend   = "chat.send" // сообщение в общий чат главного меню
+	CChatDel    = "chat.del"  // удалить сообщение чата (своё или по праву роли)
 	CPing       = "ping"
 )
 
@@ -60,33 +63,48 @@ const (
 	SReload      = "reload"
 	SChatMsg     = "chat.msg"     // одно сообщение чата (рассылка всем)
 	SChatHistory = "chat.history" // последние сообщения чата (после welcome)
+	SChatDel     = "chat.del"     // сообщение чата удалено у всех
+	SChatClear   = "chat.clear"   // историю чата очистила админка
+	SRank        = "rank"         // роль этого игрока изменилась
 	SPong        = "pong"
+)
+
+// Роли модерации. Выдаются по IP из админки (см. internal/moderation) и влияют на цвет ника
+// и на права в чате. ВНИМАНИЕ: это НЕ поле Role у RoomPlayer/MatchPlayer — там класс бойца
+// («Раннер»). Роль модерации везде называется rank именно поэтому.
+const (
+	RankPlayer  = ""        // обычный игрок: записи в сторе нет
+	RankAdmin   = "admin"   // удаляет сообщения обычных игроков
+	RankCreator = "creator" // удаляет любые сообщения, забанить его нельзя
 )
 
 // Коды ошибок в SError.
 const (
-	ErrBadMessage   = "bad_message"
-	ErrBadVersion   = "bad_version"
-	ErrNotAllowed   = "not_allowed"
-	ErrBadNick      = "bad_nick"
-	ErrRoomNotFound = "room_not_found"
-	ErrRoomFull     = "room_full"
-	ErrRoomLimit    = "room_limit"
-	ErrBusy         = "busy"
-	ErrDraining     = "draining"
-	ErrBadMode      = "bad_mode"
-	ErrBadArena     = "bad_arena"
-	ErrBadRole      = "bad_role"
-	ErrBadGameMode  = "bad_gamemode"
-	ErrBadSlot      = "bad_slot"
-	ErrCodeRequired = "code_required"
-	ErrBadCode      = "bad_code"
-	ErrTooManyTries = "too_many_tries"
-	ErrSlotTaken    = "slot_taken"
-	ErrNoSlots      = "no_slots"
-	ErrChatFlood    = "chat_flood" // слишком часто пишете в чат
-	ErrServerFull   = "server_full"
-	ErrInternal     = "internal"
+	ErrBadMessage    = "bad_message"
+	ErrBadVersion    = "bad_version"
+	ErrNotAllowed    = "not_allowed"
+	ErrBadNick       = "bad_nick"
+	ErrNickProfanity = "nick_profanity" // в нике мат: причина отказа своя, чтобы её можно было объяснить
+	ErrRoomNotFound  = "room_not_found"
+	ErrRoomFull      = "room_full"
+	ErrRoomLimit     = "room_limit"
+	ErrBusy          = "busy"
+	ErrDraining      = "draining"
+	ErrBadMode       = "bad_mode"
+	ErrBadArena      = "bad_arena"
+	ErrBadRole       = "bad_role"
+	ErrBadGameMode   = "bad_gamemode"
+	ErrBadSlot       = "bad_slot"
+	ErrCodeRequired  = "code_required"
+	ErrBadCode       = "bad_code"
+	ErrTooManyTries  = "too_many_tries"
+	ErrSlotTaken     = "slot_taken"
+	ErrNoSlots       = "no_slots"
+	ErrChatFlood     = "chat_flood"    // слишком часто пишете в чат
+	ErrBanned        = "banned"        // адрес заблокирован
+	ErrWrongSection  = "wrong_section" // комната из другого раздела (PVP против PVE)
+	ErrServerFull    = "server_full"
+	ErrInternal      = "internal"
 )
 
 // Hello — первое сообщение клиента.
@@ -106,7 +124,8 @@ type Welcome struct {
 	SimVersion string `json:"sim"`
 	Proto      int    `json:"proto"`
 	Draining   bool   `json:"draining,omitempty"`
-	Online     int    `json:"online"` // сколько игроков сейчас на сервере, включая этого
+	Online     int    `json:"online"`         // сколько игроков сейчас на сервере, включая этого
+	Rank       string `json:"rank,omitempty"` // роль модерации этого игрока (RankAdmin/RankCreator)
 	// Куда клиент должен вернуться после реконнекта: "menu" | "room" | "match".
 	Resume string `json:"resume"`
 }
@@ -151,6 +170,9 @@ type RoomCreate struct {
 // RoomJoin — войти по коду.
 type RoomJoin struct {
 	Code string `json:"code"`
+	// Раздел, из которого игрок вошёл: "pvp" | "pve". Сервер отказывает, если комната из
+	// другого раздела — иначе по коду можно провалиться из PVP в PVE и наоборот.
+	Section string `json:"section,omitempty"`
 }
 
 // RoomSlot — занять слот команды.
@@ -255,6 +277,7 @@ type RoomPlayer struct {
 	Connected bool   `json:"connected"`
 	Ready     bool   `json:"ready,omitempty"`
 	InMatch   bool   `json:"inMatch,omitempty"` // играет в идущем матче (иначе сидит в лобби)
+	Rank      string `json:"rank,omitempty"`    // роль модерации: цвет ника (Role — класс бойца)
 }
 
 // RoomState — полное состояние лобби, рассылается всем при любом изменении.
@@ -283,6 +306,7 @@ type MatchPlayer struct {
 	Role     string `json:"role"`
 	Bot      bool   `json:"bot"`
 	BotLevel *int   `json:"botLevel,omitempty"` // уровень бота 0..2; nil — уровень по умолчанию
+	Rank     string `json:"rank,omitempty"`     // роль модерации: цвет ника (Role — класс бойца)
 }
 
 // MatchStart — матч начался (или переподключение к идущему матчу).
@@ -336,9 +360,21 @@ type ChatSend struct {
 // ChatMessage — одно сообщение чата.
 type ChatMessage struct {
 	ID   uint64 `json:"id"`
+	PID  string `json:"pid,omitempty"` // id автора: по нему клиент показывает мусорку на своём сообщении
 	Nick string `json:"nick"`
+	Rank string `json:"rank,omitempty"` // роль автора на момент отправки сообщения клиенту
 	Text string `json:"text"`
 	TS   int64  `json:"ts"` // unix-время в мс
+}
+
+// ChatDel — удалить сообщение (C→S) и «сообщение удалено» (S→C).
+type ChatDel struct {
+	ID uint64 `json:"id"`
+}
+
+// RankUpdate — новая роль модерации у этого игрока.
+type RankUpdate struct {
+	Rank string `json:"rank"`
 }
 
 // ChatHistory — пачка последних сообщений (после welcome).
@@ -415,6 +451,10 @@ const MaxMessageSize = 4 * 1024
 
 var nickRe = regexp.MustCompile(`^[\p{L}\p{N} _\-]+$`)
 
+// ErrProfaneNick — в нике мат. Отдельная ошибка, чтобы hub отправил игроку свой код и клиент
+// объяснил настоящую причину, а не общий текст «2–16 символов».
+var ErrProfaneNick = errors.New("nick has forbidden words")
+
 // NormalizeNick приводит ник к допустимому виду или возвращает ошибку.
 // Правила: 2–16 символов, буквы, цифры, пробел, дефис, подчёркивание; пробелы схлопываются.
 func NormalizeNick(nick string) (string, error) {
@@ -425,6 +465,11 @@ func NormalizeNick(nick string) (string, error) {
 	}
 	if !nickRe.MatchString(nick) {
 		return "", errors.New("nick has forbidden characters")
+	}
+	// Мат в нике не маскируем звёздочками, а отклоняем: ник висит над бойцом весь матч,
+	// и «п***» смотрелось бы страннее отказа при входе.
+	if censor.Bad(nick) {
+		return "", ErrProfaneNick
 	}
 	return nick, nil
 }

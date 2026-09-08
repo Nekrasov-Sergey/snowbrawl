@@ -93,6 +93,14 @@ func TestCompileExports(t *testing.T) {
 	if p.Version() == "" || p.ArenaCount() < 1 || len(p.Roles()) < 6 {
 		t.Fatalf("bad program meta: %q %d %v", p.Version(), p.ArenaCount(), p.Roles())
 	}
+	// Клиентский контракт: чистые функции для луча прицела. Сервер их не зовёт, но их
+	// пропажа сломала бы прицел, а это заметно только в браузере.
+	vm := aimVM(t)
+	for _, fn := range []string{"canHitTarget", "aimPath"} {
+		if v, err := vm.RunString("typeof SnowBrawlSim." + fn); err != nil || v.String() != "function" {
+			t.Fatalf("sim.js: экспорт %q не функция (%v)", fn, err)
+		}
+	}
 }
 
 func TestBotsOnlyMatchFinishes(t *testing.T) {
@@ -485,5 +493,100 @@ func TestTutorialLockEnemy(t *testing.T) {
 	}
 	if !down {
 		t.Fatal("after tutorialLock(false) the enemy must be finishable")
+	}
+}
+
+// TestTutorialShortCooldown — в обучении способность возвращается за 2 секунды, а в обычном
+// матче держит свой полный кулдаун. Иначе шаг про способность превращается в ожидание.
+func TestTutorialShortCooldown(t *testing.T) {
+	p := loadProgram(t)
+	cd := func(tutorial bool) float64 {
+		cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: tutorial}
+		cfg.Players = []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Щит"}}
+		if !tutorial { // обычный матч требует полного состава
+			cfg.Players = append(cfg.Players, sim.PlayerConfig{ID: "b0", Team: "B", Role: "Танк", Bot: true})
+		}
+		m, err := p.NewMatch(cfg, 11)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok, _ := m.ApplyInput("me", json.RawMessage(`{"kind":"special","x":400,"y":280}`)); !ok {
+			t.Fatal("способность не применилась")
+		}
+		if _, err := m.Step(1.0 / 20); err != nil {
+			t.Fatal(err)
+		}
+		var snap struct {
+			Players []struct {
+				ID string  `json:"id"`
+				CD float64 `json:"cd"`
+			} `json:"players"`
+		}
+		raw, err := m.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &snap); err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range snap.Players {
+			if q.ID == "me" {
+				return q.CD
+			}
+		}
+		t.Fatal("бойца нет в снапшоте")
+		return 0
+	}
+	if got := cd(true); got > 2 {
+		t.Fatalf("в обучении кулдаун %.1f с, ожидалось не больше 2", got)
+	}
+	if got := cd(false); got < 10 {
+		t.Fatalf("в обычном матче кулдаун стены %.1f с, ожидалось около 13.5", got)
+	}
+}
+
+// TestBotShootsWhileRetreating — бот отвечает броском, даже когда игрок подошёл ближе его
+// рабочей дистанции. Раньше ветка отхода выходила из ИИ до стрельбы, и Снайпер (minRange 260)
+// молча пятился от подошедшего игрока — в обучении и в PvP одинаково.
+func TestBotShootsWhileRetreating(t *testing.T) {
+	p := loadProgram(t)
+	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true}
+	cfg.Players = []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Танк"}}
+	m, err := p.NewMatch(cfg, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Соперник в 100 px — вдвое ближе minRange Снайпера. Игрока держим на чистой линии y=150:
+	// у спавна стоит колонна, из-за неё бот считал бы линию перекрытой.
+	id, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Снайпер", X: 260, Y: 150, BotLevel: 2, Bot: true})
+	if err != nil || id == "" {
+		t.Fatalf("соперник не поставлен: %v", err)
+	}
+	throws := 0
+	for i := 0; i < 20*30; i++ { // 30 секунд игрового времени
+		if _, err := m.ApplyInput("me", json.RawMessage(`{"kind":"move","x":160,"y":150}`)); err != nil {
+			t.Fatal(err)
+		}
+		evs, err := m.Step(1.0 / 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list []struct {
+			Type     string `json:"type"`
+			PlayerID string `json:"playerId"`
+		}
+		if len(evs) > 0 {
+			if err := json.Unmarshal(evs, &list); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, e := range list {
+			if e.Type == "throw" && e.PlayerID == id {
+				throws++
+			}
+		}
+	}
+	if throws == 0 {
+		t.Fatal("бот не бросил ни разу: отход снова съедает стрельбу")
 	}
 }

@@ -14,12 +14,13 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.5.0';
+  var SIM_VERSION = '1.7.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
   // ============================================================
   var GRAVITY = 500;
+  var HIT_Z = 14;                     // выше этой высоты снежок пролетает над бойцом, не задевая
   var W = 900, H = 560;
   var CHARGE_FULL_MS = 1200;          // время удержания до максимальной силы
   var DEFAULT_DURATION_MS = 5 * 60 * 1000;
@@ -45,14 +46,16 @@
   var CONTACT_KNOCK = 34;
 
   // --- Способности (пассив + актив у каждой роли), константы игрового баланса ---
-  var DASH_DIST = 118, DASH_MS = 170, DASH_IFRAME_MS = 250, DASH_CD = 8;        // Раннер: Рывок
-  var TARAM_DIST = 150, TARAM_MS = 380, TARAM_CD = 14, TARAM_KNOCK = 64, TARAM_STUN = 0.8; // Танк: Таран
-  var SNIPE_CD = 12;                                                            // Снайпер: Прицельный выстрел
-  var BOMB_CD = 15;                                                             // Бомбер: Взрывной снежок
-  var FROST_R = 54, FROST_MS = 3000, FROST_SLOW = 0.40, FREEZER_CD = 12;        // Фризер: Ледяная волна
+  var DASH_DIST = 118, DASH_MS = 170, DASH_IFRAME_MS = 250, DASH_CD = 6;        // Раннер: Рывок
+  var TARAM_DIST = 150, TARAM_MS = 380, TARAM_CD = 10.5, TARAM_KNOCK = 64, TARAM_STUN = 0.8; // Танк: Таран
+  var SNIPE_CD = 9;                                                             // Снайпер: Прицельный выстрел
+  var BOMB_CD = 11.25;                                                          // Бомбер: Взрывной снежок
+  var FROST_R = 54, FROST_MS = 3000, FROST_SLOW = 0.40, FREEZER_CD = 9;         // Фризер: Ледяная волна
   var FREEZER_AURA_R = 58, FREEZER_AURA_SLOW = 0.12;                            // Фризер: пассив «Стужа»
-  var WALL_CD = 18;                                                             // Щит: Снежная стена
+  var WALL_CD = 13.5;                                                           // Щит: Снежная стена
+  var WALL_LONG = 55, WALL_THIN = 16;                                           // Щит: габариты стены (длинной стороной поперёк броска)
   var BUBBLE_REGEN_MS = 12000;                                                  // Щит: пассив «Закалка» (реген пузыря)
+  var TUTORIAL_CD = 2;                                                          // обучение: кулдаун любой способности не больше этого
   var RUNNER_LOWHP_SPEEDUP = 1.20;                                             // Раннер: пассив «Второе дыхание»
   var TANK_STUN_FACTOR = 0.5;                                                   // Танк: пассив «Броня»
   var SNIPE_FLIGHT = 0.32, SNIPE_TRAVEL = 620;                                  // настильный быстрый выстрел
@@ -502,19 +505,30 @@
     return true;
   }
 
+  /**
+   * Кинематика броска: время полёта (с), дальность (px) и признак настильного полёта.
+   * Единственное место расчёта — им пользуются и сам бросок, и луч прицела (aimPath),
+   * иначе прицел разъезжается с полётом снежка.
+   */
+  function throwKinematics(role, armed, power) {
+    var flightDuration = 0.4 + power * 0.35, travelDistance = 140 + power * 380, flat = false;
+    if (armed === 'snipe') {
+      // прицельный выстрел: по прямой, быстро, на всю дистанцию, без дуги
+      flightDuration = SNIPE_FLIGHT; travelDistance = SNIPE_TRAVEL; flat = true;
+    } else if (role === 'Снайпер') {
+      // пассив «Точность»: настильнее и быстрее обычного (снайпу бонус не идёт — он и так на максимуме)
+      flightDuration *= 0.82; travelDistance *= 1.15;
+    }
+    return { fd: flightDuration, travel: travelDistance, flat: flat };
+  }
+
   function throwSnowball(state, p, targetX, targetY, power) {
     var dx = targetX - p.x, dy = targetY - p.y, dist = Math.hypot(dx, dy) || 1;
     var dirX = dx / dist, dirY = dy / dist;
     var armed = p.armedSpecial; p.armedSpecial = null; p.pendingSpecialThrow = false;
 
-    var flightDuration = 0.4 + power * 0.35, travelDistance = 140 + power * 380, flat = false;
-    if (armed === 'snipe') {
-      // прицельный выстрел: по прямой, быстро, на всю дистанцию, без дуги
-      flightDuration = SNIPE_FLIGHT; travelDistance = SNIPE_TRAVEL; flat = true;
-    } else if (p.role === 'Снайпер') {
-      // пассив «Точность»: настильнее и быстрее обычного
-      flightDuration *= 0.82; travelDistance *= 1.15;
-    }
+    var kin = throwKinematics(p.role, armed, power);
+    var flightDuration = kin.fd, travelDistance = kin.travel, flat = kin.flat;
     var speedH = travelDistance / flightDuration, vz0 = flat ? 0 : 0.5 * GRAVITY * flightDuration;
     state.snowballs.push({
       id: state.nextSnowballId++,
@@ -556,14 +570,21 @@
       p.armedSpecial = id;
       p.pendingSpecialThrow = true; // совместимость со снапшотом
     }
-    p.specialCooldown = ab.active.cooldown;
+    // В обучении способность возвращается быстро: шаг про способность иначе превращается в
+    // ожидание до 13 секунд. Math.min — чтобы обучение не сделало кулдаун ДОЛЬШЕ обычного.
+    p.specialCooldown = state.tutorial ? Math.min(TUTORIAL_CD, ab.active.cooldown) : ab.active.cooldown;
     emit(state, { type: 'special', playerId: p.id, special: id });
     return true;
   }
   function placeShieldWall(state, p, aimX, aimY) {
     var dx = aimX - p.x, dy = aimY - p.y, dist = Math.hypot(dx, dy) || 1;
     var dirX = dx / dist, dirY = dy / dist;
-    state.dynamicObstacles.push({ type:'rect', x: p.x + dirX * 45, y: p.y + dirY * 45, w:55, h:16, height:20,
+    // Стена встаёт длинной стороной ПОПЕРЁК направления броска — как щит перед собой. Повернуть
+    // её на произвольный угол нельзя: препятствия в симуляции только по осям (obstacleBlocksPoint),
+    // поэтому ориентация выбирается по преобладающей оси прицела.
+    var across = Math.abs(dirX) >= Math.abs(dirY);
+    var w = across ? WALL_THIN : WALL_LONG, h = across ? WALL_LONG : WALL_THIN;
+    state.dynamicObstacles.push({ type:'rect', x: p.x + dirX * 45, y: p.y + dirY * 45, w: w, h: h, height:20,
       expiresAt: state.time + WALL_LIFETIME_MS, team: p.team, hp: WALL_HP, maxHp: WALL_HP, mat: 'wood' });
     emit(state, { type: 'wallPlaced', playerId: p.id });
   }
@@ -600,6 +621,11 @@
     return Math.hypot(x - ob.x, y - ob.y) <= ob.r;
   }
   function wallBlocks(obs, x, y, z) { for (var i = 0; i < obs.length; i++) if (obstacleBlocksPoint(obs[i], x, y, z)) return true; return false; }
+  /**
+   * Долетит ли снежок до точки или упрётся в препятствие. Намеренно считает по «обычной»
+   * параболе, без роли и заряженного выстрела: по этой же оценке целятся боты (ROLE_AI),
+   * и любая правка здесь меняет их поведение. Для луча прицела есть aimPath.
+   */
   function canHitTarget(obs, shooter, targetX, targetY, power) {
     var dx = targetX - shooter.x, dy = targetY - shooter.y, dist = Math.hypot(dx, dy) || 1;
     var dirX = dx / dist, dirY = dy / dist;
@@ -613,6 +639,55 @@
       if (wallBlocks(obs, x, y, z)) return false;
     }
     return true;
+  }
+  var AIM_SAMPLES = 24;                // точек в луче прицела: шаг ~22 px на максимальной дальности
+  /**
+   * Путь снежка для луча прицела. Чистая функция: состояние матча не читается и не меняется.
+   *
+   * obs      — препятствия в формате симуляции (клиент собирает их сам из снапшота);
+   * shooter  — боец как есть из снапшота: берутся x, y, role и armed (заряженный выстрел);
+   * out      — необязательный буфер вызывающего, чтобы не мусорить в кадре: точки
+   *            переиспользуются, ссылку симуляция не хранит (состояние в модуле запрещено).
+   *
+   * path = {
+   *   n:            сколько точек заполнено в pts,
+   *   pts[i]:       {x, y, z, live, hit} — live: снежок ещё летит; hit: live и z <= HIT_Z,
+   *                 то есть в этой точке снежок может задеть бойца (условие как в updateSnowballs),
+   *   endX, endY:   где полёт кончился — падение, край арены или преграда,
+   *   blocked:      true, если упёрся в преграду раньше расчётной дальности,
+   *   flat:         настильный выстрел,
+   *   travel, flight: расчётная дальность (px) и время полёта (с)
+   * }
+   */
+  function aimPath(obs, shooter, targetX, targetY, power, out) {
+    var dx = targetX - shooter.x, dy = targetY - shooter.y, dist = Math.hypot(dx, dy) || 1;
+    var dirX = dx / dist, dirY = dy / dist;
+    var kin = throwKinematics(shooter.role, shooter.armed, power);
+    var speedH = kin.travel / kin.fd, vz0 = kin.flat ? 0 : 0.5 * GRAVITY * kin.fd;
+    var path = out || {};
+    if (!path.pts) path.pts = [];
+    var live = true, blocked = false, endX = shooter.x, endY = shooter.y;
+    for (var i = 0; i <= AIM_SAMPLES; i++) {
+      var t = (i / AIM_SAMPLES) * kin.fd;
+      var x = shooter.x + dirX * speedH * t, y = shooter.y + dirY * speedH * t;
+      var z = kin.flat ? 0 : (vz0 * t - 0.5 * GRAVITY * t * t);
+      if (live && i > 0) {
+        var out2 = x < 0 || x > W || y < 0 || y > H;
+        var gone = (!kin.flat && z < 0) || out2;
+        var wall = !gone && wallBlocks(obs, x, y, z);
+        if (gone || wall) { live = false; blocked = wall; }
+        // за краем арены снежок гибнет на самой границе — прицел не должен обещать точку снаружи
+        endX = out2 ? Math.max(0, Math.min(W, x)) : x;
+        endY = out2 ? Math.max(0, Math.min(H, y)) : y;
+      }
+      var pt = path.pts[i];
+      if (!pt) { pt = { x: 0, y: 0, z: 0, live: false, hit: false }; path.pts[i] = pt; }
+      pt.x = x; pt.y = y; pt.z = z; pt.live = live; pt.hit = live && z <= HIT_Z;
+    }
+    path.n = AIM_SAMPLES + 1;
+    path.endX = endX; path.endY = endY; path.blocked = blocked;
+    path.flat = kin.flat; path.travel = kin.travel; path.flight = kin.fd;
+    return path;
   }
   function clampToArena(x, y, r) { return { x: Math.max(r, Math.min(W - r, x)), y: Math.max(r, Math.min(H - r, y)) }; }
   function resolveObstacleCollisions(obs, p) {
@@ -761,6 +836,40 @@
       useSpecial(state, p, p.x + Math.cos(awayD) * 80, p.y + Math.sin(awayD) * 80);
       p.ai.nextDecisionAt = now + 300; return;
     }
+    // Бросок отделён от выбора цели движения: раньше ветки «мало HP», «ближе minRange» и
+    // «дальше maxRange» выходили из функции ДО стрельбы, и бот, вместо того чтобы отвечать,
+    // молча пятился — особенно заметно у Снайпера с его minRange 260. keepMove означает, что
+    // цель движения уже задана отходом или сближением и сбивать её манёвром нельзя.
+    function tryShoot(keepMove) {
+      // Сила броска подбирается так, чтобы снежок приземлился чуть за целью:
+      // дальность полёта = 140 + power*380, окно попадания — последние ~50 px дуги.
+      // (В прототипе бралось 0.35 + dist/500, и боты систематически перебрасывали цель.)
+      var testPower = Math.min(1, Math.max(0, (dist + 20 - 140) / 380));
+      var clear = canHitTarget(obs, p, enemy.x, enemy.y, testPower);
+      if (clear && canShoot) {
+        if (spec.id === 'explosive' && p.specialCooldown <= 0 && rng.next() < lvl.useAbility) {
+          useSpecial(state, p, enemy.x, enemy.y);
+        }
+        p.charging = true; p.chargeStart = now;
+        p.ai.chargeDuration = Math.max(0.25, testPower * 1.2 + (rng.next() - 0.5) * lvl.chargeJitter);
+        p.aimX = enemy.x; p.aimY = enemy.y;
+        emit(state, { type: 'chargeStart', playerId: p.id });
+        return true;
+      }
+      if (keepMove) return false;
+      if (clear) {
+        // на линии огня, но идёт перезарядка — короткий манёвр вбок, скоро повтор
+        var pr = Math.atan2(enemy.y - p.y, enemy.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
+        p.moveTarget = clampToArena(p.x + Math.cos(pr) * 40, p.y + Math.sin(pr) * 40, p.radius);
+        p.ai.nextDecisionAt = now + 180;
+      } else {
+        var perp = Math.atan2(enemy.y - p.y, enemy.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
+        p.moveTarget = clampToArena(p.x + Math.cos(perp) * 90, p.y + Math.sin(perp) * 90, p.radius);
+        p.ai.nextDecisionAt = now + decisionEvery * 0.6;
+      }
+      return false;
+    }
+
     if (lowHp) {
       var ob = nearestObstacle(obs, p.x, p.y);
       if (ob) {
@@ -770,40 +879,25 @@
         var away0 = Math.atan2(p.y - enemy.y, p.x - enemy.x);
         p.moveTarget = clampToArena(p.x + Math.cos(away0) * 120, p.y + Math.sin(away0) * 120, p.radius);
       }
-      p.ai.nextDecisionAt = now + 500; return;
+      p.ai.nextDecisionAt = now + 500;
+      tryShoot(true); // из укрытия бот тоже отвечает; замах сам выставит nextDecisionAt при броске
+      return;
     }
     if (dist < cfg.minRange) {
       var away = Math.atan2(p.y - enemy.y, p.x - enemy.x);
       p.moveTarget = clampToArena(p.x + Math.cos(away) * 90, p.y + Math.sin(away) * 90, p.radius);
-      p.ai.nextDecisionAt = now + decisionEvery; return;
+      p.ai.nextDecisionAt = now + decisionEvery;
+      tryShoot(true); // отходит и бросает: иначе подошедший игрок не получал ответа вообще
+      return;
     }
     if (dist > cfg.maxRange) {
       var toward = Math.atan2(enemy.y - p.y, enemy.x - p.x);
       p.moveTarget = clampToArena(p.x + Math.cos(toward) * 110, p.y + Math.sin(toward) * 110, p.radius);
-      p.ai.nextDecisionAt = now + decisionEvery * 0.7; return;
+      p.ai.nextDecisionAt = now + decisionEvery * 0.7;
+      tryShoot(true); // сближается и бросает, если линия уже чистая
+      return;
     }
-    // Сила броска подбирается так, чтобы снежок приземлился чуть за целью:
-    // дальность полёта = 140 + power*380, окно попадания — последние ~50 px дуги.
-    // (В прототипе бралось 0.35 + dist/500, и боты систематически перебрасывали цель.)
-    var testPower = Math.min(1, Math.max(0, (dist + 20 - 140) / 380));
-    if (canHitTarget(obs, p, enemy.x, enemy.y, testPower) && canShoot) {
-      if (spec.id === 'explosive' && p.specialCooldown <= 0 && rng.next() < lvl.useAbility) {
-        useSpecial(state, p, enemy.x, enemy.y);
-      }
-      p.charging = true; p.chargeStart = now;
-      p.ai.chargeDuration = Math.max(0.25, testPower * 1.2 + (rng.next() - 0.5) * lvl.chargeJitter);
-      p.aimX = enemy.x; p.aimY = enemy.y;
-      emit(state, { type: 'chargeStart', playerId: p.id });
-    } else if (!canShoot && canHitTarget(obs, p, enemy.x, enemy.y, testPower)) {
-      // на линии огня, но идёт перезарядка — короткий манёвр вбок, скоро повтор
-      var pr = Math.atan2(enemy.y - p.y, enemy.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
-      p.moveTarget = clampToArena(p.x + Math.cos(pr) * 40, p.y + Math.sin(pr) * 40, p.radius);
-      p.ai.nextDecisionAt = now + 180;
-    } else {
-      var perp = Math.atan2(enemy.y - p.y, enemy.x - p.x) + (rng.next() < 0.5 ? 1 : -1) * Math.PI / 2;
-      p.moveTarget = clampToArena(p.x + Math.cos(perp) * 90, p.y + Math.sin(perp) * 90, p.radius);
-      p.ai.nextDecisionAt = now + decisionEvery * 0.6;
-    }
+    tryShoot(false);
   }
 
   // ============================================================
@@ -915,7 +1009,7 @@
       var dead = false, hitWall = false, directHit = false;
       if (s.t >= s.flightDuration || (!s.flat && s.z < 0) || s.x < 0 || s.x > W || s.y < 0 || s.y > H) dead = true;
       if (!dead && wallBlocks(obs, s.x, s.y, s.z)) { dead = true; hitWall = true; }
-      if (!dead && s.z <= 14) {
+      if (!dead && s.z <= HIT_Z) {
         for (var k = 0; k < state.players.length; k++) {
           var p = state.players[k];
           if (p.team === s.team || !alive(p) || state.time < p.iframeUntil) continue;
@@ -1540,7 +1634,9 @@
     BOT_LEVEL_NAMES: ['Лёгкий', 'Обычный', 'Сложный'],
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,
     makeRng: makeRng, shuffle: shuffle,
-    canHitTarget: canHitTarget, // чистая функция для клиента: упрётся ли снежок в препятствие (луч прицела)
+    HIT_Z: HIT_Z,
+    canHitTarget: canHitTarget, // чистая функция: упрётся ли снежок в препятствие (ею целятся боты)
+    aimPath: aimPath,           // чистая функция для клиента: путь снежка для луча прицела
     createMatch: createMatch,
     applyInput: applyInput,
     setBot: setBot,

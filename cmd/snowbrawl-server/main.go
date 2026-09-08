@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/admin"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/web"
@@ -57,7 +59,11 @@ func run() error {
 	log.Info().Str("build", cfg.BuildVersion).Str("sim", prog.Version()).Int("proto", protocol.Version).
 		Str("addr", cfg.Addr).Bool("webFromDisk", cfg.WebDir != "").Msg("starting snowbrawl-server")
 
-	h := hub.New(cfg, prog, log)
+	mod, err := moderation.Open(cfg.ModerationFile, log)
+	if err != nil {
+		return fmt.Errorf("moderation store: %w", err)
+	}
+	h := hub.New(cfg, prog, log, mod)
 	h.Run()
 	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: cfg.MsgRate, TrustProxy: cfg.TrustProxy, Log: log}, h)
 
@@ -65,7 +71,7 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery(), requestLogger(log))
 	r.GET("/ws", gin.WrapH(wsServer))
-	admin.Register(r, h, admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version}, cfg.AdminToken, started)
+	stopAdmin := admin.Register(r, h, mod, admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version}, cfg.AdminToken, started, cfg.TrustProxy)
 	web.Register(r, fsys, cfg.WebDir != "", cfg.BuildVersion)
 
 	srv := &http.Server{Addr: cfg.Addr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
@@ -85,6 +91,7 @@ func run() error {
 	}
 	log.Info().Msg("shutting down")
 	h.Shutdown()
+	stopAdmin() // отпускаем висящие SSE-соединения админки, иначе они съедят таймаут ниже
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

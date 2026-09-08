@@ -5,6 +5,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sort"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/match"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/room"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
@@ -49,17 +51,21 @@ type Hub struct {
 	// lastOnline — последнее разосланное число игроков: рассылаем только при изменении.
 	lastOnline int
 	// chat — общий чат меню: сообщения в памяти, TTL = cfg.ChatTTL.
-	chat    []protocol.ChatMessage
+	chat    []chatEntry
 	chatSeq uint64
+
+	// mod — роли и баны по IP. У стора свой мьютекс; hub только читает, запись на диск делает
+	// админка вне h.mu (см. internal/hub/moderation.go). Может быть nil.
+	mod *moderation.Store
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
-// New создаёт hub.
-func New(cfg config.Config, prog *sim.Program, log zerolog.Logger) *Hub {
+// New создаёт hub. mod может быть nil: тогда все игроки без роли и без бана.
+func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderation.Store) *Hub {
 	return &Hub{
-		cfg: cfg, prog: prog, log: log, now: time.Now,
+		cfg: cfg, prog: prog, log: log, now: time.Now, mod: mod,
 		byToken: map[string]*session.Player{}, byID: map[string]*session.Player{},
 		rooms:    map[string]*room.Room{},
 		matches:  map[string]*match.Match{},
@@ -171,6 +177,8 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.handleTraining(p, env.Data)
 	case protocol.CChatSend:
 		h.handleChatSend(p, env.Data)
+	case protocol.CChatDel:
+		h.handleChatDel(p, env.Data)
 	default:
 		h.sendErr(c, protocol.ErrBadMessage, "unknown type "+env.Type)
 	}
@@ -219,6 +227,14 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		c.Close(websocket.StatusPolicyViolation, "stale client")
 		return
 	}
+	// Бан проверяем после proto и build: забаненный со старой сборкой сначала должен получить
+	// reload, иначе увидит ошибку, которую его клиент не умеет показать. HTTP не трогаем —
+	// страница и /api/* открываются как всем.
+	if h.banned(c.IP()) {
+		h.sendErr(c, protocol.ErrBanned, "доступ с этого адреса заблокирован")
+		c.Close(websocket.StatusPolicyViolation, "banned")
+		return
+	}
 	now := h.now()
 	var p *session.Player
 	if hello.Token != "" {
@@ -227,7 +243,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 	if p == nil {
 		nick, err := protocol.NormalizeNick(hello.Nick)
 		if err != nil {
-			h.sendErr(c, protocol.ErrBadNick, err.Error())
+			h.sendErr(c, nickErrCode(err), err.Error())
 			return
 		}
 		p = session.New(nick, c.IP(), now)
@@ -236,8 +252,12 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		h.log.Info().Str("player", p.ID).Str("nick", nick).Str("ip", p.IP).Msg("new player")
 	} else {
 		if hello.Nick != "" && p.Place == session.InMenu {
+			// Ошибку не глотаем: с цензурой ников молчаливый отказ выглядел бы как «ник не
+			// сохранился». Соединение при этом живо, игрок остаётся под прежним ником.
 			if nick, err := protocol.NormalizeNick(hello.Nick); err == nil {
 				p.Nick = nick
+			} else {
+				h.sendErr(c, nickErrCode(err), err.Error())
 			}
 		}
 		if old, ok := p.Conn.(*ws.Conn); ok && old != c {
@@ -252,6 +272,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 	c.Send(protocol.MustEncode(protocol.SWelcome, protocol.Welcome{
 		Token: p.Token, PlayerID: p.ID, Nick: p.Nick, Build: h.cfg.BuildVersion, SimVersion: h.prog.Version(),
 		Proto: protocol.Version, Draining: h.draining, Resume: string(p.Place), Online: h.onlineLocked(),
+		Rank: h.rank(p.IP),
 	}))
 	if h.draining {
 		c.Send(h.drainMessage())
@@ -353,6 +374,14 @@ func (h *Hub) handleRoomJoin(p *session.Player, data json.RawMessage) {
 	if r == nil {
 		h.codeTryFailed(p.IP)
 		h.sendErrP(p, protocol.ErrRoomNotFound, "room not found")
+		return
+	}
+	// Разделы не пересекаются: по коду PVE-комнаты из раздела PVP не пускаем. Попытку
+	// считаем неудачной — иначе отличимый ответ «другой раздел» даёт перебору закрытых
+	// комнат бесплатный оракул «код существует».
+	if req.Section != "" && r.Section() != normSection(req.Section) {
+		h.codeTryFailed(p.IP)
+		h.sendErrP(p, protocol.ErrWrongSection, "room from another section")
 		return
 	}
 	// Войти можно и в комнату с идущим матчем: слот комнаты — это боец матча, вошедший
@@ -554,7 +583,8 @@ func (h *Hub) startRoomMatch(r *room.Room) *match.Match {
 		if mp == nil {
 			continue
 		}
-		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Index: m.Index, Role: m.Role})
+		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Index: m.Index,
+			Role: m.Role, Rank: h.rank(mp.IP)})
 	}
 	m := h.launchMatch(r.Code, r.Mode, r.Arena, r.GameMode, r.Campaign, r.Difficulty, players)
 	if m == nil {
@@ -595,6 +625,7 @@ func (h *Hub) roomState(r *room.Room) protocol.RoomState {
 		if p != nil {
 			rp.Nick, rp.Connected = p.Nick, p.Connected()
 			rp.InMatch = p.Place == session.InMatch && p.MatchID == r.MatchID
+			rp.Rank = h.rank(p.IP)
 		}
 		st.Players = append(st.Players, rp)
 	}
@@ -872,6 +903,11 @@ func (h *Hub) drainMessage() []byte {
 }
 
 // Stats — сводка для админки.
+//
+// ВАЖНО: сводка не должна меняться сама по себе между вызовами при неизменном состоянии —
+// на этом стоит SSE-поток админки (отправляем только изменения). Поэтому здесь абсолютные
+// метки времени, а не «мс назад», и детерминированный порядок списков; длительности считает
+// страница от поля Now. См. TestStatsIsStableBetweenCalls.
 type Stats struct {
 	Build       string       `json:"build"`
 	SimVersion  string       `json:"sim"`
@@ -886,25 +922,33 @@ type Stats struct {
 	Rooms       []RoomStat   `json:"rooms"`
 	Matches     []match.Info `json:"matches"`
 	MatchesLive int          `json:"matchesLive"`
+
+	// Модерация: выданные роли, баны и размер чата — админка получает их тем же потоком.
+	Ranks     []moderation.Entry `json:"ranks"`
+	Bans      []moderation.Ban   `json:"bans"`
+	ChatSize  int                `json:"chatSize"`
+	ModBroken bool               `json:"modBroken,omitempty"` // файл ролей и банов был битым
 }
 
 // PlayerStat — сессия игрока в сводке: кто это, где находится и на связи ли.
 type PlayerStat struct {
-	ID         string `json:"id"`
-	Nick       string `json:"nick"`
-	IP         string `json:"ip"`
-	Place      string `json:"place"`           // menu | room | match
-	Where      string `json:"where,omitempty"` // код комнаты, режим очереди или id матча
-	Online     bool   `json:"online"`
-	AgeMs      int64  `json:"ageMs"`                  // сколько существует сессия
-	OfflineFor int64  `json:"offlineForMs,omitempty"` // сколько нет связи
+	ID           string     `json:"id"`
+	Nick         string     `json:"nick"`
+	IP           string     `json:"ip"`
+	Place        string     `json:"place"`           // menu | room | match
+	Where        string     `json:"where,omitempty"` // код комнаты, режим очереди или id матча
+	Online       bool       `json:"online"`
+	Rank         string     `json:"rank,omitempty"`         // роль модерации по IP
+	Banned       bool       `json:"banned,omitempty"`       // адрес в бане (сессия ещё не выкинута)
+	Since        time.Time  `json:"since"`                  // когда игрок зашёл в игру
+	OfflineSince *time.Time `json:"offlineSince,omitempty"` // с какого момента нет связи
 
 	// Тренировка с ботами: сервер её не считает, данные со слов клиента.
-	Training      bool   `json:"training,omitempty"`
-	TrainingMode  int    `json:"trainingMode,omitempty"`
-	TrainingArena int    `json:"trainingArena,omitempty"`
-	TrainingRole  string `json:"trainingRole,omitempty"`
-	TrainingMs    int64  `json:"trainingMs,omitempty"`
+	Training      bool       `json:"training,omitempty"`
+	TrainingMode  int        `json:"trainingMode,omitempty"`
+	TrainingArena int        `json:"trainingArena,omitempty"`
+	TrainingRole  string     `json:"trainingRole,omitempty"`
+	TrainingSince *time.Time `json:"trainingSince,omitempty"`
 }
 
 // RoomStat — комната в сводке.
@@ -984,7 +1028,7 @@ func (h *Hub) Stats() Stats {
 		}
 		ps := PlayerStat{
 			ID: p.ID, Nick: p.Nick, IP: p.IP, Place: string(p.Place), Online: online,
-			AgeMs: now.Sub(p.CreatedAt).Milliseconds(),
+			Since: p.CreatedAt, Rank: h.rank(p.IP), Banned: h.banned(p.IP),
 		}
 		switch p.Place {
 		case session.InRoom:
@@ -993,16 +1037,24 @@ func (h *Hub) Stats() Stats {
 			ps.Where = p.MatchID
 		}
 		if !online && !p.DisconnectedAt.IsZero() {
-			ps.OfflineFor = now.Sub(p.DisconnectedAt).Milliseconds()
+			t := p.DisconnectedAt
+			ps.OfflineSince = &t
 		}
 		if p.Training {
 			ps.Training, ps.TrainingMode, ps.TrainingArena, ps.TrainingRole = true, p.TrainingMode, p.TrainingArena, p.TrainingRole
-			ps.TrainingMs = now.Sub(p.TrainingSince).Milliseconds()
+			t := p.TrainingSince
+			ps.TrainingSince = &t
 			st.Training++
 		}
 		st.Sessions = append(st.Sessions, ps)
 	}
-	sort.Slice(st.Sessions, func(i, j int) bool { return st.Sessions[i].Nick < st.Sessions[j].Nick })
+	// Игроки — от самых «старых» к новым; тай-брейк по id, чтобы порядок не плавал.
+	sort.Slice(st.Sessions, func(i, j int) bool {
+		if !st.Sessions[i].Since.Equal(st.Sessions[j].Since) {
+			return st.Sessions[i].Since.Before(st.Sessions[j].Since)
+		}
+		return st.Sessions[i].ID < st.Sessions[j].ID
+	})
 	for _, r := range h.rooms {
 		rs := RoomStat{Code: r.Code, Mode: r.Mode, Arena: r.Arena, GameMode: r.GameMode,
 			Visibility: r.Visibility, Members: len(r.Members), InMatch: r.InMatch}
@@ -1015,14 +1067,35 @@ func (h *Hub) Stats() Stats {
 		}
 		st.Rooms = append(st.Rooms, rs)
 	}
+	// Обход map даёт случайный порядок: без сортировки диффинг потока админки не сработал бы
+	// никогда, да и таблицы прыгали бы на глазах.
+	sort.Slice(st.Rooms, func(i, j int) bool { return st.Rooms[i].Code < st.Rooms[j].Code })
 	for _, m := range h.matches {
 		st.Matches = append(st.Matches, m.Info())
 	}
+	sort.Slice(st.Matches, func(i, j int) bool {
+		if !st.Matches[i].Created.Equal(st.Matches[j].Created) {
+			return st.Matches[i].Created.Before(st.Matches[j].Created)
+		}
+		return st.Matches[i].ID < st.Matches[j].ID
+	})
 	st.MatchesLive = len(h.matches)
+	st.Ranks, st.Bans = h.mod.Ranks(), h.mod.Bans()
+	st.ChatSize = len(h.chat)
+	st.ModBroken = h.mod.Broken()
 	return st
 }
 
 // ---- утилиты ----
+
+// nickErrCode — какой код ошибки отправить игроку: мат в нике объясняется отдельно от
+// требований к длине и символам.
+func nickErrCode(err error) string {
+	if errors.Is(err, protocol.ErrProfaneNick) {
+		return protocol.ErrNickProfanity
+	}
+	return protocol.ErrBadNick
+}
 
 func (h *Hub) sendErr(c *ws.Conn, code, msg string) {
 	c.Send(protocol.MustEncode(protocol.SError, protocol.Error{Code: code, Message: msg}))

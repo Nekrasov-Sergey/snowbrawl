@@ -1,6 +1,6 @@
 /* Сетевой слой: WebSocket с автопереподключением и очередь снапшотов с интерполяцией. */
 window.SBNet = (function () {
-  var PROTO = 2;
+  var PROTO = 3;
 
   function connect(opts) {
     var ws = null, closedByUser = false, attempt = 0, timer = null, state = 'connecting';
