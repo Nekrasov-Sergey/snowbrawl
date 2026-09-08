@@ -869,10 +869,20 @@ func TestTrainingShownInStats(t *testing.T) {
 }
 
 // TestChat — сообщение доходит до всех, история приходит новому клиенту, флуд отклоняется.
+// Пауза между сообщениями задрана до часа: любое второе сообщение в тесте — флуд,
+// проверка не зависит от таймингов гонки/CI.
 func TestChat(t *testing.T) {
-	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 20 * time.Millisecond })
+	s := newServer(t, func(c *config.Config) { c.ChatCooldown = time.Hour })
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
+
+	// Пустое сообщение отклоняется до проверки антифлуда.
+	a.send(protocol.CChatSend, protocol.ChatSend{Text: "   "})
+	var e protocol.Error
+	a.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrBadMessage {
+		t.Fatalf("ожидался bad_message на пустое, got %s", e.Code)
+	}
 
 	a.send(protocol.CChatSend, protocol.ChatSend{Text: "  привет   всем\n\n"})
 	var m protocol.ChatMessage
@@ -885,20 +895,11 @@ func TestChat(t *testing.T) {
 		t.Fatalf("второй клиент получил %+v", m)
 	}
 
-	// Флуд: сразу второе сообщение — отклонение.
+	// Второе сообщение — флуд (пауза час).
 	a.send(protocol.CChatSend, protocol.ChatSend{Text: "ещё"})
-	var e protocol.Error
 	a.expect(protocol.SError, &e)
 	if e.Code != protocol.ErrChatFlood {
 		t.Fatalf("ожидался chat_flood, got %s", e.Code)
-	}
-
-	// Пустое сообщение после пауз — bad_message.
-	time.Sleep(30 * time.Millisecond)
-	a.send(protocol.CChatSend, protocol.ChatSend{Text: "   "})
-	a.expect(protocol.SError, &e)
-	if e.Code != protocol.ErrBadMessage {
-		t.Fatalf("ожидался bad_message на пустое, got %s", e.Code)
 	}
 
 	// Новый клиент получает историю.
