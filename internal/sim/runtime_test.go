@@ -101,6 +101,18 @@ func TestCompileExports(t *testing.T) {
 			t.Fatalf("sim.js: экспорт %q не функция (%v)", fn, err)
 		}
 	}
+	// Радиусы и сроки: по ним клиент рисует ауру, взрыв и дугу пузыря, а обучение строит условия
+	// шагов. Пропажа экспорта не сломает сервер, но развалит рендер и уроки.
+	for _, c := range []string{"FREEZER_AURA_R", "FREEZER_AURA_SLOW", "FREEZER_AURA_RELOAD",
+		"FROST_R", "FROST_SLOW", "EXPLOSION_RADIUS", "BUBBLE_REGEN_MS", "WALL_LIFETIME_MS"} {
+		v, err := vm.RunString("SnowBrawlSim." + c)
+		if err != nil {
+			t.Fatalf("sim.js: экспорт %q не читается: %v", c, err)
+		}
+		if n := v.ToFloat(); !(n > 0) {
+			t.Fatalf("sim.js: экспорт %q = %v, ожидалось положительное число", c, v)
+		}
+	}
 }
 
 func TestBotsOnlyMatchFinishes(t *testing.T) {

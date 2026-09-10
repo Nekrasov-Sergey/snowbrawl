@@ -34,6 +34,9 @@ type Config struct {
 	// ModerationFile — JSON с ролями и банами по IP (см. internal/moderation). Пустой путь —
 	// всё живёт только в памяти и теряется при перезапуске: так удобно в разработке.
 	ModerationFile string
+	// OnlineFile — ряд онлайна для графика в админке: точка в минуту, семь дней
+	// (см. internal/onlinestat). Пустой путь — история только в памяти.
+	OnlineFile string
 }
 
 // Defaults возвращает конфигурацию по умолчанию.
@@ -66,6 +69,7 @@ func Load(args []string, buildVersion string) (Config, error) {
 	envStr(&c.AdminToken, "SNOWBRAWL_ADMIN_TOKEN")
 	envStr(&c.WebDir, "SNOWBRAWL_WEB_DIR")
 	envStr(&c.ModerationFile, "SNOWBRAWL_MODERATION_FILE")
+	envStr(&c.OnlineFile, "SNOWBRAWL_ONLINE_FILE")
 	envStr(&c.LogLevel, "SNOWBRAWL_LOG_LEVEL")
 	if err := envInt(&c.MaxConns, "SNOWBRAWL_MAX_CONNS"); err != nil {
 		return c, err
@@ -103,6 +107,7 @@ func Load(args []string, buildVersion string) (Config, error) {
 	fs.StringVar(&c.AdminToken, "admin-token", c.AdminToken, "токен админки (/admin/*)")
 	fs.StringVar(&c.WebDir, "web-dir", c.WebDir, "каталог клиента на диске вместо встроенного")
 	fs.StringVar(&c.ModerationFile, "moderation-file", c.ModerationFile, "файл с ролями и банами по IP")
+	fs.StringVar(&c.OnlineFile, "online-file", c.OnlineFile, "файл истории онлайна для графика в админке")
 	fs.IntVar(&c.MaxConns, "max-conns", c.MaxConns, "максимум WebSocket-соединений")
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "уровень логов")
 	fs.BoolVar(&c.LogPretty, "log-pretty", c.LogPretty, "человекочитаемые логи")

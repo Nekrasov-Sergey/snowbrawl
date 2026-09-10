@@ -20,7 +20,7 @@
     rank: '',                 // роль модерации: '' | 'admin' | 'creator' (цвет ника, права в чате)
     net: null,
     connected: false,
-    ping: { at: 0, rtt: 0 },  // задержка до сервера: меряется всегда, а не только в матче
+    ping: { at: 0, rtt: 0, jitter: 0 },  // задержка до сервера: меряется всегда, а не только в матче
     draining: false,
     section: 'pvp',           // pvp | pve — раздел, в котором игрок сейчас ходит
     create: { mode: 3, arena: 0, visibility: 'open', botLevel: 1 },
@@ -28,7 +28,6 @@
     rooms: { page: 0, data: null },
     roomMatch: null,          // последнее room.match — состояние идущего матча для лобби
     chat: { msgs: [], unread: 0, open: false }, // общий чат меню
-    tut: { role: store.get('sb.tutRole') || 'Раннер' }, // выбранный класс для «Основ»
     offline: { mode: 1, role: 'Раннер', arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true },
     room: null,               // последнее room.state
     game: null                // активный матч (см. startNetMatch / startOfflineMatch)
@@ -39,6 +38,134 @@
   // ------------------------------------------------------------
   // Переход на экран. Стек nav нужен кнопке «Назад»: экранов-хабов стало больше, и зашитая
   // в каждую кнопку цель начинала врать (список комнат достижим только из раздела).
+  // ---- адрес и история браузера ----
+  // Экраны вне боя живут в хэше: перезагрузка страницы возвращает игрока туда, где он был, и
+  // работает кнопка «назад» браузера. Лобби и матч в хэш не пишем — их восстанавливает сервер
+  // по токену (welcome.resume), а в адресе остаётся тот экран, с которого игрок туда попал.
+  var ROUTES = {
+    '#/': { screen: 'menu' },
+    '#/rooms/pvp': { screen: 'rooms', section: 'pvp' },
+    '#/rooms/pve': { screen: 'rooms', section: 'pve' },
+    '#/createroom': { screen: 'createroom' },
+    '#/tutlist': { screen: 'tutlist' },
+    '#/settings': { screen: 'settings' }
+  };
+  var ROUTABLE = { menu: 1, rooms: 1, createroom: 1, tutlist: 1, settings: 1 };
+  var routing = false, navSeq = 0, leavingSite = false, leaveTimer = null;
+
+  function hashOf(name) {
+    if (name === 'rooms') return '#/rooms/' + (app.section === 'pve' ? 'pve' : 'pvp');
+    for (var h in ROUTES) if (ROUTES[h].screen === name && !ROUTES[h].section) return h;
+    return '#/';
+  }
+  function parseHash(h) { return ROUTES[h] || null; }
+
+  var route = {
+    write: function (name, opts) {
+      if (routing) return;
+      var st = { sb: 1, screen: name, seq: ++navSeq };
+      try {
+        if (name === 'lobby' || name === 'game') {
+          // Лобби и бой в истории записи не занимают. Раньше занимали, и выход из комнаты
+          // (goto('rooms', {back:true}) → replaceState) превращал запись лобби во ВТОРУЮ запись
+          // списка комнат: «назад» приходилось нажимать дважды — первое нажатие съедало дубль.
+          // Отдельная запись им и не нужна: onPop разбирает бой и лобби по app.screen, ещё до
+          // обращения к состоянию записи, поэтому «назад» там всё равно работает как «Выйти».
+          return;
+        }
+        if (!ROUTABLE[name]) {
+          // Ник адрес не меняет, но запись нужна: «назад» с него возвращает в меню.
+          history.pushState(st, '', location.hash || '#/');
+          return;
+        }
+        // Заменяем, а не пушим, если текущая запись уже описывает этот же экран. Так выход из
+        // боя или урока на тот экран, с которого игрок в него вошёл, не создаёт дубль записи —
+        // иначе «назад» надо нажимать дважды: первое нажатие съедало бы дубль впустую.
+        var cur = history.state;
+        var same = cur && cur.sb && cur.screen === name;
+        if ((opts && opts.back) || same) history.replaceState(st, '', hashOf(name));
+        else history.pushState(st, '', hashOf(name));
+      } catch (e) { /* приватный режим может запретить историю — игра работает и так */ }
+    }
+  };
+
+  // Служебная запись-страж в начале истории: её съедает «назад» на корневом экране, и это
+  // единственный надёжный признак «дальше выход с сайта».
+  function pushGuard() {
+    try {
+      history.replaceState({ sb: 1, guard: true }, '', location.hash || '#/');
+    } catch (e) { /* игнор */ }
+  }
+
+  // Попытка уйти с сайта. Перезагрузка страницы не стирает записи истории от прошлой загрузки,
+  // поэтому history.back() часто уводит не наружу, а на нашу же старую запись — и события этого
+  // перехода надо проигнорировать целиком. Флаг снимает короткий таймер, а не первое событие:
+  // один переход поднимает и popstate, и hashchange, и второе из них увело бы по старому адресу.
+  // Раньше флаг не снимался вовсе — «назад» умирал до следующей перезагрузки.
+  function leaveSite(steps) {
+    leavingSite = true;
+    clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(function () {
+      leavingSite = false;
+      // Уйти не удалось: приводим адрес к текущему экрану, иначе он врёт. Следующее нажатие
+      // «назад» съест следующую запись и в конце всё-таки уведёт с сайта.
+      route.write(app.screen, { back: true });
+    }, 250);
+    history.go(-(steps || 1));
+  }
+
+  function onPop() {
+    if (leavingSite) return;
+    if (app.screen === 'game') { leaveGame(); return; }
+    if (app.screen === 'lobby') { leaveLobby(); return; }
+    var st = history.state;
+    if (st && st.guard) {
+      // Ниже стража лежат либо записи прошлой загрузки страницы, либо чужой сайт. Если игрок не
+      // на корневом экране, «назад» обязан привести в меню: после F5 в обучении или в списке
+      // комнат он иначе не мог вернуться в меню вообще, только перезагрузкой.
+      if (app.screen !== 'menu' && app.screen !== 'nick') { goto('menu'); return; }
+      if (!Device.isTouch()) {
+        // На ПК «назад» — осознанное действие мышью, лишний вопрос там раздражает.
+        leaveSite();
+        return;
+      }
+      // Восстанавливаем съеденную запись и спрашиваем: на телефоне одно касание закрывало вкладку.
+      route.write(app.screen, null);
+      askExit();
+      return;
+    }
+    var target = parseHash(location.hash) || { screen: 'menu' };
+    // Сравниваем и раздел: иначе возврат на запись того же списка комнат вызывал перерисовку
+    // вместо «ничего не делать», и нажатие выглядело пустым.
+    if (target.screen === app.screen && (!target.section || target.section === app.section)) return;
+    routing = true;
+    if (target.section) app.section = target.section;
+    if (app.nav.length && app.nav[app.nav.length - 1] === target.screen) app.nav.pop();
+    goto(target.screen, { back: true });
+    routing = false;
+    if (!parseHash(location.hash)) { try { history.replaceState(history.state, '', '#/'); } catch (e) { /* игнор */ } }
+  }
+  window.addEventListener('popstate', onPop);
+  window.addEventListener('hashchange', onPop);
+
+  function askExit() {
+    var box = $('exitAsk');
+    if (!box.hidden) return;
+    // Закрыть вкладку скриптом нельзя (window.close работает только для окон, открытых
+    // скриптом), поэтому если до игры в истории ничего не было — уходить некуда.
+    var canLeave = history.length > 2;
+    $('exitAskText').textContent = canLeave
+      ? 'Вы вернётесь на страницу, с которой пришли. Матч и комната при этом будут потеряны.'
+      : 'Игра открыта в новой вкладке, поэтому вернуться некуда — закройте вкладку сами.';
+    $('exitGo').hidden = !canLeave;
+    box.hidden = false;
+  }
+  $('exitStay').onclick = function () { Audio_.uiClick(); $('exitAsk').hidden = true; };
+  $('exitGo').onclick = function () {
+    $('exitAsk').hidden = true;
+    leaveSite(2); // страж и восстановленная поверх него запись
+  };
+
   function goto(name, opts) {
     var push = !(opts && opts.back);
     if (push && app.screen && app.screen !== name && CAN_RETURN[app.screen]) app.nav.push(app.screen);
@@ -51,18 +178,30 @@
     if (name === 'tutlist') buildTutList();
     if (name === 'menu') {
       $('menuNick').textContent = app.nick; renderOnline(); renderTutorialBadge(); renderAdminBtn();
-      // Сообщения приходят и вне меню: при возврате лог надо дорисовать, иначе он остаётся
-      // на том, что было видно до ухода с экрана.
-      if (app.chat.open) { app.chat.unread = 0; chatBadge(); chatRender(); }
     }
     if (name === 'settings') renderSettings();
     if (name !== 'game' && app.game) stopGame();
+    $('chatPanel').hidden = !chatVisible();
+    if (name !== 'game') {
+      // Чат виден на всех экранах вне боя, а сообщения приходят и пока смотришь список комнат:
+      // при переходе лог надо дорисовать, иначе он остаётся на том, что было видно раньше.
+      if (app.chat.open) { app.chat.unread = 0; chatBadge(); chatRender(); }
+      // Индикатор связи мог переехать в игровую панель — возвращаем в шапку.
+      var conn = $('connState');
+      if (conn.parentNode !== $('topLeftBar')) $('topLeftBar').insertBefore(conn, $('fsTopBtn'));
+    }
     document.documentElement.classList.toggle('ingame', name === 'game');
+    document.documentElement.classList.toggle('tut', name === 'game' && !!(app.game && app.game.tutorial));
+    syncFsTop();
+    route.write(name, opts);
   }
   // Экраны, на которые имеет смысл возвращаться кнопкой «Назад».
   var CAN_RETURN = { menu: 1, createroom: 1, rooms: 1, settings: 1, tutlist: 1 };
   function goBack() {
     Audio_.uiClick();
+    // История браузера — только транспорт: куда возвращаться, решает app.nav, а переход
+    // выполняет обработчик popstate. Иначе два стека разъезжаются.
+    if (history.state && history.state.sb) { history.back(); return; }
     var to = app.nav.pop() || 'menu';
     goto(to, { back: true });
   }
@@ -83,7 +222,8 @@
     if (!el) return;
     var known = app.connected && app.ping.rtt > 0;
     el.textContent = known ? Math.round(app.ping.rtt) + ' мс' : '';
-    el.className = known && app.ping.rtt > 200 ? 'bad' : '';
+    // Красный — только про лаг: рваные снапшоты (джиттер) портят бой не меньше самой задержки.
+    el.className = known && (app.ping.rtt > 200 || app.ping.jitter > 100) ? 'bad' : '';
   }
   function onPong() {
     if (!app.ping.at) return;
@@ -106,7 +246,8 @@
   }
   var ERR_TEXT = {
     bad_nick: 'Ник: 2–16 символов, буквы, цифры, пробел, дефис.',
-    nick_profanity: 'В нике нельзя мат — придумайте другой.',
+    nick_profanity: 'В нике нельзя использовать мат — придумайте другой',
+    nick_taken: 'Этот ник уже занят. Возможно, вами с другого адреса — придумайте другой.',
     room_not_found: 'Комната с таким кодом не найдена.',
     room_full: 'Комната заполнена.',
     room_limit: 'С вашего адреса уже создано слишком много комнат.',
@@ -126,8 +267,13 @@
   };
   function fmtTime(ms) { var s = Math.ceil(ms / 1000); return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); }
 
-  $('soundToggle').textContent = Audio_.isEnabled() ? '🔊' : '🔇';
-  $('soundToggle').onclick = function () { Audio_.setEnabled(!Audio_.isEnabled()); $('soundToggle').textContent = Audio_.isEnabled() ? '🔊' : '🔇'; };
+  // Кнопка в углу — быстрый мьют: гасит в ноль и возвращает прежний уровень, как в системе.
+  $('soundToggle').onclick = function () {
+    Audio_.toggleMute();
+    Settings.set('volume', Audio_.getVolume());
+    renderVolume();
+    if (Audio_.getVolume() > 0) Audio_.uiClick(); // подтверждение на слух
+  };
   document.addEventListener('pointerdown', function () { Audio_.unlock(); }, { once: true });
 
   // ------------------------------------------------------------
@@ -139,7 +285,7 @@
       hello: function () { return { token: app.token, nick: app.nick, build: BUILD }; },
       onState: function (state) {
         app.connected = (state === 'open');
-        if (state !== 'open') app.ping.rtt = 0;
+        if (state !== 'open') { app.ping.rtt = 0; app.ping.jitter = 0; }
         renderOnline(); renderConn();
         var el = $('connState');
         el.className = state === 'open' ? 'on' : (state === 'closed' ? 'off' : '');
@@ -179,7 +325,7 @@
         break;
       case 'error':
         toast(ERR_TEXT[d.code] || ('Ошибка: ' + (d.msg || d.code)));
-        if (d.code === 'bad_nick' || d.code === 'nick_profanity') {
+        if (d.code === 'bad_nick' || d.code === 'nick_profanity' || d.code === 'nick_taken') {
           // Всплывашка живёт 3.5 с, а игрок уходит на экран ника — причину надо оставить там.
           goto('nick');
           $('nickMsg').textContent = ERR_TEXT[d.code];
@@ -238,6 +384,13 @@
       case 'pong':
         onPong();
         break;
+      case 'ping':
+        // Зонд сервера: он мерит задержку сам, чтобы показать её в лобби и в админке.
+        app.net.send('pong', { seq: (d && d.seq) || 0 });
+        break;
+      case 'room.ping':
+        onRoomPing(d);
+        break;
       case 'match.end':
         if (app.game && !app.game.offline) app.game.onEnd(d);
         break;
@@ -249,12 +402,12 @@
         break;
       case 'chat.clear':
         app.chat.msgs = []; app.chat.unread = 0; chatBadge();
-        if (app.chat.open && app.screen === 'menu') chatRender();
+        if (app.chat.open && chatVisible()) chatRender();
         break;
       case 'rank':
         app.rank = d.rank || '';
         renderAdminBtn();
-        if (app.chat.open && app.screen === 'menu') chatRender();
+        if (app.chat.open && chatVisible()) chatRender();
         break;
       case 'chat.msg':
         chatAdd(d);
@@ -280,8 +433,9 @@
 
   // Раздел ведёт сразу в список комнат: промежуточный экран был лишним шагом, и игрок
   // не видел, куда вообще можно зайти.
-  $('btnPvp').onclick = function () { Audio_.uiClick(); app.section = 'pvp'; goto('rooms'); };
-  $('btnPve').onclick = function () { Audio_.uiClick(); app.section = 'pve'; goto('rooms'); };
+  function openSection(name) { app.section = name; store.set('sb.section', name); goto('rooms'); }
+  $('btnPvp').onclick = function () { Audio_.uiClick(); openSection('pvp'); };
+  $('btnPve').onclick = function () { Audio_.uiClick(); openSection('pve'); };
   $('btnTutorial').onclick = function () { Audio_.uiClick(); goto('tutlist'); };
   $('btnSettings').onclick = function () { Audio_.uiClick(); goto('settings'); };
 
@@ -291,7 +445,25 @@
   function renderSettings() {
     $('setHaptics').checked = !!Settings.get('haptics');
     $('setTouch').value = Settings.get('touch');
+    renderVolume();
   }
+  // Громкость живёт в одном месте: значение в настройках, а звук, эмодзи кнопки и оба ползунка
+  // (в настройках и в углу экрана) — производные.
+  function renderVolume() {
+    var v = Audio_.getVolume(), pct = String(Math.round(v * 100));
+    $('setVolume').value = pct;
+    $('setVolumeVal').textContent = pct + '%';
+    $('volMini').value = pct;
+    $('volMini').title = 'Громкость ' + pct + '%';
+    $('soundToggle').textContent = v > 0 ? '🔊' : '🔇';
+  }
+  function applyVolume(v) {
+    Audio_.setVolume(v);
+    Settings.set('volume', Audio_.getVolume());
+    renderVolume();
+  }
+  $('setVolume').addEventListener('input', function () { applyVolume(Number($('setVolume').value) / 100); });
+  $('volMini').addEventListener('input', function () { applyVolume(Number($('volMini').value) / 100); });
   $('setHaptics').onchange = function () { Settings.set('haptics', $('setHaptics').checked); };
   $('setTouch').onchange = function () { Settings.set('touch', $('setTouch').value); Device.apply(); };
   $('backFromSettings').onclick = goBack;
@@ -510,8 +682,13 @@
       var text = (e.clipboardData || window.clipboardData).getData('text') || '';
       var digits = text.replace(/\D/g, '');
       if (!digits) return;
+      // preventDefault отменяет штатную вставку, а вместе с ней и событие input — автовход из
+      // обработчика input сюда не доезжает. Без строки ниже код оставался в клетках, но вход
+      // приходилось подтверждать вручную через Enter.
       e.preventDefault();
-      fillCode(digits, i);
+      if (digits.length >= 4) { clearCode(); fillCode(digits.slice(0, 4), 0); }
+      else fillCode(digits, i);
+      if (codeValue().length === 4) submitCode();
     });
     cell.addEventListener('focus', function () { cell.select(); });
   });
@@ -545,10 +722,10 @@
     var arena = (Sim.ARENAS[r.arena] || {}).name || '';
     var meta = [size];
     if (!isPve(r.gameMode) && arena) meta.push(arena);
-    meta.push('игроков ' + r.humans + '/' + r.capacity);
-    if (r.bots > 0) meta.push('ботов ' + r.bots);
-    if (r.hostNick) meta.push('хост ' + escapeHtml(r.hostNick));
-    meta.push(ageText(r.ageMs || 0));
+    meta.push('Игроков ' + r.humans + '/' + r.capacity);
+    if (r.bots > 0) meta.push('Ботов ' + r.bots);
+    if (r.hostNick) meta.push('Хост ' + escapeHtml(r.hostNick));
+    meta.push('Создана ' + ageText(r.ageMs || 0));
     el.innerHTML =
       '<div class="roomMain">' +
         '<span class="roomCode">' + (r.needCode ? '🔒 ••••' : escapeHtml(r.code)) + '</span>' +
@@ -591,10 +768,11 @@
     if (!app.room) return;
     if (navigator.clipboard) navigator.clipboard.writeText(app.room.code).then(function () { toast('Код скопирован: ' + app.room.code); });
   };
-  $('leaveLobby').onclick = function () {
-    Audio_.uiClick(); send('room.leave'); app.room = null; app.roomMatch = null;
-    goto('rooms');
-  };
+  function leaveLobby() {
+    send('room.leave'); app.room = null; app.roomMatch = null;
+    goto('rooms', { back: true });
+  }
+  $('leaveLobby').onclick = function () { Audio_.uiClick(); leaveLobby(); };
   $('joinMatchBtn').onclick = function () { Audio_.uiClick(); send('match.join'); };
   $('startRoomBtn').onclick = function () { Audio_.uiClick(); send('room.start'); };
   $('readyBtn').onclick = function () {
@@ -632,6 +810,25 @@
     toggleInfo($('lobbyModeInfo'), key, '<b>' + FORMAT_NAMES[key] + '.</b> ' + FORMAT_DESCRIPTIONS[key]);
   };
 
+  // Задержка участника лобби: её мерит сервер и присылает отдельным room.ping. Поля может не
+  // быть (бот, только что зашёл, нет связи) — тогда не рисуем ничего, а не «0 мс».
+  function pingHtml(p) {
+    if (!p || !p.connected || !(p.ping > 0)) return '';
+    return ' <span class="slotPing' + (p.ping > 200 ? ' bad' : '') + '">' + p.ping + ' мс</span>';
+  }
+  // room.ping приходит чаще room.state: вливаем задержки в уже нарисованный состав.
+  function onRoomPing(d) {
+    if (!d || !app.room || app.room.code !== d.code) return;
+    var by = {};
+    for (var i = 0; i < (d.pings || []).length; i++) by[d.pings[i].id] = d.pings[i].ping;
+    var players = app.room.players || [];
+    var changed = false;
+    for (var j = 0; j < players.length; j++) {
+      var next = by[players[j].id] || 0;
+      if (players[j].ping !== next) { players[j].ping = next; changed = true; }
+    }
+    if (changed && app.screen === 'lobby') renderLobby();
+  }
   function renderLobby() {
     var r = app.room; if (!r) return;
     var isHost = r.hostId === app.me;
@@ -695,7 +892,7 @@
           // В матче роль показывает боец слота: у участника в комнате она могла быть не выбрана.
           var role = (r.inMatch && sl ? sl.role : p.role) || 'боец случайный';
           var nickCls = p.rank ? ' class="rank-' + p.rank + '"' : '';
-          el.innerHTML = '<span><span' + nickCls + '>' + escapeHtml(p.nick) + '</span>' + (p.host ? '<span class="host">★ хост</span>' : '') + (p.connected ? '' : ' <span class="off">(нет связи)</span>') + '</span>' +
+          el.innerHTML = '<span><span' + nickCls + '>' + escapeHtml(p.nick) + '</span>' + pingHtml(p) + (p.host ? '<span class="host">★ хост</span>' : '') + (p.connected ? '' : ' <span class="off">(нет связи)</span>') + '</span>' +
             '<span class="role">' + role + hp + state + '</span>' +
             (isHost && p.id !== app.me && !r.inMatch ? '<button class="kick" data-id="' + p.id + '">выгнать</button>' : '');
         } else if (r.inMatch) {
@@ -867,21 +1064,28 @@
     getMe: function () { return app.game ? myPlayer(app.game.lastSnap) : null; },
     hasDirSpecial: function (role) { var sp = Sim.SPECIALS[role]; return !!sp && !!sp.needsDir; }
   });
-  var zonesHintTimer = null;
+  var zonesHintTimer = null, abilityHintTimer = null;
 
   // Полный экран (Android; на iPhone Safari недоступен — там режим «на экран Домой»).
-  $('fsBtn').onclick = function () {
+  // Две кнопки: в игровой панели и в шапке страницы — на телефоне полный экран нужен везде,
+  // а не только в бою, но одна плавающая кнопка села бы поверх HUD и стиков.
+  function toggleFullscreen() {
     if (document.fullscreenElement) { document.exitFullscreen(); return; }
     var el = document.documentElement;
     try { el.requestFullscreen({ navigationUI: 'hide' }).catch(function () { /* отказ — не страшно */ }); } catch (e) { /* игнор */ }
-  };
+  }
+  $('fsBtn').onclick = toggleFullscreen;
+  $('fsTopBtn').onclick = function () { Audio_.uiClick(); toggleFullscreen(); };
+  function syncFsTop() {
+    $('fsTopBtn').hidden = !(Device.isTouch() && Device.fullscreenAvailable() && app.screen !== 'game');
+  }
 
   // Возврат из фона: сервер через 20 с без ввода отдаёт бойца боту; любой ввод возвращает управление.
   document.addEventListener('visibilitychange', function () {
     // Пока вкладка скрыта, браузер тормозит таймеры: измеренный пинг устаревает, а состояние
     // кнопки мыши могло измениться без нас.
     releaseMouse();
-    app.ping.rtt = 0; renderConn();
+    app.ping.rtt = 0; app.ping.jitter = 0; renderConn();
     if (document.visibilityState !== 'visible' || !app.game || app.game.over || app.screen !== 'game') return;
     touch.reset(); intent.reset();
     var me = myPlayer(app.game.lastSnap);
@@ -909,15 +1113,23 @@
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'
         : '<div class="charrow"><span class="' + cls + '">' + name + '</span><span class="pips">' + pips + '</span></div>';
     }
-    var sig = '';
-    for (var i = 0; i < snap.players.length; i++) { var q = snap.players[i]; sig += q.id + ':' + q.hp + (q.koed ? 'k' : '') + (q.lives != null ? 'l' + q.lives : '') + ';'; }
-    if (sig !== hudCache.sig) {
-      hudCache.sig = sig;
-      var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
-      if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
-      if (!pve) {
-        var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
-        if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
+    // На телефоне HUD-строки скрыты: в ландшафте они абсолютно позиционированы поверх арены
+    // и закрывали игровое поле. HP там рисуется на канвасе под ником бойца. Скрываем из JS,
+    // а не правилом CSS: в PvE в #hudB живёт панель волны и полоса босса, её убирать нельзя.
+    var hidePips = Device.isTouch();
+    $('hudA').hidden = hidePips;
+    if (!pve) $('hudB').hidden = hidePips;
+    if (!hidePips) {
+      var sig = '';
+      for (var i = 0; i < snap.players.length; i++) { var q = snap.players[i]; sig += q.id + ':' + q.hp + (q.koed ? 'k' : '') + (q.lives != null ? 'l' + q.lives : '') + ';'; }
+      if (sig !== hudCache.sig) {
+        hudCache.sig = sig;
+        var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
+        if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
+        if (!pve) {
+          var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
+          if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
+        }
       }
     }
     if (pve) updatePveHud(snap, pve);
@@ -1037,7 +1249,6 @@
     $('hint').textContent = isTouch
       ? 'Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.'
       : 'WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом или E — отмена. Q или ПКМ — способность.';
-    $('netStat').hidden = !!g.offline; $('netStat').textContent = ''; $('netStat').className = '';
     $('tutFlash').hidden = true;
     // В матче комнаты «Выйти» ведёт в лобби, а не в меню; в обучении таймера нет — бой не кончается.
     $('btnToMenu').textContent = (!g.offline && g.roomCode) ? '← В лобби' : '← Выйти';
@@ -1056,13 +1267,21 @@
     $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
     Device.apply();
     touchLayer.hidden = !isTouch;
+    // HP на канвасе под ником: на телефоне HUD-строки скрыты, и иначе HP не видно вовсе.
+    render.setOptions({ pips: isTouch });
     touch.reset(); intent.reset();
     $('fsBtn').hidden = !(isTouch && Device.fullscreenAvailable());
     clearTimeout(zonesHintTimer);
+    clearTimeout(abilityHintTimer);
+    $('abilityHint').classList.remove('faded');
     if (isTouch) {
       touchLayer.classList.add('showZones');
       zonesHintTimer = setTimeout(function () { touchLayer.classList.remove('showZones'); }, 4000);
-      if (Sim.SPECIALS[myRole]) toast(abilityHint);
+      // Подсказка о способности лежит поверх арены — гасим, чтобы не мешала. Отдельного тоста
+      // больше нет: он дублировал ровно этот текст.
+      abilityHintTimer = setTimeout(function () { $('abilityHint').classList.add('faded'); }, 7000);
+      // В сенсорном бою шапка скрыта, поэтому точка соединения с пингом переезжает в панель.
+      $('gameConnSlot').appendChild($('connState'));
       if (Device.isPortrait() && !sessionFlag('sb.portraitHint')) toast('В горизонтальном положении телефона играть удобнее.');
     }
     goto('game');
@@ -1078,6 +1297,9 @@
     g.over = true;
     intent.reset(); touch.reset();
     $('toMenuBtn').textContent = 'Главное меню'; // в обучении подпись другая, см. showTutorialResult
+    // Кнопки обучения не должны протекать в обычный матч: табло у них одно.
+    $('tutNextBtn').hidden = true;
+    $('againBtn').className = '';
     overlay.style.display = 'flex';
     if (PVE_REASONS[reason]) {
       showPveResult(reason, snap || g.lastSnap);
@@ -1114,19 +1336,22 @@
     intent.reset(); touch.reset();
     render.setMarks([]);
     overlay.style.display = 'flex';
-    var scns = window.SBTutorial.SCENARIOS;
-    var left = scns.filter(function (s) { return !tutDone(s.id); });
+    var next = firstUndoneTutorial();
     if (scn && scn.id !== 'basics') {
       overlayText.textContent = (scn.role || '').toUpperCase() + ': ОБУЧЕНИЕ ПРОЙДЕНО';
-      overlaySub.textContent = left.length
-        ? 'Осталось: ' + left.slice(0, 3).map(function (s) { return s.title; }).join(', ') + (left.length > 3 ? '…' : '')
-        : 'Пройдены все обучения — вы знаете всех героев.';
     } else {
-      overlayText.textContent = 'ОБУЧЕНИЕ ПРОЙДЕНО 🎉';
-      overlaySub.textContent = 'Дальше — обучения по героям: рывок, таран, выстрел, взрыв, наледь, стена.';
+      overlayText.textContent = 'ОСНОВЫ ПРОЙДЕНЫ 🎉';
     }
+    overlaySub.textContent = next
+      ? 'Дальше: ' + next.title
+      : 'Пройдены все обучения — вы знаете всех героев.';
     overlayText.style.color = '#7CFFB2';
+    // Главная кнопка ведёт к следующему уроку: заходить за ним в список — лишний шаг.
+    var nextBtn = $('tutNextBtn');
+    nextBtn.hidden = !next;
+    if (next) nextBtn.textContent = 'Следующее: ' + next.title;
     $('againBtn').textContent = 'Пройти снова';
+    $('againBtn').className = next ? 'secondary' : '';
     $('toMenuBtn').textContent = 'К списку обучений';
     Audio_.victoryFanfare();
   }
@@ -1142,19 +1367,21 @@
 
   // «Выйти» из матча возвращает в лобби своей комнаты: место остаётся за игроком, и войти
   // обратно можно за того же бойца. В главное меню ведёт только кнопка на табло результата.
-  $('btnToMenu').onclick = function () {
-    Audio_.uiClick();
-    var g = app.game; if (!g) { goto('menu'); return; }
-    if (g.tutorial) { stopTutorial(); goto('tutlist'); return; }
-    if (g.offline || !g.roomCode) { goto('menu'); return; }
+  // Уход с экрана боя: одинаково для кнопки «Выйти» и для «назад» браузера.
+  function leaveGame() {
+    var g = app.game;
+    if (!g) { goto('menu', { back: true }); return; }
+    if (g.tutorial) { stopTutorial(); goto('tutlist', { back: true }); return; }
+    if (g.offline || !g.roomCode) { goto('menu', { back: true }); return; }
     // Сначала закрываем матч на клиенте: иначе пришедший room.state попадёт в ветку «идёт матч»
     // и лобби не перерисуется — кнопка возврата в бой останется скрытой.
     stopGame();
     if (!g.over) send('match.leave');
-    goto('lobby');
+    goto('lobby', { back: true });
     if (app.room) renderLobby();
-  };
-  $('tutQuit').onclick = function () { Audio_.uiClick(); stopTutorial(); goto('tutlist'); };
+  }
+  $('btnToMenu').onclick = function () { Audio_.uiClick(); leaveGame(); };
+  $('tutQuit').onclick = function () { Audio_.uiClick(); leaveGame(); };
   $('tutSkipStep').onclick = function () { Audio_.uiClick(); tutorialSkipStep(); };
   $('toMenuBtn').onclick = function () {
     Audio_.uiClick();
@@ -1166,6 +1393,11 @@
     }
     if (g && g.tutorial) { stopTutorial(); goto('tutlist'); return; }
     goto('menu');
+  };
+  $('tutNextBtn').onclick = function () {
+    Audio_.uiClick();
+    var next = firstUndoneTutorial();
+    if (next) startTutorial(next.id); else goto('tutlist');
   };
   $('againBtn').onclick = function () {
     Audio_.uiClick();
@@ -1216,11 +1448,22 @@
   // Обучение (см. client/tutorial.js): оффлайн-бой 1×1 с пошаговыми задачами
   // ------------------------------------------------------------
   var tutorial = window.SBTutorial.create({
-    box: $('tutorialBox'), stepEl: $('tutStep'), flash: tutFlash,
+    box: $('tutorialBox'), flash: tutFlash,
+    // Текст шага: на телефоне он идёт в строку подсказки над ареной вместо описания
+    // управления — плашка поверх поля закрывала игру. Кэш обязателен: render зовётся каждый кадр.
+    setStep: (function () {
+      var last = null;
+      return function (text) {
+        if (text === last) return;
+        last = text;
+        $('tutStep').textContent = text;
+        if (Device.isTouch()) $('hint').textContent = text;
+      };
+    })(),
     start: function (hooks, scn) {
       var saved = app.offline;
-      // Роль задаёт сценарий; у «Основ» её выбирает игрок.
-      var role = scn.role || (Sim.ROLE_STATS[app.tut.role] ? app.tut.role : 'Раннер');
+      // Роль задаёт сценарий — включая «Основы»: выбор класса на входе только тормозил новичка.
+      var role = Sim.ROLE_STATS[scn.role] ? scn.role : 'Раннер';
       app.offline = { mode: 1, role: role, arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true };
       var g = startOfflineMatch({ tutorial: true, onFrame: hooks.onFrame, onStop: hooks.onStop });
       app.offline = saved;
@@ -1231,8 +1474,9 @@
     toast: toast,
     finish: function (scn) { showTutorialResult(scn); },
     done: function (id) {
+      // Один ключ на урок. Старый sb.tutorialDone больше не пишем, но читаем в tutDone:
+      // у прошедших «Основы» до 0.9.0 они не должны сброситься.
       store.set('sb.tut.done.' + id, '1');
-      if (id === 'basics') store.set('sb.tutorialDone', '1'); // по нему гаснет бейдж «новое»
       renderTutorialBadge();
     }
   });
@@ -1244,7 +1488,14 @@
   function startTutorial(id) { tutorial.start(id); }
   function stopTutorial() { tutorial.stop(); }
   function tutorialSkipStep() { tutorial.skip(); }
-  function renderTutorialBadge() { $('tutorialBadge').hidden = store.get('sb.tutorialDone') === '1'; }
+  // Бейдж показывает, сколько уроков осталось: «новое», пока не пройдено ничего, дальше число.
+  function renderTutorialBadge() {
+    var scns = window.SBTutorial.SCENARIOS;
+    var left = scns.filter(function (s) { return !tutDone(s.id); }).length;
+    var el = $('tutorialBadge');
+    el.hidden = left === 0;
+    el.textContent = left === scns.length ? 'новое' : String(left);
+  }
   // Админка в меню — только «Создателю». Токен клиенту не выдаётся: сервер пускает его по адресу.
   function renderAdminBtn() { $('btnAdmin').hidden = app.rank !== 'creator'; }
   $('btnAdmin').onclick = function () { Audio_.uiClick(); window.open('/admin/', '_blank'); };
@@ -1258,21 +1509,16 @@
     tutFlashTimer = setTimeout(function () { el.hidden = true; }, 1400);
   }
 
-  // Выбор класса для «Основ» (у геройских обучений класс задан сценарием).
-  function buildTutRoleGrid() {
-    var grid = $('tutRoleGrid'); grid.innerHTML = '';
-    Sim.ALL_ROLES.forEach(function (role) {
-      grid.appendChild(heroCard(role, app.tut.role === role, function () {
-        Audio_.uiClick(); app.tut.role = role; store.set('sb.tutRole', role); buildTutRoleGrid();
-      }, $('tutRoleInfo')));
-    });
+  /** Первый непройденный урок — для кнопки «Следующее обучение» на табло. */
+  function firstUndoneTutorial() {
+    var scns = window.SBTutorial.SCENARIOS;
+    for (var i = 0; i < scns.length; i++) if (!tutDone(scns[i].id)) return scns[i];
+    return null;
   }
   /** Список обучений: «Основы» плюс шесть геройских. Ничего не заблокировано. */
   function buildTutList() {
     var list = $('tutList'); list.innerHTML = '';
     var scns = window.SBTutorial.SCENARIOS, done = 0;
-    $('tutBasicsPick').hidden = true;
-    buildTutRoleGrid();
     scns.forEach(function (scn) {
       var passed = tutDone(scn.id);
       if (passed) done++;
@@ -1280,31 +1526,28 @@
       el.className = 'tutCard' + (passed ? ' done' : '');
       el.innerHTML =
         '<div class="tutTitle">' + escapeHtml(scn.title) +
-          '<span class="status ' + (passed ? 'wait">пройдено' : '">' + scn.steps.length + ' шага') + '</span></div>' +
+          '<span class="status ' + (passed ? 'wait">пройдено' : '">' + stepsText(scn.steps.length)) + '</span></div>' +
         '<div class="tutAbout">' + escapeHtml(scn.about) + '</div>';
       var act = document.createElement('div');
       act.className = 'tutAct';
       var btn = document.createElement('button');
       btn.className = 'menuBtn' + (passed ? ' ghost' : ' primary');
       btn.textContent = passed ? 'Пройти снова' : 'Начать';
-      btn.onclick = function () {
-        Audio_.uiClick();
-        if (scn.id === 'basics') { // сначала спрашиваем класс, дальше кнопка «Начать основы»
-          var pick = $('tutBasicsPick');
-          pick.hidden = !pick.hidden;
-          if (!pick.hidden) pick.scrollIntoView({ block: 'nearest' });
-          return;
-        }
-        startTutorial(scn.id);
-      };
+      btn.onclick = function () { Audio_.uiClick(); startTutorial(scn.id); };
       act.appendChild(btn);
       el.appendChild(act);
       list.appendChild(el);
     });
     $('tutProgress').textContent = 'пройдено ' + done + ' из ' + scns.length;
   }
-  $('tutRoleBack').onclick = goBack;
-  $('tutRoleStart').onclick = function () { Audio_.uiClick(); startTutorial('basics'); };
+  $('tutBack').onclick = goBack;
+  function stepsText(n) {
+    var last = n % 10, tens = n % 100;
+    if (tens > 10 && tens < 20) return n + ' шагов';
+    if (last === 1) return n + ' шаг';
+    if (last >= 2 && last <= 4) return n + ' шага';
+    return n + ' шагов';
+  }
 
   // ------------------------------------------------------------
   // Общий чат главного меню
@@ -1344,7 +1587,7 @@
     for (var i = 0; i < app.chat.msgs.length; i++) {
       if (app.chat.msgs[i].id === id) { app.chat.msgs.splice(i, 1); break; }
     }
-    if (app.chat.open && app.screen === 'menu') chatRender();
+    if (app.chat.open && chatVisible()) chatRender();
   }
   function chatSetHistory(list) {
     app.chat.msgs = list.slice(-CHAT_KEEP);
@@ -1356,7 +1599,7 @@
     if (!m || !m.text) return;
     app.chat.msgs.push(m);
     if (app.chat.msgs.length > CHAT_KEEP) app.chat.msgs.splice(0, app.chat.msgs.length - CHAT_KEEP);
-    if (app.chat.open && app.screen === 'menu') { chatRender(); }
+    if (app.chat.open && chatVisible()) { chatRender(); }
     else if (!(m.pid && m.pid === app.me)) { app.chat.unread++; }
     chatBadge();
   }
@@ -1365,11 +1608,19 @@
     b.hidden = !(app.chat.unread > 0);
     b.textContent = app.chat.unread > 99 ? '99+' : String(app.chat.unread);
   }
-  function chatSetOpen(open) {
+  // Чат виден на всех экранах вне боя: на ПК это столбец справа, на телефоне — блок снизу.
+  // Кроме экрана ника: сессии там ещё нет, писать некуда, а поле ввода отвлекало бы от имени.
+  function chatVisible() { return app.screen !== 'game' && app.screen !== 'nick'; }
+  // focus — только при явном раскрытии чата игроком: при загрузке страницы фокус нужен полю
+  // ника, а чат теперь виден и на этом экране.
+  function chatSetOpen(open, focus) {
     app.chat.open = open;
     $('chatBody').hidden = !open;
     $('chatToggle').classList.toggle('open', open);
-    if (open) { app.chat.unread = 0; chatBadge(); chatRender(); setTimeout(function () { $('chatInput').focus(); }, 0); }
+    if (open) {
+      app.chat.unread = 0; chatBadge(); chatRender();
+      if (focus) setTimeout(function () { $('chatInput').focus(); }, 0);
+    }
     try { localStorage.setItem('sb.chatOpen', open ? '1' : '0'); } catch (e) { /* игнор */ }
   }
   function chatSubmit() {
@@ -1379,7 +1630,7 @@
     send('chat.send', { text: text });
     el.value = '';
   }
-  $('chatToggle').onclick = function () { Audio_.uiClick(); chatSetOpen(!app.chat.open); };
+  $('chatToggle').onclick = function () { Audio_.uiClick(); chatSetOpen(!app.chat.open, true); };
   $('chatSend').onclick = function () { chatSubmit(); };
   $('chatInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); chatSubmit(); } });
   // По умолчанию чат открыт: закрытым его почти никто не находил. Выбор игрока помним.
@@ -1394,18 +1645,18 @@
     var buffer = Net.snapshotBuffer(d.tickRate);
     var pending = [];
     var myTeam = 'A';
-    // Задержка: RTT считает приложение (app.ping, пинг раз в 2 с), здесь добавляется джиттер
-    // снапшотов из буфера. Индикатор раз в секунду; если RTT > 200 мс или джиттер > 100 мс
-    // держатся 3 с — тост про VPN. В бою на телефоне точка соединения скрыта, поэтому
-    // индикатор дублируется в игровой панели вместе с точкой.
+    // Задержку показывает единственный индикатор — точка соединения (на телефоне она в бою
+    // переезжает в игровую панель). Здесь только джиттер снапшотов: он в indicator не входит,
+    // но именно он делает бой рваным, поэтому при RTT > 200 мс или джиттере > 100 мс дольше
+    // трёх секунд один раз в минуту показываем тост про VPN.
     var net = { badSince: 0, lastWarn: 0 };
     var statTimer = setInterval(function () {
       if (g.over || app.screen !== 'game') return;
-      var jitter = buffer.jitter(), el = $('netStat'), now = performance.now();
+      var jitter = buffer.jitter(), now = performance.now();
       var bad = app.ping.rtt > 200 || jitter > 100;
       if (!bad) net.badSince = 0; else if (!net.badSince) net.badSince = now;
-      el.textContent = app.ping.rtt ? '● ' + Math.round(app.ping.rtt) + ' мс' : '';
-      el.className = bad ? 'bad' : '';
+      app.ping.jitter = jitter;
+      renderConn();
       if (net.badSince && now - net.badSince >= 3000 && now - net.lastWarn > 60000) {
         net.lastWarn = now;
         toast('Высокая задержка сети. Если включён VPN, попробуйте его выключить.');
@@ -1452,6 +1703,24 @@
 
   Device.apply();
   $('verBuild').textContent = BUILD;
-  if (app.nick) { connect(); goto('menu'); }
-  else { $('nickInput').value = ''; goto('nick'); }
+  // Модуль звука грузится раньше настроек, поэтому сохранённую громкость подставляем здесь.
+  Audio_.setVolume(Settings.get('volume'));
+  renderVolume();
+  pushGuard();
+  if (app.nick) {
+    connect();
+    // Восстанавливаем экран из адреса: без этого F5 в списке комнат или в настройках
+    // выбрасывал в главное меню. Раздел берём из адреса, иначе из последнего выбранного.
+    var start = parseHash(location.hash);
+    app.section = (start && start.section) || store.get('sb.section') || 'pvp';
+    // Именно push, а не replace: запись стража должна остаться под нами отдельной строкой
+    // истории, иначе «назад» на корневом экране сразу уводит с сайта.
+    goto(start ? start.screen : 'menu');
+  } else {
+    // Ника нет — адрес не при чём: сначала имя. Разобранный хэш выбрасываем, иначе после
+    // ввода ника игрок телепортируется в раздел, которого не ждёт.
+    $('nickInput').value = '';
+    goto('nick');
+    try { history.replaceState(history.state, '', '#/'); } catch (e) { /* игнор */ }
+  }
 })();

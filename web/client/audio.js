@@ -1,11 +1,26 @@
 /* Звук: синтез через Web Audio API, без внешних файлов. Только клиент. */
 window.SBAudio = (function () {
-  var ctx = null, noiseBuffer = null, enabled = true;
-  try { enabled = localStorage.getItem('sb.sound') !== 'off'; } catch (e) { /* приватный режим */ }
+  var ctx = null, noiseBuffer = null, master = null;
+  // Единственный источник истины для тишины — громкость. Раньше рядом жил булев флаг, и
+  // «🔊 при громкости 0» врал. Ноль = выключено; last помнит, куда вернуть кнопкой мьюта.
+  // Сохранённую громкость подставляет клиент при старте (SBSettings): модуль звука грузится
+  // раньше настроек, и разбирать их хранилище во втором месте — верный способ разъехаться.
+  var volume = 1, last = 1;
+  try {
+    var savedLast = parseFloat(localStorage.getItem('sb.volumeLast'));
+    if (savedLast > 0 && savedLast <= 1) last = savedLast;
+  } catch (e) { /* приватный режим */ }
+
+  function clamp01(v) { v = Number(v); return v > 0 ? (v > 1 ? 1 : v) : 0; }
 
   function ensureCtx() {
     if (!ctx) {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // Мастер-громкость: один узел на все голоса, иначе каждую громкость пришлось бы
+      // пересчитывать в каждом вызове.
+      master = ctx.createGain();
+      master.gain.value = volume;
+      master.connect(ctx.destination);
       noiseBuffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
       var data = noiseBuffer.getChannelData(0);
       for (var i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
@@ -13,8 +28,10 @@ window.SBAudio = (function () {
     if (ctx.state === 'suspended') ctx.resume();
     return ctx;
   }
+  /** Куда подключать голоса: мастер-узел, а не выход контекста. */
+  function out() { return master; }
   function tone(o) {
-    if (!enabled) return;
+    if (volume <= 0) return;
     var c = ensureCtx();
     var freq = o.freq || 440, duration = o.duration || 0.15, type = o.type || 'sine', gain = o.gain || 0.2, delay = o.delay || 0;
     var osc = c.createOscillator(), g = c.createGain();
@@ -23,11 +40,11 @@ window.SBAudio = (function () {
     if (o.glideTo != null) osc.frequency.exponentialRampToValueAtTime(Math.max(o.glideTo, 1), c.currentTime + delay + duration);
     g.gain.setValueAtTime(gain, c.currentTime + delay);
     g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + delay + duration);
-    osc.connect(g); g.connect(c.destination);
+    osc.connect(g); g.connect(out());
     osc.start(c.currentTime + delay); osc.stop(c.currentTime + delay + duration + 0.03);
   }
   function noiseBurst(o) {
-    if (!enabled) return;
+    if (volume <= 0) return;
     var c = ensureCtx();
     var duration = o.duration || 0.15, filterFreq = o.filterFreq || 1200, gain = o.gain || 0.3, delay = o.delay || 0;
     var src = c.createBufferSource(); src.buffer = noiseBuffer;
@@ -35,13 +52,28 @@ window.SBAudio = (function () {
     var g = c.createGain();
     g.gain.setValueAtTime(gain, c.currentTime + delay);
     g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + delay + duration);
-    src.connect(filter); filter.connect(g); g.connect(c.destination);
+    src.connect(filter); filter.connect(g); g.connect(out());
     src.start(c.currentTime + delay); src.stop(c.currentTime + delay + duration + 0.03);
   }
   return {
     unlock: function () { try { ensureCtx(); } catch (e) { /* без звука */ } },
-    setEnabled: function (v) { enabled = v; try { localStorage.setItem('sb.sound', v ? 'on' : 'off'); } catch (e) { /* игнор */ } },
-    isEnabled: function () { return enabled; },
+    /** Громкость 0..1. Ноль — тишина: отдельного флага «выключено» больше нет. */
+    setVolume: function (v) {
+      volume = clamp01(v);
+      if (volume > 0) {
+        last = volume;
+        try { localStorage.setItem('sb.volumeLast', String(last)); } catch (e) { /* игнор */ }
+      }
+      // Плавно: мгновенная установка усиления даёт щелчок на уже играющих голосах.
+      if (master && ctx) master.gain.setTargetAtTime(volume, ctx.currentTime, 0.02);
+    },
+    getVolume: function () { return volume; },
+    /** Мьют как в системе: гасит в ноль и возвращает последний ненулевой уровень. */
+    toggleMute: function () {
+      this.setVolume(volume > 0 ? 0 : (last > 0 ? last : 1));
+      return volume > 0;
+    },
+    isEnabled: function () { return volume > 0; },
     uiClick: function () { tone({ freq: 900, duration: 0.05, type: 'square', gain: 0.07 }); },
     countBeep: function () { tone({ freq: 660, duration: 0.12, type: 'square', gain: 0.09 }); },
     goBeep: function () { tone({ freq: 990, duration: 0.25, type: 'square', gain: 0.12 }); tone({ freq: 1320, duration: 0.3, type: 'triangle', gain: 0.08, delay: 0.06 }); },
@@ -50,7 +82,7 @@ window.SBAudio = (function () {
      *  толчок. Темп и громкость растут с силой. Бёрсты планируются по таймеру (~5–9/с), а не
      *  каждый кадр: на телефонах аудиопоток чувствителен к потоку событий. */
     chargeLoopStart: function (getPower) {
-      if (!enabled) return function () {};
+      if (volume <= 0) return function () {};
       var c = ensureCtx();
       var stopped = false, raf, nextAt = c.currentTime;
       function pack(power) {
@@ -66,7 +98,7 @@ window.SBAudio = (function () {
         g.gain.setValueAtTime(0.0001, t0);
         g.gain.linearRampToValueAtTime(vol, t0 + 0.008);
         g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-        src.connect(bp); bp.connect(g); g.connect(c.destination);
+        src.connect(bp); bp.connect(g); g.connect(out());
         src.start(t0); src.stop(t0 + dur + 0.02);
         // низкий короткий толчок уплотнения
         var o = c.createOscillator(), og = c.createGain();
@@ -75,7 +107,7 @@ window.SBAudio = (function () {
         o.frequency.exponentialRampToValueAtTime(70, t0 + 0.09);
         og.gain.setValueAtTime(0.025 + power * 0.03, t0);
         og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.1);
-        o.connect(og); og.connect(c.destination);
+        o.connect(og); og.connect(out());
         o.start(t0); o.stop(t0 + 0.13);
       }
       function tick() {

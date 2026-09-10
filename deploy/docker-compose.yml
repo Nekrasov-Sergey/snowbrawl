@@ -15,8 +15,11 @@ services:
       SNOWBRAWL_MAX_CONNS: ${SNOWBRAWL_MAX_CONNS:-200}
       SNOWBRAWL_LOG_LEVEL: ${SNOWBRAWL_LOG_LEVEL:-info}
       SNOWBRAWL_TRUST_PROXY: ${SNOWBRAWL_TRUST_PROXY:-false}
-      # Роли и баны по IP: единственное состояние, которое сервер пишет на диск.
+      # Роли и баны по IP.
       SNOWBRAWL_MODERATION_FILE: ${SNOWBRAWL_MODERATION_FILE:-/data/moderation.json}
+      # История онлайна для графика в админке: точка в минуту, семь дней. Пустое значение —
+      # график живёт только в памяти и теряется при перезапуске.
+      SNOWBRAWL_ONLINE_FILE: ${SNOWBRAWL_ONLINE_FILE:-/data/online.log}
     volumes:
       - snowbrawl_data:/data
     ports:
@@ -51,6 +54,6 @@ services:
       - caddy_config:/config
 
 volumes:
-  snowbrawl_data:   # /data сервера: роли и баны по IP (docker compose down -v их снесёт)
+  snowbrawl_data:   # /data сервера: роли и баны по IP, история онлайна (down -v их снесёт)
   caddy_data:
   caddy_config:

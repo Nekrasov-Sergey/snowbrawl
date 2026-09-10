@@ -49,7 +49,9 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .modeCard:hover { border-color: #4aa8ff; }
 .modeCard.selected { border-color: #4aa8ff; background: #1c3a58; }
 
-.cardGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; width: 100%; }
+/* Ограничение по ширине таблицы команд: в карточке только кружок, одно название и кнопка «i»,
+   и без него сетка растягивалась на всю панель (884 px) и уезжала под боковой чат. */
+.cardGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; width: 100%; max-width: 620px; }
 .heroCard, .mapCard {
   padding: 14px; border-radius: 10px; border: 2px solid #3a5a80; background: #16283f;
   cursor: pointer; text-align: left; display: flex; flex-direction: column; gap: 6px;
@@ -105,6 +107,16 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
   display: grid; grid-template-columns: 1fr auto; gap: 28px; align-items: center;
   width: 100%; max-width: 720px; margin: 4px 0 10px;
 }
+/* Кнопка «Создать комнату», форма кода и строки списка одной высоты — иначе шапка читается
+   как каша из разнокалиберных блоков. Селекторы по id: правило html.touch .menuBtn (44px)
+   по весу перебивает класс .roomsTools, и без id кнопка оставалась ниже формы кода. */
+:root { --row-h: 68px; } /* по самому высокому из трёх: строка комнаты с двумя строками текста */
+#roomsTools .codeMini, #roomsTools .menuBtn, #roomsList .roomRow, #tutList .tutCard {
+  min-height: var(--row-h); box-sizing: border-box;
+}
+#roomsTools .codeMini, #roomsTools .menuBtn { height: var(--row-h); }
+#roomsTools .codeMini { padding: 6px 12px; } /* иначе клетки кода не влезают в общую высоту */
+#roomsList .roomRow, #tutList .tutCard { align-content: center; }
 .codeMini {
   display: flex; align-items: center; gap: 10px; justify-self: start;
   background: #16283f; border: 1px solid #3a5a80; border-radius: 10px; padding: 8px 12px;
@@ -158,6 +170,12 @@ html.touch .segBtn { min-height: 44px; }
 .setRow { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid #23405f; font-size: 15px; cursor: pointer; }
 .setRow:last-child { border-bottom: none; }
 .setRow small { display: block; color: #a9c2e0; font-size: 12px; margin-top: 3px; line-height: 1.35; }
+/* Ползунок громкости: единственный range в проекте, поэтому оформление минимальное — родной
+   контрол с акцентным цветом, как у чекбокса рядом. */
+.setVol { display: flex; align-items: center; gap: 10px; flex: none; }
+.setVol input[type=range] { width: 130px; accent-color: #4aa8ff; }
+.setVol b { font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 12px; min-width: 38px; text-align: right; }
+html.touch .setVol input[type=range] { width: 150px; height: 32px; }
 .setRow input[type=checkbox] { width: 22px; height: 22px; flex: none; accent-color: #4aa8ff; }
 .setRow select { background: #0e1a2b; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; padding: 6px 8px; font-size: 14px; flex: none; }
 
@@ -180,6 +198,9 @@ html.touch .segBtn { min-height: 44px; }
 .slot.me { border-color: #ffe066; }
 .slot .role { color: #a9c2e0; font-size: 12px; }
 .slot .off { color: #ff9d9d; font-size: 11px; }
+/* задержку мерит сервер: цифра обновляется раз в несколько секунд, поэтому моноширинные цифры */
+.slot .slotPing { color: #6f89a8; font-size: 11px; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.slot .slotPing.bad { color: #ff6b6b; }
 .slot .host { color: #ffd166; font-size: 11px; margin-left: 6px; }
 .slot .kick { background: none; border: 1px solid #ff5b5b; color: #ff9d9d; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 2px 6px; }
 .slot .botHint { color: #6f89a8; font-size: 12px; }
@@ -195,8 +216,6 @@ html.touch .segBtn { min-height: 44px; }
 #topGameBar { display:flex; justify-content:space-between; align-items:center; width:100%; max-width:900px; margin-bottom:6px; }
 #topGameBar button { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; }
 #topGameBar button:hover { background:#274363; }
-#netStat { font-size: 12px; color: #a9c2e0; font-variant-numeric: tabular-nums; white-space: nowrap; }
-#netStat.bad { color: #ff6b6b; font-weight: 600; }
 #pveInfo { font-size: 13px; color: #ffd88a; font-weight: 600; white-space: nowrap; flex: 1; text-align: center; }
 #matchTimer { width: 70px; text-align: right; font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 14px; }
 .lives { color: #ff9ec4; font-weight: 700; font-size: 12px; }
@@ -204,6 +223,10 @@ html.touch .segBtn { min-height: 44px; }
 .bossBar { margin-top: 4px; font-size: 12px; color: #ff8080; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
 .bossBar .phase2 { color: #ff3b3b; font-weight: 700; letter-spacing: 0; }
 #topGameBar #fsBtn { font-size: 15px; padding: 4px 10px; margin-left: 8px; }
+/* В сенсорном бою шапка скрыта, поэтому индикатор связи переезжает сюда: пинг во всей игре
+   живёт ровно в одном месте — рядом с зелёной точкой. */
+#gameConnSlot { display: flex; align-items: center; flex: none; }
+#topGameBar #connState { font-size: 12px; }
 #gameWrap { width: 100%; display: flex; flex-direction: column; align-items: center; position: relative; }
 #stage { position: relative; max-width: 100%; aspect-ratio: 900 / 560; }
 canvas {
@@ -268,9 +291,16 @@ html.touch .menuBtn:hover { background: #274363; }
 html.touch .menuBtn.primary:hover { background: #4aa8ff; }
 html.touch .menuBtn.ghost:hover { background: transparent; }
 html.touch.ingame #app { padding: 0; max-width: none; min-height: 100vh; min-height: 100dvh; height: 100vh; height: 100dvh; overflow: hidden; }
-html.touch.ingame h1.title, html.touch.ingame .footer, html.touch.ingame #soundToggle, html.touch.ingame #connState, html.touch.ingame #abilityHint, html.touch.ingame #abilityBox { display: none; }
+html.touch.ingame h1.title, html.touch.ingame .footer, html.touch.ingame #topRightBar, html.touch.ingame #topLeftBar, html.touch.ingame #abilityBox { display: none; }
+/* Подсказка о способности нужна и на телефоне, но места у арены нет — кладём поверх её верхнего
+   края (не внизу: там стики) и гасим через несколько секунд. Отсчёт от #screen-game, а не от
+   #app: в бою #app растянут на весь экран, и «низ» оказался бы под пальцами. */
+html.touch.ingame #abilityHint { position: absolute; left: 50%; top: 42px; transform: translateX(-50%);
+  max-width: 86%; margin: 0; padding: 4px 10px; border-radius: 8px; background: rgba(22,40,63,0.9);
+  font-size: 11px; min-height: 0; z-index: 5; pointer-events: none; transition: opacity .5s; }
+html.touch.ingame #abilityHint.faded { opacity: 0; }
 html.touch.ingame #drainBanner { margin: 0; border-radius: 0; font-size: 11px; padding: 4px 8px; }
-html.touch.ingame #screen-game { gap: 0; flex: 1; min-height: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
+html.touch.ingame #screen-game { position: relative; gap: 0; flex: 1; min-height: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
 html.touch.ingame #topGameBar { max-width: none; margin: 0; padding: 4px 10px; box-sizing: border-box; height: 36px; flex: none; }
 html.touch.ingame #topGameBar button { padding: 4px 10px; font-size: 12px; }
 html.touch.ingame #hint { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
@@ -307,6 +337,14 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   html.touch .subtitle { font-size: 12px; }
   html.touch .menuBtn { padding: 10px; font-size: 15px; }
   html.touch .cardGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  /* В 450px высоты 64px-строки не помещаются: ужимаем шапку и снимаем минимум со строк,
+     которые здесь и так перестроены в одну колонку. */
+  :root { --row-h: 52px; }
+  html.touch .codeCell { height: 38px; min-height: 38px; }
+  #roomsTools .codeMini { padding: 5px 10px; }
+  #roomsList .roomRow, #tutList .tutCard { min-height: auto; }
+  /* Чат снизу не должен съедать весь экран. */
+  html.touch #chatLog { height: 120px; }
 }
 /* узкие экраны меню (телефон в портрете) */
 @media (max-width: 600px) {
@@ -321,14 +359,32 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   .stub-box { padding: 16px; }
   #bottomRow { flex-wrap: wrap; gap: 8px; }
 }
-#soundToggle { position:absolute; top:10px; right:10px; background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; z-index:5; }
-#connState { position:absolute; top:14px; left:14px; font-size: 14px; color: #6f89a8; z-index: 5;
-             display: flex; align-items: baseline; gap: 6px; }
+/* Угол справа: громкость и мьют. Позиционирование на обёртке, кнопка внутри — обычная в строке
+   (тем же приёмом собран #topLeftBar с индикатором связи и фуллскрином). */
+#topRightBar { position:absolute; top:10px; right:10px; z-index:5; display:flex; align-items:center; gap:8px; }
+#soundToggle { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; }
+#soundToggle:hover { background:#274363; }
+#volMini { width:90px; accent-color:#4aa8ff; }
+html.touch #volMini { display:none; } /* на телефоне регулировка живёт в настройках */
+#topLeftBar { position:absolute; top:12px; left:12px; z-index:5; display:flex; align-items:center; gap:8px; }
+#connState { font-size: 14px; color: #6f89a8; display: flex; align-items: baseline; gap: 6px; }
+#fsTopBtn { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; }
+#fsTopBtn:hover { background:#274363; }
 /* Задержка рядом с точкой: цвет не зависит от состояния соединения, красный — только про лаг. */
 #connPing { font-size: 12px; color: #a9c2e0; font-variant-numeric: tabular-nums; white-space: nowrap; }
 #connPing.bad { color: #ff6b6b; font-weight: 600; }
 #connState.on { color: #7CFFB2; }
 #connState.off { color: #ff5b5b; }
+/* Модальный вопрос (подтверждение выхода). z-index выше игрового слоя: спрашивать могут и
+   в бою, если игрок ушёл туда по прямой ссылке. */
+.modal { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+  background: rgba(6,12,20,0.72); padding: 20px; }
+.modalBox { background: #16283f; border: 1px solid #3a5a80; border-radius: 12px; padding: 18px 20px;
+  max-width: 340px; width: 100%; box-shadow: 0 12px 32px rgba(0,0,0,0.45); }
+.modalTitle { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+.modalText { font-size: 13px; color: #a9c2e0; margin-bottom: 14px; }
+.modalRow { display: flex; gap: 10px; }
+.modalRow .menuBtn { flex: 1; margin: 0; }
 #drainBanner { background: #3a2f10; border: 1px solid #ffd166; color: #ffd166; border-radius: 8px; padding: 8px 14px; font-size: 13px; margin-bottom: 12px; text-align: center; }
 #toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: #16283f; border: 1px solid #ff5b5b; color: #ffd6d6; padding: 10px 18px; border-radius: 8px; font-size: 14px; z-index: 10; max-width: 80vw; text-align: center; }
 .footer { margin-top: auto; padding-top: 24px; font-size: 11px; color: #4b6a8a; }
@@ -356,7 +412,6 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
 
 /* Верхняя панель боя: пинг и инфо про уровни PvE больше не налезают друг на друга. */
 #topGameBar { gap: 8px; }
-#netStat { flex: none; }
 #pveInfo { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* Обучение: короткая плашка «Готово!» по центру арены вместо нижнего тоста. */
@@ -378,6 +433,20 @@ html.touch.ingame #tutStep { flex: 1 1 100%; min-width: 0; font-size: 12px; }
 html.touch.ingame .tutRow { flex: 0 0 auto; }
 html.touch.ingame .tutRow .menuBtn { padding: 6px 10px; font-size: 12px; min-height: 36px; }
 
+/* Обучение на телефоне: текст шага показан в строке подсказки над ареной (плашка поверх поля
+   закрывала игру), поэтому в самой плашке остаются только кнопки «Пропустить» и «Выйти».
+   Строке даём две строки: шаг объясняет задачу, и обрезать её в одну значило бы спрятать
+   половину смысла. Правила идут после базовых — иначе те перебивают их по порядку. */
+html.touch.ingame.tut #tutStep { display: none; }
+html.touch.ingame.tut #tutorialBox {
+  left: auto; right: 6px; top: 42px; width: auto; max-width: none;
+  background: transparent; border: none; padding: 0; gap: 6px;
+}
+html.touch.ingame.tut #topGameBar { height: auto; min-height: 36px; align-items: center; }
+html.touch.ingame.tut #hint {
+  white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.25;
+}
+
 /* Мобильный бой только в ландшафте. */
 #rotateGate { display: none; }
 html.touch.ingame #rotateGate {
@@ -392,7 +461,34 @@ html.touch.ingame #rotateGate .rotIcon { font-size: 48px; margin-bottom: 14px; a
 @media (orientation: portrait) { html.touch.ingame #rotateGate { display: flex; } }
 
 /* Общий чат главного меню. */
+/* Каркас страницы вне боя: всегда одна центрированная колонка, чат под ней. Колонкой в сетке
+   чат быть не может — тогда контент съезжает влево ровно на половину чата (364/2 = 182 px), а
+   заголовок, футер, тост и арена остаются центрированы по окну, и рассинхрон бросается в глаза. */
+#pageBody { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+#screens { width: 100%; display: flex; flex-direction: column; align-items: center; }
+html.ingame #pageBody { display: none; } /* в бою чат недоступен, и место он занимать не должен */
 #chatPanel { width: 100%; max-width: 360px; margin-top: 10px; }
+/* Широкий ПК: чат уходит из потока вправо от центральной колонки — контент остаётся точно по
+   центру окна. Порог 1400: панели меню узкие (список комнат 720, лобби 620), и чат 320 правее
+   них помещается уже здесь; для симметричных полей понадобилось бы 1650, и на 1440 чата бы не
+   было вовсе. Ниже порога он возвращается под контент. */
+@media (min-width: 1400px) {
+  /* overflow-x: clip у #app обрезает потомков за своим box независимо от position, поэтому на
+     широком ПК его снимаем — иначе чата просто не видно. На телефоне клип остаётся. */
+  html:not(.touch) #app { overflow-x: visible; }
+  /* Отсчёт от #app: он центрирован (margin: 0 auto), значит его 50 % — центр окна при любой
+     ширине. Панель остаётся внутри #pageBody, и правило html.ingame его скрывает вместе с ней. */
+  html:not(.touch) #chatPanel {
+    position: absolute; left: calc(50% + 380px); top: 76px; width: 310px; max-width: none; margin: 0;
+  }
+  html:not(.touch) #chatLog { height: min(58vh, 560px); }
+  /* Колонка экранов и баннер ограничены по самому широкому экрану (.panel.wide — список комнат
+     и список обучений). Панели без wide растягивались на все 884 px, и всё, что заполняет
+     колонку целиком (сетка бойцов, строка настроек лобби, кнопки хоста), уходило под чат.
+     Ограничение колонки страхует и от следующей такой панели. */
+  html:not(.touch) #screens { max-width: 720px; }
+  html:not(.touch) #drainBanner { max-width: 720px; box-sizing: border-box; }
+}
 #chatToggle {
   width: 100%; display: flex; align-items: center; gap: 8px; justify-content: flex-start;
   background: #16283f; border: 1px solid #3a5a80; color: #cfe2fb; border-radius: 8px;

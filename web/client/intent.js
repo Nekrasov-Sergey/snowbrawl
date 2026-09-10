@@ -30,6 +30,7 @@ window.SBIntent = (function () {
     var moveDir = null, lastMoveSend = 0, lastAimSend = 0;
     var pending = null; // {x, y, dir} — нажатие, отложенное до конца перезарядки
     var lastAimDir = { x: 1, y: 0 };
+    var lastMoveVec = null; // куда боец бежал последний раз: направление тапа по кнопке скилла
 
     function game() { var g = o.getGame(); return g && !g.over ? g : null; }
     function me() { var g = o.getGame(); return g ? o.getMe(g.lastSnap) : null; }
@@ -45,6 +46,13 @@ window.SBIntent = (function () {
       if (o.onChargeStart) o.onChargeStart();
     }
     function endCharge() { local.charging = false; local.power = 0; if (o.onChargeEnd) o.onChargeEnd(); }
+    // Можно ли применить способность прямо сейчас. Гвардия нужна не серверу (он отбросит ввод
+    // сам), а хуку обучения: без неё шаг «примените способность» закрывался нажатием на
+    // кулдауне, то есть тем, чего в матче не произошло.
+    function canSpecial() {
+      var p = me();
+      return !!p && !blocked() && o.canAct(p) && !(p.cd > 0) && !!Sim.SPECIALS[p.role];
+    }
     function clearPending() { pending = null; local.pending = false; }
 
     var api = {
@@ -89,12 +97,16 @@ window.SBIntent = (function () {
         endCharge();
         send('cancelCharge', 0, 0);
       },
-      specialAt: function (x, y) { send('special', x, y); if (o.onSpecial) o.onSpecial(); },
+      specialAt: function (x, y) {
+        if (!canSpecial()) return;
+        send('special', x, y); if (o.onSpecial) o.onSpecial();
+      },
 
       // ---- направления (стики); dir — нормированный вектор или null ----
       /** Держать направление движения; null — остановиться. */
       setMoveDir: function (dir) {
         var p = me();
+        if (dir) lastMoveVec = norm(dir.x, dir.y) || lastMoveVec;
         if (!dir) {
           if (moveDir && p) {
             var lead = speedOf(p) * STOP_LEAD_S;
@@ -135,12 +147,20 @@ window.SBIntent = (function () {
         local.aimX = pt.x; local.aimY = pt.y;
         api.throwAt(pt.x, pt.y);
       },
-      /** Способность по направлению; null — в сторону последнего прицела. */
+      /**
+       * Способность по направлению. null — короткий тап без отвода пальца: целимся туда, куда
+       * боец бежит (а не по последнему прицелу: в бою это чаще всего «назад через плечо»).
+       */
       specialDir: function (dir) {
         var p = me();
-        if (!p) return;
+        if (!p || !canSpecial()) return;
         if (dir) lastAimDir = dir;
+        else if (lastMoveVec) lastAimDir = lastMoveVec;
         send('special', p.x + lastAimDir.x * AIM_LEAD, p.y + lastAimDir.y * AIM_LEAD);
+        // Хук обучения: раньше его звал только specialAt, то есть путь мыши. На телефоне
+        // способность применяется исключительно отсюда, и шаг «примените способность»
+        // не закрывался вообще, а замок соперника не снимался — тот вечно висел на 1 HP.
+        if (o.onSpecial) o.onSpecial();
       },
 
       /** Раз в кадр: переотправка цели движения, сила замаха, сброс замаха при оглушении/KO. */

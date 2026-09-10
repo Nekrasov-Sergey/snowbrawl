@@ -20,6 +20,7 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/web"
@@ -63,7 +64,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("moderation store: %w", err)
 	}
-	h := hub.New(cfg, prog, log, mod)
+	series, err := onlinestat.Open(cfg.OnlineFile, log)
+	if err != nil {
+		return fmt.Errorf("online series: %w", err)
+	}
+	series.Run(onlinestat.FlushEvery)
+	h := hub.New(cfg, prog, log, mod, series)
 	h.Run()
 	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: cfg.MsgRate, TrustProxy: cfg.TrustProxy, Log: log}, h)
 
@@ -98,6 +104,11 @@ func run() error {
 		log.Warn().Err(err).Msg("http shutdown")
 	}
 	wsServer.Wait()
+	// Серию закрываем последней: тик hub уже остановлен (Shutdown ждёт свою горутину), поэтому
+	// дописать точку в закрытый файл некому.
+	if err := series.Close(); err != nil {
+		log.Error().Err(err).Msg("online series close")
+	}
 	log.Info().Msg("bye")
 	return nil
 }

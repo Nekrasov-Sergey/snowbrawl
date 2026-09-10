@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -65,6 +66,37 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 		c.Header("Cache-Control", "no-store")
 		c.JSON(http.StatusOK, h.Stats())
 	})
+	// Ряд онлайна отдаём отдельной ручкой, а не в составе сводки: 10080 точек в каждом SSE-кадре
+	// — десятки килобайт впустую, и ряд гарантированно меняется каждую минуту, то есть диффинг
+	// потока перестал бы работать.
+	g.GET("/online-series", func(c *gin.Context) {
+		series := h.OnlineSeries()
+		now := time.Now()
+		to := unixParam(c.Query("to"), now)
+		from := unixParam(c.Query("from"), to.Add(-6*time.Hour))
+		if !from.Before(to) {
+			from = to.Add(-time.Hour)
+		}
+		maxPoints := 720
+		if v, err := strconv.Atoi(c.Query("max")); err == nil && v > 0 {
+			maxPoints = min(v, 4000)
+		}
+		step, points := series.Points(from, to, maxPoints)
+		// Пары вместо объектов: у ряда две величины, а размер ответа это уменьшает втрое.
+		pairs := make([][2]int64, 0, len(points))
+		for _, p := range points {
+			pairs = append(pairs, [2]int64{p.At.Unix(), int64(p.N)})
+		}
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{
+			"step":   int(step / time.Second),
+			"from":   from.Unix(),
+			"to":     to.Unix(),
+			"points": pairs,
+			"broken": series.Broken(),
+		})
+	})
+
 	// Дренаж включает и снимает только deploy.sh при выкладке. Кнопок в интерфейсе нет:
 	// вручную это нажимать незачем, а последствия (новые матчи не стартуют) неочевидны.
 	g.POST("/drain", func(c *gin.Context) {
@@ -181,6 +213,15 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 		c.JSON(http.StatusOK, gin.H{"cleared": h.ClearChat()})
 	})
 	return st.Close
+}
+
+// unixParam разбирает границу окна графика; мусор и пустая строка дают значение по умолчанию.
+func unixParam(v string, def time.Time) time.Time {
+	sec, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || sec <= 0 {
+		return def
+	}
+	return time.Unix(sec, 0)
 }
 
 // nickByIP — ник любой живой сессии с адреса: чтобы список ролей и банов читался глазами,

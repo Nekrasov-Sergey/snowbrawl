@@ -111,8 +111,10 @@ window.SBTouch = (function () {
         if (!S || e.pointerId !== S.id) return;
         o.stickS.hidden = true;
         if (!cancelled) {
-          if (!S.directional) o.intent.specialDir(null);
-          else if (S.dir && !S.inDead) o.intent.specialDir(S.dir);
+          // Тап без отвода пальца тоже применяет способность — в сторону движения бойца.
+          // Раньше здесь не отправлялось вообще ничего, и у Раннера, Танка и Щита кнопка
+          // скилла на телефоне не работала, пока палец не сдвинут за мёртвую зону.
+          o.intent.specialDir(S.directional && S.dir && !S.inDead ? S.dir : null);
         }
         S = null;
       }

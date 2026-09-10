@@ -29,21 +29,29 @@ type word struct {
 	norm string
 }
 
+// Fold сводит символ к кириллическому «двойнику»: регистр вниз, латиница и цифры-похожие — к
+// букве, «ё» и «й» — к «е» и «и». Экспортировано, чтобы сравнение ников (protocol.NickKey)
+// пользовалось той же картой обхода, что и цензура, и они не разъезжались.
+func Fold(r rune) rune {
+	r = unicode.ToLower(r)
+	if m, ok := homoglyphs[r]; ok {
+		r = m
+	}
+	switch r {
+	case 'ё':
+		return 'е'
+	case 'й':
+		return 'и'
+	}
+	return r
+}
+
 // normalize приводит слово к виду, в котором его можно сверять с корнями.
 func normalize(rs []rune) string {
 	var b strings.Builder
 	var prev rune
 	for _, r := range rs {
-		r = unicode.ToLower(r)
-		if m, ok := homoglyphs[r]; ok {
-			r = m
-		}
-		switch r {
-		case 'ё':
-			r = 'е'
-		case 'й':
-			r = 'и'
-		}
+		r = Fold(r)
 		if !unicode.Is(unicode.Cyrillic, r) {
 			continue // точки, дефисы, звёздочки и прочий мусор внутри слова
 		}

@@ -36,6 +36,9 @@ func (h *Hub) ApplyBan(ip string) int {
 		p.ToMenu()
 		p.Conn = nil
 	}
+	// Ник забаненного отпускаем: вернуться под ним он всё равно не может, а держать имя
+	// заложником до перезапуска сервера незачем.
+	h.releaseNicksOfIP(ip)
 	if len(conns) > 0 {
 		h.broadcastOnline(nil)
 	}

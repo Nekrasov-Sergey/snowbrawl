@@ -59,3 +59,30 @@ func TestNormalizeNickRejectsProfanity(t *testing.T) {
 		}
 	}
 }
+
+func TestNickKey(t *testing.T) {
+	// Одно и то же имя: регистр, латиница-двойники, разделители.
+	same := [][2]string{
+		{"Вася", "вася"},
+		{"Вася", "ВАСЯ"},
+		{"Вася", "Ba_cя"},
+		{"Snow Brawl", "snow-brawl"},
+		{"Игрок", "Игрок"},
+	}
+	for _, pair := range same {
+		if NickKey(pair[0]) != NickKey(pair[1]) {
+			t.Errorf("%q и %q должны давать один ключ (%q vs %q)", pair[0], pair[1], NickKey(pair[0]), NickKey(pair[1]))
+		}
+	}
+	// Разные имена: цифры и повторы букв значимы, иначе игрок получает отказ без объяснения.
+	diff := [][2]string{
+		{"Игрок2", "Игрок5"},
+		{"Анна", "Ана"},
+		{"Вася", "Вася2"},
+	}
+	for _, pair := range diff {
+		if NickKey(pair[0]) == NickKey(pair[1]) {
+			t.Errorf("%q и %q не должны совпадать (оба %q)", pair[0], pair[1], NickKey(pair[0]))
+		}
+	}
+}
