@@ -16,6 +16,7 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 )
@@ -43,7 +44,11 @@ func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.St
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
-	h := hub.New(cfg, prog, log, mod)
+	series, err := onlinestat.Open("", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hub.New(cfg, prog, log, mod, series)
 	h.Run()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

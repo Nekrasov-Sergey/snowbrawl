@@ -105,9 +105,19 @@ window.SBRender = (function () {
     var RANK_COLORS = { creator: '#ffc94d', admin: '#b478ff' };
     function nickOf(p) { return (names && names[p.id]) || p.nick; }
     function rankOf(p) { return (ranks && ranks[p.id]) || ''; }
+    // pips — рисовать ли HP под подписью. На телефоне HUD-строки скрыты (они налезали на
+    // арену), и HP видно только здесь. Хранится в спрайте: hp меняется редко, три состояния.
+    var opts = { pips: false };
+    function setOptions(o) {
+      if (!o) return;
+      if (o.pips !== undefined && o.pips !== opts.pips) { opts.pips = !!o.pips; labels = {}; }
+    }
     function labelOf(p, isMe, r) {
       var base = nickOf(p), rank = rankOf(p);
-      var key = base + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r + '|' + rank;
+      // У врагов PvE своя полоса HP (mhp), пипсы там врали бы: у босса их десятки.
+      var pips = opts.pips && p.mhp == null && !p.koed ? p.hp : -1;
+      var key = base + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r + '|' + rank +
+        '|' + pips + '|' + p.team;
       var l = labels[p.id];
       if (l && l.key === key) return l;
       var nick = base + (p.bot ? ' 🤖' : '');
@@ -117,6 +127,7 @@ window.SBRender = (function () {
       c.font = '9px Segoe UI, Arial';
       w = Math.max(w, Math.ceil(c.measureText(p.role).width) + 8);
       var top = r + 16, h = top + r + 16; // ник на базовой линии top-10, роль на top + 2r + 12
+      if (pips >= 0) { w = Math.max(w, 40); h += 12; }
       oc.width = w; oc.height = h;
       c = oc.getContext('2d'); c.textAlign = 'center';
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
@@ -129,8 +140,33 @@ window.SBRender = (function () {
       }
       c.fillText(nick, w / 2, top - 6);
       c.fillStyle = '#3c5a7c'; c.font = '9px Segoe UI, Arial'; c.fillText(p.role, w / 2, top + r + 12);
+      if (pips >= 0) {
+        // Три квадратика под ролью: на снегу пустые нужны с обводкой, иначе их не видно.
+        var pw = 7, gap = 3, all = 3 * pw + 2 * gap, px = (w - all) / 2, py = top + r + 19;
+        for (var i = 0; i < 3; i++, px += pw + gap) {
+          c.fillStyle = i < pips ? (p.team === 'A' ? '#4aa8ff' : '#ff5b5b') : 'rgba(11,22,34,0.25)';
+          c.fillRect(px, py, pw, pw);
+          c.strokeStyle = 'rgba(11,22,34,0.55)'; c.lineWidth = 1;
+          c.strokeRect(px + 0.5, py + 0.5, pw - 1, pw - 1);
+        }
+      }
       l = labels[p.id] = { key: key, canvas: oc, w: w, top: top };
       return l;
+    }
+
+    // Почему боец замедлен: наледь под ним, аура вражеского Фризера или лёд арены. Всё это
+    // выводится из уже приходящих данных, поэтому отдельного признака в снапшоте нет.
+    function slowCause(snap, p) {
+      if (snap.fx) for (var i = 0; i < snap.fx.length; i++) {
+        var z = snap.fx[i];
+        if (z.kind === 'frost' && z.team !== p.team && Math.hypot(z.x - p.x, z.y - p.y) <= z.r) return 'frost';
+      }
+      for (var j = 0; j < snap.players.length; j++) {
+        var q = snap.players[j];
+        if (q.role === 'Фризер' && q.team !== p.team && !q.koed && q.hp > 0 &&
+            Math.hypot(q.x - p.x, q.y - p.y) <= Sim.FREEZER_AURA_R) return 'aura';
+      }
+      return snap.ice ? 'ice' : null;
     }
 
     function triggerShake(mag, durationMs) { shake.mag = mag; shake.until = performance.now() + durationMs; shake.total = durationMs; }
@@ -156,7 +192,7 @@ window.SBRender = (function () {
           case 'wallHit': audio.wallThud(); spawnParticles(e.x, e.y, '#cfe2fb', 7, 40, 100, 2, 4, 0.4); break;
           case 'explosion':
             audio.explosionBoom(); triggerShake(10, 250);
-            explosions.push({ x: e.x, y: e.y, start: performance.now(), duration: 320, maxR: 58 });
+            explosions.push({ x: e.x, y: e.y, start: performance.now(), duration: 320, maxR: Sim.EXPLOSION_RADIUS });
             spawnParticles(e.x, e.y, '#ffb347', 16, 80, 200, 3, 6, 0.5); break;
           case 'special':
             if (e.special === 'wall') audio.shieldThud();
@@ -200,7 +236,9 @@ window.SBRender = (function () {
       }
     }
 
-    function drawArena(snap) {
+    // myTeam — команда своего бойца: по ней аура Фризера красится «своей» или «чужой».
+    // Может быть null (наблюдение без своего бойца) — тогда все ауры считаются чужими.
+    function drawArena(snap, myTeam) {
       if (arenaCache.index !== snap.arena) buildArena(snap.arena);
       // При тряске экрана края сдвигаются: подложка тем же фоном закрывает щели.
       ctx.fillStyle = '#c3ddf7'; ctx.fillRect(-12, -12, W + 24, H + 24);
@@ -215,6 +253,30 @@ window.SBRender = (function () {
         ctx.globalAlpha = 0.55 * fa; ctx.strokeStyle = '#bfe8f5'; ctx.lineWidth = 1;
         for (var sp = 0; sp < 6; sp++) { var a = sp * Math.PI / 3; ctx.beginPath(); ctx.moveTo(fx.x, fx.y); ctx.lineTo(fx.x + Math.cos(a) * fx.r * 0.8, fx.y + Math.sin(a) * fx.r * 0.8); ctx.stroke(); }
         ctx.globalAlpha = 1;
+      }
+      // Пассив Фризера «Стужа»: враги в этом радиусе медленнее и дольше перезаряжаются. Граница
+      // зоны — медленно вращающийся пунктир. Пунктир тут уже был и не читался на снегу; чтобы
+      // это не повторилось, держим два условия: цвет без globalAlpha (раньше он гасил линию
+      // вдвое) и тёмная подложка под ней — фон местами светлее самой линии (снег #c3ddf7,
+      // наледь #eaffff, лёд «Реки» #d9f2fb). Заливки нет: на радиусе 110 она накрыла бы
+      // четверть арены, а в PvE-волне несколько вражеских Фризеров залили бы поле целиком.
+      var dash = 20; // период штриха; при длине окружности ~690 px это около 35 штрихов
+      for (var fz = 0; fz < snap.players.length; fz++) {
+        var fp = snap.players[fz];
+        if (fp.role !== 'Фризер' || fp.koed || fp.hp <= 0) continue;
+        var mine = !!myTeam && fp.team === myTeam;
+        var R = Sim.FREEZER_AURA_R;
+        ctx.save();
+        ctx.setLineDash([dash / 2, dash / 2]);
+        // Вращение от времени матча, а не от performance.now: в записи и при паузе кадров
+        // кольцо не должно дёргаться. ~29 px/с — полный оборот примерно за 24 секунды.
+        ctx.lineDashOffset = -(snap.time / 35) % dash;
+        ctx.beginPath(); ctx.arc(fp.x, fp.y, R, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(20,45,70,0.30)'; ctx.lineWidth = 2.5; ctx.stroke();
+        ctx.beginPath(); ctx.arc(fp.x, fp.y, R, 0, Math.PI * 2);
+        ctx.strokeStyle = mine ? 'rgba(120,200,255,0.95)' : 'rgba(255,120,120,0.95)';
+        ctx.lineWidth = 1.2; ctx.stroke();
+        ctx.restore();
       }
       // Разрушаемые укрытия арены (не в кэше — меняются).
       if (snap.destr) for (var d = 0; d < snap.destr.length; d++) { if (snap.destr[d].hp > 0) drawDestructible(snap.destr[d]); }
@@ -483,7 +545,24 @@ window.SBRender = (function () {
       ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
       ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
       ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
-      if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.42)'; ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill(); }
+      // Замедление: наледь и аура Фризера — это ледяная корка со снежинками, лёд арены —
+      // прежний слабый тон. Различать важно: иначе в уроке Фризера не понять, что сработало.
+      if (p.slow) {
+        var cause = slowCause(snap, p);
+        var iced = cause === 'frost' || cause === 'aura';
+        ctx.fillStyle = iced ? 'rgba(150,216,255,0.55)' : 'rgba(150,216,255,0.42)';
+        ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill();
+        if (iced) {
+          ctx.strokeStyle = 'rgba(200,240,255,0.9)'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.stroke();
+          ctx.fillStyle = 'rgba(235,250,255,0.95)';
+          for (var fl = 0; fl < 3; fl++) {
+            var fa2 = snap.time / 420 + fl * Math.PI * 2 / 3;
+            ctx.beginPath(); ctx.arc(vx + Math.cos(fa2) * (r + 5), vy + Math.sin(fa2) * (r + 5) * 0.6, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
       ctx.restore();
 
       drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
@@ -520,12 +599,31 @@ window.SBRender = (function () {
         ctx.beginPath(); ctx.arc(vx, vy, r + 3.5, 0, Math.PI * 2);
         ctx.strokeStyle = ac; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.85; ctx.stroke(); ctx.globalAlpha = 1;
       }
-      // Щит: пассивный щитовой пузырь.
+      // Щит, пассив «Закалка»: полное кольцо — пузырь готов, гасит следующее попадание целиком.
+      // После хлопка кольцо заполняется по кругу за 12 с — так видно, когда защита вернётся, и
+      // своя, и чужая (знание о чужом Щите — часть тактики). Радиус r+4 отличает его от дуги
+      // перезарядки (r+10) и от ореола заряженной способности (r+3.5).
       if (p.bubble) {
+        var pulse = 0.75 + 0.25 * Math.sin(snap.time / 300);
         ctx.beginPath(); ctx.arc(vx, vy, r + 4, 0, Math.PI * 2);
         ctx.strokeStyle = 'rgba(150,240,190,0.9)'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.globalAlpha = pulse * 0.5;
+        ctx.beginPath(); ctx.arc(vx, vy, r + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(150,240,190,0.8)'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.globalAlpha = 1;
         ctx.beginPath(); ctx.arc(vx, vy, r + 4, -0.6, 0.5);
         ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; ctx.stroke();
+      } else if (p.role === 'Щит' && p.bb > 0 && alive) {
+        // Дугу отката рисуем тёмной дорожкой и почти белой заливкой, а не зелёным: тело Щита
+        // само светло-зелёное (#b8f0c8), и зелёная дуга на нём не читалась бы.
+        ctx.beginPath(); ctx.arc(vx, vy, r + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(11,22,34,0.35)'; ctx.lineWidth = 2.5; ctx.stroke();
+        var done = 1 - p.bb;
+        if (done > 0) {
+          ctx.beginPath(); ctx.arc(vx, vy, r + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * done);
+          ctx.strokeStyle = 'rgba(245,255,250,0.95)'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+          ctx.stroke(); ctx.lineCap = 'butt';
+        }
       }
 
       if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 6.5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
@@ -608,7 +706,9 @@ window.SBRender = (function () {
       var shakeX = 0, shakeY = 0;
       if (now < shake.until) { var rem = (shake.until - now) / shake.total; shakeX = (Math.random() - 0.5) * shake.mag * rem; shakeY = (Math.random() - 0.5) * shake.mag * rem; }
       ctx.save(); ctx.translate(shakeX, shakeY);
-      drawArena(snap); drawSnowflakes(dt);
+      var myTeam = null;
+      for (var t = 0; t < snap.players.length; t++) if (snap.players[t].id === meId) { myTeam = snap.players[t].team; break; }
+      drawArena(snap, myTeam); drawSnowflakes(dt);
       if (marks.length) drawMarks(now);
       var me = null;
       for (var i = 0; i < snap.players.length; i++) {
@@ -651,7 +751,7 @@ window.SBRender = (function () {
     function reset() { particles = []; explosions = []; trails = {}; labels = {}; shake.until = 0; marks = []; }
 
     return { frame: frame, handleEvents: handleEvents, reset: reset, setMarks: setMarks,
-      obstaclesOf: obstaclesOf };
+      setOptions: setOptions, obstaclesOf: obstaclesOf };
   }
 
   /**

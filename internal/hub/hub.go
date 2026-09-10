@@ -19,6 +19,7 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/match"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/room"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
@@ -48,33 +49,47 @@ type Hub struct {
 	codeTries map[string]*codeTry
 	// matchPush — последняя отправленная в лобби сводка идущего матча, по коду комнаты.
 	matchPush map[string]string
+	// pingPush — последние отправленные в лобби задержки участников, по коду комнаты.
+	pingPush map[string]string
 	// lastOnline — последнее разосланное число игроков: рассылаем только при изменении.
 	lastOnline int
 	// chat — общий чат меню: сообщения в памяти, TTL = cfg.ChatTTL.
 	chat    []chatEntry
 	chatSeq uint64
+	// nicks — брони ников до перезапуска сервера, ключ — protocol.NickKey (см. nicks.go).
+	nicks map[string]nickHold
 
 	// mod — роли и баны по IP. У стора свой мьютекс; hub только читает, запись на диск делает
 	// админка вне h.mu (см. internal/hub/moderation.go). Может быть nil.
 	mod *moderation.Store
 
+	// series — ряд онлайна для графика в админке. Под h.mu мы только дописываем точку в
+	// память; на диск пишет своя горутина серии (см. internal/onlinestat). Может быть nil.
+	series *onlinestat.Series
+
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
-// New создаёт hub. mod может быть nil: тогда все игроки без роли и без бана.
-func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderation.Store) *Hub {
+// New создаёт hub. mod может быть nil: тогда все игроки без роли и без бана. series тоже может
+// быть nil — тогда истории онлайна нет, а игра работает как раньше.
+func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderation.Store, series *onlinestat.Series) *Hub {
 	return &Hub{
-		cfg: cfg, prog: prog, log: log, now: time.Now, mod: mod,
+		cfg: cfg, prog: prog, log: log, now: time.Now, mod: mod, series: series,
 		byToken: map[string]*session.Player{}, byID: map[string]*session.Player{},
 		rooms:    map[string]*room.Room{},
 		matches:  map[string]*match.Match{},
 		listSubs: map[string]*listSub{}, codeTries: map[string]*codeTry{},
 		matchPush: map[string]string{},
+		pingPush:  map[string]string{},
+		nicks:     map[string]nickHold{},
 		rng:       rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xDEADBEEF)),
 		stopCh:    make(chan struct{}),
 	}
 }
+
+// OnlineSeries — ряд онлайна для админки. Поле пишется один раз в New, мьютекс не нужен.
+func (h *Hub) OnlineSeries() *onlinestat.Series { return h.series }
 
 // Run запускает фоновый цикл таймаутов (TTL сессий и комнат, рассылка списка комнат).
 func (h *Hub) Run() {
@@ -144,7 +159,14 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 	case protocol.CHello:
 		h.sendErr(c, protocol.ErrNotAllowed, "already said hello")
 	case protocol.CPing:
-		c.Send(protocol.MustEncode(protocol.SPong, nil))
+		// Клиентский зонд: отвечаем его же номером, чтобы клиент не считал RTT по чужому ответу.
+		var ping protocol.Ping
+		if len(env.Data) > 0 {
+			_ = json.Unmarshal(env.Data, &ping)
+		}
+		c.Send(protocol.MustEncode(protocol.SPong, protocol.Ping{Seq: ping.Seq}))
+	case protocol.CPong:
+		h.handlePong(p, env.Data)
 	case protocol.CRoomCreate:
 		h.handleRoomCreate(p, env.Data)
 	case protocol.CRoomJoin:
@@ -194,6 +216,7 @@ func (h *Hub) OnClose(c *ws.Conn) {
 	}
 	p.Conn = nil
 	p.DisconnectedAt = h.now()
+	resetPing(p) // задержка мёртвого канала не должна висеть в лобби и в админке
 	delete(h.listSubs, p.ID)
 	switch p.Place {
 	case session.InRoom:
@@ -246,18 +269,34 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 			h.sendErr(c, nickErrCode(err), err.Error())
 			return
 		}
+		// Ник занят — отказ без закрытия соединения: клиент возвращает игрока на экран ника.
+		if !h.nickFree(nick, c.IP(), "") {
+			h.sendErr(c, protocol.ErrNickTaken, "nick is taken")
+			return
+		}
 		p = session.New(nick, c.IP(), now)
 		h.byToken[p.Token] = p
 		h.byID[p.ID] = p
+		h.holdNick(nick, p.IP, p.ID, now)
 		h.log.Info().Str("player", p.ID).Str("nick", nick).Str("ip", p.IP).Msg("new player")
 	} else {
 		if hello.Nick != "" && p.Place == session.InMenu {
 			// Ошибку не глотаем: с цензурой ников молчаливый отказ выглядел бы как «ник не
 			// сохранился». Соединение при этом живо, игрок остаётся под прежним ником.
-			if nick, err := protocol.NormalizeNick(hello.Nick); err == nil {
-				p.Nick = nick
-			} else {
+			// Проверяем по адресу этого соединения, а не по p.IP: тот перезаписывается ниже.
+			nick, err := protocol.NormalizeNick(hello.Nick)
+			switch {
+			case err != nil:
 				h.sendErr(c, nickErrCode(err), err.Error())
+			case !h.nickFree(nick, c.IP(), p.ID):
+				h.sendErr(c, protocol.ErrNickTaken, "nick is taken")
+			default:
+				// Переименование отпускает прежний ник: это единственный способ его освободить.
+				if key := protocol.NickKey(p.Nick); key != protocol.NickKey(nick) {
+					h.releaseNick(key, p.ID)
+				}
+				p.Nick = nick
+				h.holdNick(nick, c.IP(), p.ID, now)
 			}
 		}
 		if old, ok := p.Conn.(*ws.Conn); ok && old != c {
@@ -266,6 +305,8 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		}
 		p.IP = c.IP()
 	}
+	// Новое соединение — новая половина пути: прежняя задержка относится к мёртвому каналу.
+	resetPing(p)
 	p.Conn = c
 	c.Session = p
 
@@ -626,6 +667,7 @@ func (h *Hub) roomState(r *room.Room) protocol.RoomState {
 			rp.Nick, rp.Connected = p.Nick, p.Connected()
 			rp.InMatch = p.Place == session.InMatch && p.MatchID == r.MatchID
 			rp.Rank = h.rank(p.IP)
+			rp.Ping = p.PingMs
 		}
 		st.Players = append(st.Players, rp)
 	}
@@ -828,6 +870,9 @@ func (h *Hub) tick() {
 
 	h.pushRoomLists()
 	h.pushRoomMatches()
+	h.pushRoomPings()
+	// Точка графика: под h.mu только память, файл пишет своя горутина серии.
+	h.series.Observe(now, h.onlineLocked())
 
 	for ip, t := range h.codeTries {
 		if now.After(t.resetAt) {
@@ -845,6 +890,7 @@ func (h *Hub) tick() {
 
 	for _, p := range h.byID {
 		if p.Connected() {
+			h.probePing(p, now)
 			continue
 		}
 		if now.Sub(p.DisconnectedAt) < h.cfg.ReconnectTTL {
@@ -939,6 +985,7 @@ type PlayerStat struct {
 	Where        string     `json:"where,omitempty"` // код комнаты, режим очереди или id матча
 	Online       bool       `json:"online"`
 	Rank         string     `json:"rank,omitempty"`         // роль модерации по IP
+	Ping         int        `json:"ping,omitempty"`         // задержка до сервера, мс, кратно 10
 	Banned       bool       `json:"banned,omitempty"`       // адрес в бане (сессия ещё не выкинута)
 	Since        time.Time  `json:"since"`                  // когда игрок зашёл в игру
 	OfflineSince *time.Time `json:"offlineSince,omitempty"` // с какого момента нет связи
@@ -1028,7 +1075,7 @@ func (h *Hub) Stats() Stats {
 		}
 		ps := PlayerStat{
 			ID: p.ID, Nick: p.Nick, IP: p.IP, Place: string(p.Place), Online: online,
-			Since: p.CreatedAt, Rank: h.rank(p.IP), Banned: h.banned(p.IP),
+			Since: p.CreatedAt, Rank: h.rank(p.IP), Banned: h.banned(p.IP), Ping: p.PingMs,
 		}
 		switch p.Place {
 		case session.InRoom:

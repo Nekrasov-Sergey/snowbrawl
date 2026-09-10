@@ -148,6 +148,51 @@ func (h *Hub) pushRoomMatches() {
 	}
 }
 
+// pushRoomPings рассылает задержки участников лобби. Отдельно от room.state: тот уходит целиком
+// при любом изменении, и гонять весь состав каждые несколько секунд из-за одной цифры незачем.
+// Как и сводка матча — только при изменении содержимого. Вызывать под h.mu.
+func (h *Hub) pushRoomPings() {
+	for code, r := range h.rooms {
+		watchers := false
+		for _, mem := range r.Members {
+			if p := h.byID[mem.ID]; p != nil && p.Place == session.InRoom && p.Connected() {
+				watchers = true
+				break
+			}
+		}
+		if !watchers {
+			delete(h.pingPush, code)
+			continue
+		}
+		// Порядок — по составу комнаты: тело обязано быть детерминированным, иначе диффинг
+		// сравнивал бы одно и то же состояние как разное.
+		out := protocol.RoomPing{Code: code}
+		for _, mem := range r.Members {
+			if p := h.byID[mem.ID]; p != nil && p.PingMs > 0 {
+				out.Pings = append(out.Pings, protocol.PlayerPing{ID: mem.ID, Ping: p.PingMs})
+			}
+		}
+		body, err := json.Marshal(out)
+		if err != nil || h.pingPush[code] == string(body) {
+			continue
+		}
+		h.pingPush[code] = string(body)
+		msg := protocol.MustEncode(protocol.SRoomPing, out)
+		for _, mem := range r.Members {
+			if p := h.byID[mem.ID]; p != nil && p.Place == session.InRoom {
+				p.Send(msg)
+			}
+		}
+	}
+	// Комнату удаляют и вне этого прохода, поэтому осиротевшие ключи чистим отдельно: у
+	// matchPush такой уборки нет, и он подтекает.
+	for code := range h.pingPush {
+		if h.rooms[code] == nil {
+			delete(h.pingPush, code)
+		}
+	}
+}
+
 // sendRoomMatch отправляет сводку матча одному игроку. Вызывать под h.mu.
 func (h *Hub) sendRoomMatch(p *session.Player, r *room.Room) {
 	if r == nil || !r.InMatch {

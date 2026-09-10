@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.7.0';
+  var SIM_VERSION = '1.8.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -51,7 +51,8 @@
   var SNIPE_CD = 9;                                                             // Снайпер: Прицельный выстрел
   var BOMB_CD = 11.25;                                                          // Бомбер: Взрывной снежок
   var FROST_R = 54, FROST_MS = 3000, FROST_SLOW = 0.40, FREEZER_CD = 9;         // Фризер: Ледяная волна
-  var FREEZER_AURA_R = 58, FREEZER_AURA_SLOW = 0.12;                            // Фризер: пассив «Стужа»
+  var FREEZER_AURA_R = 110, FREEZER_AURA_SLOW = 0.12;                           // Фризер: пассив «Стужа»
+  var FREEZER_AURA_RELOAD = 0.25;   // в ауре у врага медленнее идут перезарядка и кулдаун
   var WALL_CD = 13.5;                                                           // Щит: Снежная стена
   var WALL_LONG = 55, WALL_THIN = 16;                                           // Щит: габариты стены (длинной стороной поперёк броска)
   var BUBBLE_REGEN_MS = 12000;                                                  // Щит: пассив «Закалка» (реген пузыря)
@@ -572,7 +573,10 @@
     }
     // В обучении способность возвращается быстро: шаг про способность иначе превращается в
     // ожидание до 13 секунд. Math.min — чтобы обучение не сделало кулдаун ДОЛЬШЕ обычного.
-    p.specialCooldown = state.tutorial ? Math.min(TUTORIAL_CD, ab.active.cooldown) : ab.active.cooldown;
+    // Только ученику (команда A): с коротким кулдауном соперник-Танк таранит каждые 2 секунды,
+    // и шаги «дайте сопернику попасть» превращаются в непрерывное оглушение.
+    var short = state.tutorial && p.team === 'A';
+    p.specialCooldown = short ? Math.min(TUTORIAL_CD, ab.active.cooldown) : ab.active.cooldown;
     emit(state, { type: 'special', playerId: p.id, special: id });
     return true;
   }
@@ -903,6 +907,19 @@
   // ============================================================
   // ФИЗИКА / ОБНОВЛЕНИЕ
   // ============================================================
+  /**
+   * Стоит ли боец в ауре вражеского Фризера. Одна функция на два места: аура влияет и на
+   * скорость, и на течение таймеров, а держать радиус в двух циклах — верный способ их разъехать.
+   */
+  function inFreezerAura(state, p) {
+    for (var i = 0; i < state.players.length; i++) {
+      var q = state.players[i];
+      if (q.role !== 'Фризер' || q.team === p.team || !alive(q)) continue;
+      if (Math.hypot(q.x - p.x, q.y - p.y) <= FREEZER_AURA_R) return true;
+    }
+    return false;
+  }
+
   /** Множитель скорости: пассив Раннера, наледь Фризера, лёд «Реки», аура вражеского Фризера. */
   function speedMul(state, p) {
     var mul = 1;
@@ -913,10 +930,7 @@
       if (f.expiresAt > state.time && f.team !== p.team && Math.hypot(p.x - f.x, p.y - f.y) <= f.r) { mul *= (1 - FROST_SLOW); break; }
     }
     if (state.ice && p.y >= state.ice.y0 && p.y <= state.ice.y1) mul *= (1 - state.ice.slow);
-    for (var j = 0; j < state.players.length; j++) {
-      var q = state.players[j];
-      if (q.role === 'Фризер' && q.team !== p.team && alive(q) && Math.hypot(q.x - p.x, q.y - p.y) <= FREEZER_AURA_R) { mul *= (1 - FREEZER_AURA_SLOW); break; }
-    }
+    if (inFreezerAura(state, p)) mul *= (1 - FREEZER_AURA_SLOW);
     return mul;
   }
   function applyTaram(state, p) {
@@ -1064,7 +1078,13 @@
   }
   function updateTimers(state, p, dt) {
     if (p.stunTimer > 0) p.stunTimer = Math.max(0, p.stunTimer - dt);
-    if (p.specialCooldown > 0) p.specialCooldown = Math.max(0, p.specialCooldown - dt);
+    // Пассив Фризера «Стужа» замедляет не только шаг: в его ауре у врага медленнее течёт время
+    // перезарядки и кулдауна. Именно растяжение времени, а не удлинение в момент броска — вышел
+    // из радиуса, и всё снова идёт нормально. Оглушение не трогаем: оно и так против игрока.
+    var chilled = alive(p) && inFreezerAura(state, p);
+    var timeMul = chilled ? 1 - FREEZER_AURA_RELOAD : 1;
+    if (p.specialCooldown > 0) p.specialCooldown = Math.max(0, p.specialCooldown - dt * timeMul);
+    if (p.reloadUntil > state.time && chilled) p.reloadUntil += dt * 1000 * FREEZER_AURA_RELOAD;
     if (p.reloadUntil > 0 && state.time >= p.reloadUntil) { p.reloadUntil = 0; emit(state, { type: 'reloadDone', playerId: p.id }); }
     // Щит: пассив «Закалка» — пузырь восстанавливается, если 12 с не получал урона
     if (p.role === 'Щит' && !p.bubble && !p.koed && p.hp > 0 &&
@@ -1535,6 +1555,14 @@
   // СНАПШОТ ДЛЯ РЕНДЕРА / СЕТИ
   // ============================================================
   function round1(v) { return Math.round(v * 10) / 10; }
+  // Доля оставшегося восстановления щитового пузыря (0 — готов или роль не Щит). Реген в
+  // updateTimers требует ОБОИХ условий сразу, поэтому берём поздний из двух сроков.
+  function bubbleLeft(state, p) {
+    if (p.role !== 'Щит' || p.bubble || p.koed || p.hp <= 0) return 0;
+    var readyAt = Math.max(p.bubbleReadyAt, p.lastDamagedAt + BUBBLE_REGEN_MS);
+    var left = (readyAt - state.time) / BUBBLE_REGEN_MS;
+    return left <= 0 ? 0 : Math.round(Math.min(1, left) * 100) / 100;
+  }
   function snapshot(state) {
     var players = [];
     for (var i = 0; i < state.players.length; i++) {
@@ -1552,9 +1580,14 @@
         iframe: state.time < p.iframeUntil,
         dash: state.time < p.dashUntil,
         bubble: !!p.bubble,
+        // Поле есть у всех ролей: клиент переиспользует объекты бойцов при интерполяции, и
+        // пропущенный ключ сохранил бы прошлое значение (так уже выходит с mhp и lives).
+        bb: bubbleLeft(state, p),
         slow: speedMul(state, p) < 0.999,
         // перезарядка выстрела: доля 0..1 (1 = только бросил, 0 = готов)
-        rl: p.reloadUntil > state.time ? round1((p.reloadUntil - state.time) / (RELOAD_MS[p.role] || 900) * 10) / 10 : 0
+        // В ауре Фризера остаток перезарядки может превысить базовый RELOAD_MS — зажимаем в 1,
+        // иначе клиент рисует дугу больше полного круга.
+        rl: p.reloadUntil > state.time ? Math.min(1, round1((p.reloadUntil - state.time) / (RELOAD_MS[p.role] || 900) * 10) / 10) : 0
       };
       // PvE: жизни пати, тип врага, фаза босса
       if (p.lives != null) pe.lives = p.lives;
@@ -1634,6 +1667,13 @@
     BOT_LEVEL_NAMES: ['Лёгкий', 'Обычный', 'Сложный'],
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,
     makeRng: makeRng, shuffle: shuffle,
+    // Радиусы и сроки — клиенту (рендер ауры, взрыва, дуги пузыря) и условиям шагов обучения,
+    // чтобы те же числа не переписывались руками в двух местах. Сервер их не читает.
+    FREEZER_AURA_R: FREEZER_AURA_R, FREEZER_AURA_SLOW: FREEZER_AURA_SLOW,
+    FREEZER_AURA_RELOAD: FREEZER_AURA_RELOAD,
+    FROST_R: FROST_R, FROST_SLOW: FROST_SLOW,
+    EXPLOSION_RADIUS: EXPLOSION_RADIUS, BUBBLE_REGEN_MS: BUBBLE_REGEN_MS,
+    WALL_LIFETIME_MS: WALL_LIFETIME_MS,
     HIT_Z: HIT_Z,
     canHitTarget: canHitTarget, // чистая функция: упрётся ли снежок в препятствие (ею целятся боты)
     aimPath: aimPath,           // чистая функция для клиента: путь снежка для луча прицела

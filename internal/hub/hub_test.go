@@ -23,6 +23,7 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
@@ -61,9 +62,16 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := hub.New(cfg, prog, log, mod)
+	// Серия без файла: история живёт в памяти теста, диск не трогаем.
+	series, err := onlinestat.Open("", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hub.New(cfg, prog, log, mod, series)
 	h.Run()
-	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: 1000, Log: log}, h)
+	// TrustProxy прокидываем: без него все тестовые клиенты приходят с 127.0.0.1, и правила,
+	// различающие адреса (брони ников, роли, баны), интеграционно не проверить.
+	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: 1000, TrustProxy: cfg.TrustProxy, Log: log}, h)
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsServer)
 	srv := httptest.NewServer(mux)
@@ -82,11 +90,26 @@ type client struct {
 }
 
 func (s *testServer) connect(t *testing.T, nick, token string) *client {
+	return s.connectFrom(t, nick, token, "")
+}
+
+// connectFrom подключается, представляясь адресом ip через X-Forwarded-For. Работает только
+// при cfg.TrustProxy — ровно так же, как в бою за Caddy.
+func (s *testServer) connectFrom(t *testing.T, nick, token, ip string) *client {
+	t.Helper()
+	return s.dial(t, nick, token, ip, false)
+}
+
+func (s *testServer) dial(t *testing.T, nick, token, ip string, raw bool) *client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	url := "ws" + strings.TrimPrefix(s.srv.URL, "http") + "/ws"
-	c, _, err := websocket.Dial(ctx, url, nil)
+	var opts *websocket.DialOptions
+	if ip != "" {
+		opts = &websocket.DialOptions{HTTPHeader: http.Header{"X-Forwarded-For": []string{ip}}}
+	}
+	c, _, err := websocket.Dial(ctx, url, opts)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -107,10 +130,20 @@ func (s *testServer) connect(t *testing.T, nick, token string) *client {
 		}
 	}()
 	cl.send(protocol.CHello, protocol.Hello{Token: token, Nick: nick, BuildVersion: "dev", ProtocolVersion: protocol.Version})
+	if raw {
+		return cl // welcome может и не прийти: например, ник занят
+	}
 	var w protocol.Welcome
 	cl.expect(protocol.SWelcome, &w)
 	cl.Token, cl.ID = w.Token, w.PlayerID
 	return cl
+}
+
+// connectRaw подключается и говорит hello, но welcome не ждёт: нужен там, где сервер обязан
+// ответить ошибкой (занятый ник, мат в нике) и оставить соединение живым.
+func (s *testServer) connectRaw(t *testing.T, nick, token, ip string) *client {
+	t.Helper()
+	return s.dial(t, nick, token, ip, true)
 }
 
 func (cl *client) send(typ string, data any) {

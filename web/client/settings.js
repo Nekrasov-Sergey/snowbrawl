@@ -5,7 +5,8 @@ window.SBSettings = (function () {
   // pcControls в хранилище просто игнорируется — читаются только ключи из DEFAULTS.
   var DEFAULTS = {
     haptics: true, // вибрация при попадании (где поддерживается)
-    touch: 'auto'  // сенсорное управление: auto | on | off
+    touch: 'auto', // сенсорное управление: auto | on | off
+    volume: 1      // громкость 0..1; ноль = звука нет (отдельного флага «выключено» нет)
   };
   var cur = load();
 
@@ -15,6 +16,8 @@ window.SBSettings = (function () {
     try {
       var saved = JSON.parse(localStorage.getItem(KEY) || '{}');
       for (var k2 in DEFAULTS) if (saved[k2] !== undefined) out[k2] = saved[k2];
+      // Миграция с версий, где звук был кнопкой вкл/выкл: у кого он выключен — остаётся таким.
+      if (saved.volume === undefined && localStorage.getItem('sb.sound') === 'off') out.volume = 0;
     } catch (e) { /* приватный режим или мусор в хранилище */ }
     return out;
   }

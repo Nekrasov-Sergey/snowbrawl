@@ -43,7 +43,8 @@ const (
 	CTraining   = "training"
 	CChatSend   = "chat.send" // сообщение в общий чат главного меню
 	CChatDel    = "chat.del"  // удалить сообщение чата (своё или по праву роли)
-	CPing       = "ping"
+	CPing       = "ping"      // клиентский зонд задержки: сервер отвечает pong
+	CPong       = "pong"      // ответ на серверный зонд ping (см. Ping/Pong)
 )
 
 // Типы сообщений сервер → клиент.
@@ -67,6 +68,8 @@ const (
 	SChatClear   = "chat.clear"   // историю чата очистила админка
 	SRank        = "rank"         // роль этого игрока изменилась
 	SPong        = "pong"
+	SPing        = "ping"      // зонд задержки от сервера: клиент обязан ответить pong с тем же seq
+	SRoomPing    = "room.ping" // задержки участников лобби (отдельно от room.state)
 )
 
 // Роли модерации. Выдаются по IP из админки (см. internal/moderation) и влияют на цвет ника
@@ -85,6 +88,7 @@ const (
 	ErrNotAllowed    = "not_allowed"
 	ErrBadNick       = "bad_nick"
 	ErrNickProfanity = "nick_profanity" // в нике мат: причина отказа своя, чтобы её можно было объяснить
+	ErrNickTaken     = "nick_taken"     // ник занят другим игроком до перезапуска сервера
 	ErrRoomNotFound  = "room_not_found"
 	ErrRoomFull      = "room_full"
 	ErrRoomLimit     = "room_limit"
@@ -278,6 +282,29 @@ type RoomPlayer struct {
 	Ready     bool   `json:"ready,omitempty"`
 	InMatch   bool   `json:"inMatch,omitempty"` // играет в идущем матче (иначе сидит в лобби)
 	Rank      string `json:"rank,omitempty"`    // роль модерации: цвет ника (Role — класс бойца)
+	Ping      int    `json:"ping,omitempty"`    // задержка до сервера, мс, кратно 10; 0 — неизвестна
+}
+
+// Ping — тело зонда задержки и ответа на него: одна и та же структура в обе стороны, потому
+// что содержимое одинаковое, а направление задаёт тип сообщения (SPing/CPong, CPing/SPong).
+// Номер нужен, чтобы не считать RTT по чужому, запоздавшему ответу. Тело может быть пустым:
+// клиенты до 0.9.0 присылали ping без номера.
+type Ping struct {
+	Seq uint32 `json:"seq,omitempty"`
+}
+
+// PlayerPing — задержка одного участника лобби.
+type PlayerPing struct {
+	ID   string `json:"id"`
+	Ping int    `json:"ping"`
+}
+
+// RoomPing — задержки участников лобби. Отдельное сообщение, а не поле в room.state: тот
+// рассылается целиком при любом изменении, и гонять весь состав из-за одной цифры, которая
+// шевелится каждые несколько секунд, — лишний трафик.
+type RoomPing struct {
+	Code  string       `json:"code"`
+	Pings []PlayerPing `json:"pings"`
 }
 
 // RoomState — полное состояние лобби, рассылается всем при любом изменении.
@@ -472,6 +499,26 @@ func NormalizeNick(nick string) (string, error) {
 		return "", ErrProfaneNick
 	}
 	return nick, nil
+}
+
+// NickKey — ключ, по которому ники считаются одним и тем же именем: регистр вниз, латиница и
+// похожие на буквы цифры сводятся к кириллице (censor.Fold), разделители выбрасываются. Так
+// «Vasya», «VASYA» и «va_sya» занимают одно имя.
+//
+// Специально НЕ используется censor.normalize: она выбрасывает всё, кроме кириллицы, и схлопывает
+// повторы — «Игрок2» совпал бы с «Игрок5», а «Анна» с «Ана». Для поиска мата это правильно, для
+// брони ника — отказ, на который игрок ничего не может ответить. Поэтому цифры и повторы букв
+// здесь значимы.
+func NickKey(nick string) string {
+	var b strings.Builder
+	for _, r := range nick {
+		switch r {
+		case ' ', '_', '-':
+			continue
+		}
+		b.WriteRune(censor.Fold(r))
+	}
+	return b.String()
 }
 
 // roomCodeRe — формат кода комнаты: четыре цифры.
