@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.8.0';
+  var SIM_VERSION = '1.9.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -42,8 +42,9 @@
   var SNOWMAN_R = 26;
   var DEFENSE_AGGRO_R = 120;             // ближе — враг переключается со снеговика на игрока
   var PVE_SPAWN_X0 = 760, PVE_SPAWN_X1 = 884; // полоса появления врагов у правого края
-  var CONTACT_DAMAGE_CD = 0.8;           // с, пауза контактного урона одного врага
+  var CONTACT_DAMAGE_CD = 0.8;           // с, пауза контактного урона одного врага (умолч.)
   var CONTACT_KNOCK = 34;
+  var ICE_STEER = 2.6;                   // 1/с — как быстро скорость на льду доворачивает к цели
 
   // --- Способности (пассив + актив у каждой роли), константы игрового баланса ---
   var DASH_DIST = 118, DASH_MS = 170, DASH_IFRAME_MS = 250, DASH_CD = 6;        // Раннер: Рывок
@@ -117,7 +118,7 @@
         { type:'rect',   x:450, y:450, w:70, h:20, height:18 },
         { type:'rect',   x:450, y:280, w:24, h:96, height:30 }
     ]},
-    { name: 'Река', mat: 'stone', ice: { y0: 236, y1: 324, slow: 0.28 }, obstacles: [
+    { name: 'Река', mat: 'stone', ice: { y0: 236, y1: 324, speedup: 0.35 }, obstacles: [
         { type:'rect',   x:450, y:200, w:120, h:20, height:16, mat:'wood' },
         { type:'rect',   x:450, y:360, w:120, h:20, height:16, mat:'wood' },
         { type:'rect',   x:210, y:150, w:22, h:74, height:20 },
@@ -183,7 +184,7 @@
   var ENEMY_CORE_ROLES = ['Снайпер', 'Бомбер', 'Фризер'];
   var ENEMY_STATS = {
     core:   { role: '*',       speed: 150, radius: 15, hp: 3, contact: 0, knockResist: 0 },
-    swarm:  { role: 'Раннер',  speed: 198, radius: 12, hp: 1, contact: 1, knockResist: 0 },
+    swarm:  { role: 'Раннер',  speed: 150, radius: 12, hp: 1, contact: 1, knockResist: 0, contactCd: 1.4 },
     tank:   { role: 'Танк',    speed: 118, radius: 24, hp: 5, contact: 0, knockResist: 0.8 },
     roller: { role: 'Танк',    speed: 300, radius: 20, hp: 3, contact: 1, knockResist: 1, scripted: true },
     boss:   { role: 'Танк',    speed: 120, radius: 34, hp: 12, contact: 0, knockResist: 1 }
@@ -263,6 +264,7 @@
       x: x, y: y, radius: es ? es.radius : stats.radius, speed: es ? es.speed : stats.speed,
       hp: hp0, maxHp: hp0, stunTimer: 0, koed: false, koAt: 0, hitAt: -1e9,
       moveTarget: { x: x, y: y }, isMoving: false, animPhase: 0,
+      vx: 0, vy: 0, // текущее направление хода — используется только на льду (см. moveCharacter)
       charging: false, chargeStart: 0, aimX: x, aimY: y,
       specialCooldown: 0, pendingSpecialThrow: false, armedSpecial: null, reloadUntil: 0,
       // способности: рывок/таран, неуязвимость, замедление, щитовой пузырь Щита
@@ -273,6 +275,7 @@
       enemyType: et, bossKind: et === 'boss' ? (opts.bossKind || 'golem') : null,
       bossPhase: et === 'boss' ? 1 : 0, bossTimer: 0,
       contactDamage: es ? es.contact : 0, knockResist: es ? es.knockResist : 0,
+      contactCd: (es && es.contactCd) || CONTACT_DAMAGE_CD,
       scripted: !!(es && es.scripted), contactCdUntil: 0,
       lives: null, respawnAt: 0,
       ai: { nextDecisionAt: 0, chargeDuration: 0, dodgeUntil: 0, lastAimX: 0, lastAimY: 0 }
@@ -920,7 +923,10 @@
     return false;
   }
 
-  /** Множитель скорости: пассив Раннера, наледь Фризера, лёд «Реки», аура вражеского Фризера. */
+  /** На льду «Реки» (полоса `state.ice.y0..y1`) — там разгон и скольжение, см. moveCharacter. */
+  function onIce(state, p) { return !!(state.ice && p.y >= state.ice.y0 && p.y <= state.ice.y1); }
+
+  /** Множитель скорости: пассив Раннера, наледь Фризера, лёд «Реки» (разгон), аура вражеского Фризера. */
   function speedMul(state, p) {
     var mul = 1;
     if (p.role === 'Раннер' && p.hp === 1) mul *= RUNNER_LOWHP_SPEEDUP;
@@ -929,7 +935,7 @@
       var f = g[i];
       if (f.expiresAt > state.time && f.team !== p.team && Math.hypot(p.x - f.x, p.y - f.y) <= f.r) { mul *= (1 - FROST_SLOW); break; }
     }
-    if (state.ice && p.y >= state.ice.y0 && p.y <= state.ice.y1) mul *= (1 - state.ice.slow);
+    if (onIce(state, p)) mul *= (1 + state.ice.speedup);
     if (inFreezerAura(state, p)) mul *= (1 - FREEZER_AURA_SLOW);
     return mul;
   }
@@ -975,8 +981,22 @@
     p.isMoving = dist > 2;
     if (p.isMoving) {
       var spd = p.speed * speedMul(state, p);
-      var step = Math.min(spd * dt, dist);
-      var nx = p.x + (dx / dist) * step, ny = p.y + (dy / dist) * step;
+      var dirX = dx / dist, dirY = dy / dist, nx, ny;
+      if (onIce(state, p)) {
+        // Лёд «Реки»: скорость не разворачивается мгновенно к цели, а доворачивает к ней —
+        // отсюда ощущение скольжения (быстро, но менее верткого поворота), а не просто замедления.
+        var curSpd = Math.hypot(p.vx, p.vy);
+        var curDirX = curSpd > 1 ? p.vx / curSpd : dirX, curDirY = curSpd > 1 ? p.vy / curSpd : dirY;
+        var turn = Math.min(1, ICE_STEER * dt);
+        var tvx = curDirX + (dirX - curDirX) * turn, tvy = curDirY + (dirY - curDirY) * turn;
+        var tlen = Math.hypot(tvx, tvy) || 1;
+        p.vx = (tvx / tlen) * spd; p.vy = (tvy / tlen) * spd;
+        nx = p.x + p.vx * dt; ny = p.y + p.vy * dt;
+      } else {
+        p.vx = dirX * spd; p.vy = dirY * spd;
+        var step = Math.min(spd * dt, dist);
+        nx = p.x + dirX * step; ny = p.y + dirY * step;
+      }
       var c = clampToArena(nx, ny, p.radius); p.x = c.x; p.y = c.y;
       p.animPhase += dt * (spd / 25);
     }
@@ -1472,7 +1492,7 @@
         }
       }
       if (hitSomething) {
-        e.contactCdUntil = state.time + CONTACT_DAMAGE_CD;
+        e.contactCdUntil = state.time + e.contactCd; // у Роя кулдаун длиннее — см. ENEMY_STATS.swarm
         if (e.enemyType === 'roller') { e.koed = true; e.hp = 0; e.dashUntil = 0; emit(state, { type: 'ko', targetId: e.id, x: e.x, y: e.y }); }
       }
     }

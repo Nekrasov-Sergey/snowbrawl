@@ -229,6 +229,20 @@ html.touch .setVol input[type=range] { width: 150px; height: 32px; }
 #topGameBar #connState { font-size: 12px; }
 #gameWrap { width: 100%; display: flex; flex-direction: column; align-items: center; position: relative; }
 #stage { position: relative; max-width: 100%; aspect-ratio: 900 / 560; }
+/* ПК в бою: арену делаем крупнее обычного, но так, чтобы верхняя панель, подсказки и нижний
+   HUD целиком помещались без прокрутки (у телефона свой набор правил ниже). Ведём по ВЫСОТЕ:
+   height ограничен и свободным местом экрана, и шириной через пропорцию 900/560 — тогда
+   width (auto по aspect-ratio) никогда не упирается в max-width и картинка не искажается. */
+html.ingame:not(.touch) #app { max-width: 96vw; }
+html.ingame:not(.touch) #stage {
+  width: auto;
+  height: min(calc(100vh - 330px), calc(88vw * 560 / 900), 780px);
+  max-width: 90vw;
+}
+html.ingame:not(.touch) #topGameBar,
+html.ingame:not(.touch) #bottomRow,
+html.ingame:not(.touch) #hint,
+html.ingame:not(.touch) #abilityHint { max-width: 90vw; }
 canvas {
   background: linear-gradient(180deg,#dfeeff 0%, #c3ddf7 100%);
   border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); cursor: crosshair; display: block; max-width: 100%; height: 100%; width: 100%;

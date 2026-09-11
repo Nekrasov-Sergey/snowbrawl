@@ -1103,7 +1103,9 @@
   function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.rl = hudCache.pve = ''; }
   function updateHUD(snap) {
     var me = myPlayer(snap);
-    var pve = snap.pve || null;
+    // Волновой HUD — только если клиент точно в PvE-матче. Иначе хвост snap.pve от прошлого
+    // матча (переиспользуемый объект интерполяции) включал «Ур./Волна» прямо в PvP.
+    var pve = (app.game && app.game.gameMode && app.game.gameMode !== 'pvp') ? (snap.pve || null) : null;
     function row(p, right) {
       var pips = '';
       for (var i = 0; i < 3; i++) pips += '<span class="pip ' + (i < p.hp ? 'on ' + p.team.toLowerCase() : '') + '"></span>';
@@ -1267,8 +1269,8 @@
     $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
     Device.apply();
     touchLayer.hidden = !isTouch;
-    // HP на канвасе под ником: на телефоне HUD-строки скрыты, и иначе HP не видно вовсе.
-    render.setOptions({ pips: isTouch });
+    // HP на канвасе под ником — и на ПК тоже: так здоровье бойцов видно прямо на арене.
+    render.setOptions({ pips: true });
     touch.reset(); intent.reset();
     $('fsBtn').hidden = !(isTouch && Device.fullscreenAvailable());
     clearTimeout(zonesHintTimer);

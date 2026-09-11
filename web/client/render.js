@@ -14,6 +14,26 @@ window.SBRender = (function () {
     var coarse = false;
     try { coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches; } catch (e) { /* игнор */ }
 
+    // Внутреннее разрешение канваса тянем под фактический размер на экране (×DPR): при крупной
+    // арене на ПК рисование в 900×560 и апскейл браузером мылит спрайты и текст. RS — множитель
+    // бэкстора; вся отрисовка остаётся в логических координатах 900×560 через setTransform(RS).
+    var RS = 1;
+    function computeRS() {
+      var dpr = window.devicePixelRatio || 1;
+      var cssW = canvas.clientWidth || (canvas.getBoundingClientRect && canvas.getBoundingClientRect().width) || W;
+      var want = Math.max(1, Math.min(2.5, cssW * dpr / W));
+      return Math.round(want * 4) / 4; // шаг 0.25 — реже пересобираем кэши арены и подписей
+    }
+    function applyRS() {
+      var next = computeRS();
+      if (next === RS && canvas.width === Math.round(W * next)) return;
+      RS = next;
+      canvas.width = Math.round(W * RS);
+      canvas.height = Math.round(H * RS);
+      arenaCache.index = -1; labels = {};
+    }
+    try { window.addEventListener('resize', applyRS); } catch (e) { /* игнор */ }
+
     // Снежинки в трёх «корзинах» прозрачности: три fill на кадр вместо одного на снежинку.
     var SNOW_ALPHA = [0.35, 0.55, 0.75];
     for (var i = 0, n = coarse ? 28 : 40; i < n; i++) {
@@ -25,64 +45,79 @@ window.SBRender = (function () {
     // shadowBlur на каждое препятствие каждый кадр на телефонах стоят дороже всего остального.
     var arenaCache = { index: -1, canvas: null };
     function buildArena(index) {
-      var oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+      var oc = document.createElement('canvas'); oc.width = Math.round(W * RS); oc.height = Math.round(H * RS);
       var c = oc.getContext('2d');
+      c.setTransform(RS, 0, 0, RS, 0, 0);
       var bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#dfeeff'); bg.addColorStop(1, '#c3ddf7');
       c.fillStyle = bg; c.fillRect(0, 0, W, H);
+      // Крапинка снега — убирает «мёртвую» заливку, помогает силуэтам. Запекается один раз.
+      var rnd = 20260910;
+      function nrand() { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; }
+      for (var sp = 0; sp < 340; sp++) {
+        var sx = nrand() * W, sy = nrand() * H, ss = 0.6 + nrand() * 1.1;
+        c.fillStyle = nrand() < 0.5 ? 'rgba(255,255,255,0.55)' : 'rgba(150,175,205,0.35)';
+        c.beginPath(); c.arc(sx, sy, ss, 0, Math.PI * 2); c.fill();
+      }
       var arena = Sim.ARENAS[index] || Sim.ARENAS[0];
-      // «Река»: полоса льда по центру рисуется в кэш (статична).
+      // «Река»: глянцевая ледяная полоса (статичная часть в кэше, бегущий блик — в drawArena).
       if (arena.ice) {
-        var ig = c.createLinearGradient(0, arena.ice.y0, 0, arena.ice.y1);
-        ig.addColorStop(0, '#bfe6f5'); ig.addColorStop(0.5, '#d9f2fb'); ig.addColorStop(1, '#bfe6f5');
-        c.fillStyle = ig; c.fillRect(0, arena.ice.y0, W, arena.ice.y1 - arena.ice.y0);
-        c.strokeStyle = 'rgba(120,170,200,0.5)'; c.lineWidth = 1;
-        for (var il = 0; il < 7; il++) {
-          var iy = arena.ice.y0 + 6 + il * (arena.ice.y1 - arena.ice.y0 - 12) / 6;
-          c.beginPath(); c.moveTo(30 + il * 40, iy); c.lineTo(W - 40 + il * 12, iy - 6); c.stroke();
+        var y0 = arena.ice.y0, ih = arena.ice.y1 - arena.ice.y0;
+        var ig = c.createLinearGradient(0, y0, 0, y0 + ih);
+        ig.addColorStop(0, '#7fd0e6'); ig.addColorStop(0.45, '#a6e6f2'); ig.addColorStop(0.55, '#8ad8ea'); ig.addColorStop(1, '#5cb8d4');
+        c.fillStyle = ig; c.fillRect(0, y0, W, ih);
+        // морозная крошка-паутина
+        c.strokeStyle = 'rgba(255,255,255,0.5)'; c.lineWidth = 1;
+        for (var il = 0; il < 9; il++) {
+          var iy = y0 + 4 + il * (ih - 8) / 8;
+          c.beginPath(); c.moveTo(10 + il * 34, iy); c.lineTo(W - 30 + il * 10, iy - 7); c.stroke();
         }
-        c.strokeStyle = 'rgba(90,150,190,0.6)'; c.lineWidth = 1.5;
-        c.strokeRect(0, arena.ice.y0, W, arena.ice.y1 - arena.ice.y0);
-      }
-      for (var i = 0; i < arena.obstacles.length; i++) {
-        var ob = arena.obstacles[i];
-        if (ob.hp != null) continue; // разрушаемые рисует drawArena по снапшоту
-        if (ob.type === 'rect') {
-          var grad = c.createLinearGradient(ob.x, ob.y - ob.h / 2, ob.x, ob.y + ob.h / 2);
-          grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#c9deF5');
-          c.save(); c.shadowColor = 'rgba(0,0,0,0.25)'; c.shadowBlur = 6; c.shadowOffsetY = 3;
-          c.fillStyle = grad; c.fillRect(ob.x - ob.w / 2, ob.y - ob.h / 2, ob.w, ob.h);
-          c.restore();
-          c.strokeStyle = '#9cc0e6'; c.lineWidth = 2; c.strokeRect(ob.x - ob.w / 2, ob.y - ob.h / 2, ob.w, ob.h);
-        } else {
-          c.fillStyle = '#8a5a3b'; c.fillRect(ob.x - 3, ob.y, 6, 12);
-          var g2 = c.createRadialGradient(ob.x - 4, ob.y - 6, 2, ob.x, ob.y - 2, ob.r);
-          g2.addColorStop(0, '#4fae74'); g2.addColorStop(1, '#1f5636');
-          c.beginPath(); c.arc(ob.x, ob.y - 2, ob.r, 0, Math.PI * 2);
-          c.fillStyle = g2; c.fill(); c.strokeStyle = '#1f5636'; c.stroke();
+        for (var iv = 0; iv < 14; iv++) {
+          var ix = 40 + iv * (W - 80) / 13;
+          c.beginPath(); c.moveTo(ix, y0 + 3); c.lineTo(ix + 8, y0 + ih - 3); c.stroke();
         }
+        // блики-полосы
+        c.fillStyle = 'rgba(255,255,255,0.35)';
+        c.fillRect(0, y0 + ih * 0.18, W, 3);
+        c.fillRect(0, y0 + ih * 0.62, W, 2);
+        c.strokeStyle = NINK; c.lineWidth = 2;
+        c.beginPath(); c.moveTo(0, y0); c.lineTo(W, y0); c.moveTo(0, y0 + ih); c.lineTo(W, y0 + ih); c.stroke();
       }
+      // Кант арены.
+      c.strokeStyle = 'rgba(19,41,63,0.35)'; c.lineWidth = 4;
+      c.strokeRect(2, 2, W - 4, H - 4);
+      // Препятствия и ёлки в кэш НЕ пишем: они «высокие», их рисует y-sorted слой в frame().
       arenaCache.index = index; arenaCache.canvas = oc;
     }
 
-    // Разрушаемое укрытие: ящик/бочка из «дерева», трещины по мере урона.
+    // Разрушаемое укрытие — деревянный ящик/бочка (коричневый = «ломай»), cel + трещины по HP.
     function drawDestructible(d) {
       var frac = d.maxHp ? d.hp / d.maxHp : 1;
       ctx.save();
-      ctx.fillStyle = '#c58a4a'; ctx.strokeStyle = '#7c4a22'; ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
       if (d.type === 'circle') {
-        ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        ctx.strokeStyle = '#8f5c30'; ctx.lineWidth = 1.5;
+        contactShadow(d.x, d.y + d.r * 0.9, d.r * 0.95, d.r * 0.3);
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        var g = ctx.createLinearGradient(0, d.y - d.r, 0, d.y + d.r);
+        g.addColorStop(0, '#d79a5e'); g.addColorStop(1, '#a56a34');
+        ctx.fillStyle = g; ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = NINK; ctx.stroke();
+        ctx.strokeStyle = 'rgba(60,35,15,0.6)'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(d.x, d.y, d.r * 0.62, 0, Math.PI * 2); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(d.x - d.r, d.y); ctx.lineTo(d.x + d.r, d.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(d.x - d.r + 2, d.y); ctx.lineTo(d.x + d.r - 2, d.y); ctx.stroke();
       } else {
         var x0 = d.x - d.w / 2, y0 = d.y - d.h / 2;
-        ctx.fillRect(x0, y0, d.w, d.h); ctx.strokeRect(x0, y0, d.w, d.h);
-        ctx.strokeStyle = '#8f5c30'; ctx.lineWidth = 1.5;
-        for (var pl = 1; pl < 3; pl++) { ctx.beginPath(); ctx.moveTo(x0 + d.w * pl / 3, y0); ctx.lineTo(x0 + d.w * pl / 3, y0 + d.h); ctx.stroke(); }
-        ctx.beginPath(); ctx.moveTo(x0, d.y); ctx.lineTo(x0 + d.w, d.y); ctx.stroke();
+        contactShadow(d.x, y0 + d.h + 2, d.w * 0.55, 5);
+        roundRectPath(x0, y0, d.w, d.h, 3);
+        var g2 = ctx.createLinearGradient(0, y0, 0, y0 + d.h);
+        g2.addColorStop(0, '#d79a5e'); g2.addColorStop(1, '#a56a34');
+        ctx.fillStyle = g2; ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = NINK; ctx.stroke();
+        ctx.strokeStyle = 'rgba(60,35,15,0.55)'; ctx.lineWidth = 2;
+        for (var pl = 1; pl < 3; pl++) { ctx.beginPath(); ctx.moveTo(x0 + d.w * pl / 3, y0 + 2); ctx.lineTo(x0 + d.w * pl / 3, y0 + d.h - 2); ctx.stroke(); }
+        ctx.beginPath(); ctx.moveTo(x0 + 2, d.y); ctx.lineTo(x0 + d.w - 2, d.y); ctx.stroke();
       }
-      if (frac < 0.999) { // трещины
-        ctx.strokeStyle = 'rgba(40,20,10,0.75)'; ctx.lineWidth = 1.5;
+      if (frac < 0.999) {
+        ctx.strokeStyle = 'rgba(30,15,5,0.8)'; ctx.lineWidth = 1.8;
         var cr = (d.type === 'circle' ? d.r : Math.min(d.w, d.h) / 2);
         var n = frac < 0.4 ? 4 : 2;
         for (var ci = 0; ci < n; ci++) {
@@ -94,6 +129,77 @@ window.SBRender = (function () {
         }
       }
       ctx.restore();
+    }
+
+    // --- «Высокие» объекты арены: cel-стиль под модели, рисуются в y-sorted слое (frame()). ---
+    var NINK = '#13293f'; // общая навигационная обводка мира
+    function contactShadow(x, y, rx, ry) {
+      ctx.fillStyle = 'rgba(20,40,70,0.16)';
+      ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    function roundRectPath(x, y, w, h, r) {
+      r = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+    }
+    // Несокрушимое укрытие — глыба льда: без чёрной обводки, стеклянный вид, светлый кант.
+    function drawCoverBlock(ob) {
+      var x0 = ob.x - ob.w / 2, y0 = ob.y - ob.h / 2;
+      contactShadow(ob.x, y0 + ob.h + 3, ob.w * 0.52, 6);
+      roundRectPath(x0, y0, ob.w, ob.h, 5);
+      var g = ctx.createLinearGradient(0, y0, 0, y0 + ob.h);
+      g.addColorStop(0, '#e2f5fb'); g.addColorStop(0.45, '#a9e2ee'); g.addColorStop(0.55, '#8fd4e4'); g.addColorStop(1, '#63b3cc');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(70,150,180,0.55)'; ctx.lineJoin = 'round'; ctx.stroke();
+      ctx.save();
+      roundRectPath(x0, y0, ob.w, ob.h, 5); ctx.clip();
+      // блик по верхней грани
+      ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fillRect(x0, y0, ob.w, 3);
+      // косые «стеклянные» полосы
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x0 + ob.w * 0.2, y0 + ob.h); ctx.lineTo(x0 + ob.w * 0.42, y0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x0 + ob.w * 0.55, y0 + ob.h); ctx.lineTo(x0 + ob.w * 0.7, y0); ctx.stroke();
+      // тень у нижней грани — объём
+      ctx.fillStyle = 'rgba(40,90,120,0.25)'; ctx.fillRect(x0, y0 + ob.h - 4, ob.w, 4);
+      ctx.restore();
+    }
+    // Ёлка — округлая крона по кругу коллизии + снежная шапка.
+    function drawTree(ob) {
+      var cx = ob.x, cy = ob.y - 2, r = ob.r;
+      contactShadow(ob.x, ob.y + 11, r * 0.9, r * 0.28);
+      ctx.fillStyle = '#7a5230'; ctx.strokeStyle = NINK; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.rect(ob.x - 3.5, ob.y, 7, 13); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      var g = ctx.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.2, cx, cy, r);
+      g.addColorStop(0, '#4f9a68'); g.addColorStop(1, '#245c3c');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = NINK; ctx.stroke();
+      // снежная шапка сверху
+      ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.clip();
+      ctx.fillStyle = '#eef6ff';
+      ctx.beginPath(); ctx.ellipse(cx, cy - r * 0.72, r * 0.9, r * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    // Снежная стена Щита — блок как укрытие, но с кантом в цвет команды и трещинами по HP.
+    function drawWall(wl) {
+      var x0 = wl.x - wl.w / 2, y0 = wl.y - wl.h / 2;
+      ctx.globalAlpha = 0.55 + (wl.ttl / wl.life) * 0.45;
+      roundRectPath(x0, y0, wl.w, wl.h, 4);
+      var g = ctx.createLinearGradient(0, y0, 0, y0 + wl.h);
+      g.addColorStop(0, '#d8e4f0'); g.addColorStop(1, '#a8bdd4');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = NINK; ctx.lineJoin = 'round'; ctx.stroke();
+      roundRectPath(x0 + 2.5, y0 + 2.5, wl.w - 5, wl.h - 5, 3);
+      ctx.lineWidth = 2; ctx.strokeStyle = wl.team === 'A' ? '#2e7aff' : '#f23a3a'; ctx.stroke();
+      if (wl.maxHp && wl.hp < wl.maxHp) {
+        ctx.strokeStyle = 'rgba(20,40,70,0.75)'; ctx.lineWidth = 1.5;
+        for (var wc = 0; wc < (wl.maxHp - wl.hp); wc++) {
+          var wx = x0 + (wc + 1) * wl.w / (wl.maxHp + 1);
+          ctx.beginPath(); ctx.moveTo(wx, y0 + 3); ctx.lineTo(wx + 3, y0 + wl.h - 3); ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
     }
 
     // Подписи бойцов (ник сверху, роль снизу) — спрайт на бойца, fillText со сменой шрифта
@@ -112,11 +218,70 @@ window.SBRender = (function () {
       if (!o) return;
       if (o.pips !== undefined && o.pips !== opts.pips) { opts.pips = !!o.pips; labels = {}; }
     }
+
+    // Спрайтовая модель бойца (web/client/rig.js). Пер-игроковое состояние: гистерезис
+    // зеркала + метки времени броска и скилла (ставятся из handleEvents по playerId).
+    var Rig = window.SBRig || null;
+    var rigCache = {};
+    var HIT_MS = 200, THROW_MS = 300, ABIL_MS = 420;
+    function rigC(id) {
+      return rigCache[id] || (rigCache[id] = { flip: 1, throwAt: -1e9, abilAt: -1e9, prevX: null, ph: (parseInt(id, 36) || 0) % 997 });
+    }
+    function rigStateFor(snap, p, isMe, local) {
+      var rc = rigC(p.id);
+      var now = performance.now() + rc.ph * 3;
+      var charging = isMe && local && local.charging ? true : p.charging;
+      var power = isMe && local && local.charging ? local.power : (p.power || 0);
+      var aX = isMe && local && local.charging ? local.aimX : p.aimX;
+      var aY = isMe && local && local.charging ? local.aimY : p.aimY;
+      var aim = (aX != null) ? Math.atan2(aY - p.y, aX - p.x) : (p.team === 'A' ? 0 : Math.PI);
+      // Сторона взгляда меняется МГНОВЕННО: при замахе — по прицелу, иначе — по движению.
+      if (charging) {
+        var cs = Math.cos(aim);
+        if (cs > 0.02) rc.flip = 1; else if (cs < -0.02) rc.flip = -1;
+      } else {
+        var dx = rc.prevX == null ? 0 : p.x - rc.prevX;
+        if (dx > 0.35) rc.flip = 1; else if (dx < -0.35) rc.flip = -1;
+      }
+      rc.prevX = p.x;
+      var throwT = (now - rc.throwAt) / THROW_MS;
+      var abilT = (now - rc.abilAt) / ABIL_MS;
+      // Труп тает 4 с и стартует полупрозрачным — и у PvE-мобов, и у союзников в PvE (p.lives —
+      // признак члена пати; вплотную до конца жизней он лежит так же, как враг). Боец PvP,
+      // где p.lives нет, просто валится до конца раунда.
+      var dissolve = !!p.et || p.lives != null;
+      var koMs = dissolve ? 4000 : (Sim.KO_ANIM_MS || 500), hitAge = snap.time - p.hitAt;
+      var mode = 'idle';
+      if (p.koed) mode = 'ko';
+      else if (hitAge >= 0 && hitAge < HIT_MS) mode = 'hit';
+      else if (abilT >= 0 && abilT < 1) mode = 'ability';
+      else if (throwT >= 0 && throwT < 1) mode = 'throw';
+      else if (charging) mode = 'charge';
+      else if (p.moving) mode = 'run';
+      return {
+        mode: mode, t: now, role: p.role, flip: rc.flip,
+        // Любой не-A читается как враг (красный): в сетевом снапшоте team у врага иногда пуст,
+        // и без этого модель оставалась серой.
+        team: p.team === 'A' ? 'A' : 'B', corpse: dissolve, stun: p.stun > 0,
+        corrupt: p.et === 'core' || p.et === 'swarm', lod: p.et === 'swarm',
+        aimLocal: rc.flip < 0 ? Math.PI - aim : aim, aimScreen: aim,
+        power: power, speed: 1, outline: 2.4, scaleMul: 1.32, variantB: false, back: false, noShadow: true,
+        throwT: mode === 'throw' ? Math.min(1, throwT) : 0,
+        abilityT: mode === 'ability' ? Math.min(1, abilT) : 0,
+        hitT: mode === 'hit' ? Math.min(1, hitAge / HIT_MS) : 0,
+        koT: mode === 'ko' ? Math.min(1, (snap.time - p.koAt) / koMs) : 0,
+        recoil: mode === 'hit' ? Math.sin(hitAge / HIT_MS * 40) * (1 - hitAge / HIT_MS) * 5 : 0,
+        flyProp: (mode === 'throw' && throwT > 0.34) ? (throwT - 0.34) / 0.66
+               : (mode === 'ability' && abilT > 0.42 && p.role === 'Бомбер') ? (abilT - 0.42) / 0.58 : null
+      };
+    }
+
     function labelOf(p, isMe, r) {
       var base = nickOf(p), rank = rankOf(p);
       // У врагов PvE своя полоса HP (mhp), пипсы там врали бы: у босса их десятки.
       var pips = opts.pips && p.mhp == null && !p.koed ? p.hp : -1;
-      var key = base + '|' + p.role + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r + '|' + rank +
+      // Подпись роли убрана — роль теперь читается по скину модели.
+      var key = base + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r + '|' + rank +
         '|' + pips + '|' + p.team;
       var l = labels[p.id];
       if (l && l.key === key) return l;
@@ -124,12 +289,12 @@ window.SBRender = (function () {
       var oc = document.createElement('canvas'), c = oc.getContext('2d');
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
       var w = Math.ceil(Math.max(c.measureText(nick).width, 20)) + 8;
-      c.font = '9px Segoe UI, Arial';
-      w = Math.max(w, Math.ceil(c.measureText(p.role).width) + 8);
-      var top = r + 16, h = top + r + 16; // ник на базовой линии top-10, роль на top + 2r + 12
-      if (pips >= 0) { w = Math.max(w, 40); h += 12; }
-      oc.width = w; oc.height = h;
-      c = oc.getContext('2d'); c.textAlign = 'center';
+      var top = r + 16, h = top + (pips >= 0 ? 14 : 2); // ник на базовой линии top-6, пипсы сразу под ним
+      if (pips >= 0) w = Math.max(w, 40);
+      // Спрайт подписи растеризуем во внутреннем разрешении канваса (RS), рисуется он с явным
+      // логическим размером (w×h) — иначе на крупной арене текст мылится вместе с апскейлом.
+      oc.width = Math.max(1, Math.round(w * RS)); oc.height = Math.max(1, Math.round(h * RS));
+      c = oc.getContext('2d'); c.setTransform(RS, 0, 0, RS, 0, 0); c.textAlign = 'center';
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
       var rc = RANK_COLORS[rank];
       if (rc) { // цветной ник по роли, с тёмной обводкой — иначе тонет в снегу
@@ -139,10 +304,9 @@ window.SBRender = (function () {
         c.fillStyle = '#0b1622';
       }
       c.fillText(nick, w / 2, top - 6);
-      c.fillStyle = '#3c5a7c'; c.font = '9px Segoe UI, Arial'; c.fillText(p.role, w / 2, top + r + 12);
       if (pips >= 0) {
-        // Три квадратика под ролью: на снегу пустые нужны с обводкой, иначе их не видно.
-        var pw = 7, gap = 3, all = 3 * pw + 2 * gap, px = (w - all) / 2, py = top + r + 19;
+        // Три квадратика под ником: на снегу пустые нужны с обводкой, иначе их не видно.
+        var pw = 7, gap = 3, all = 3 * pw + 2 * gap, px = (w - all) / 2, py = top - 1;
         for (var i = 0; i < 3; i++, px += pw + gap) {
           c.fillStyle = i < pips ? (p.team === 'A' ? '#4aa8ff' : '#ff5b5b') : 'rgba(11,22,34,0.25)';
           c.fillRect(px, py, pw, pw);
@@ -150,7 +314,7 @@ window.SBRender = (function () {
           c.strokeRect(px + 0.5, py + 0.5, pw - 1, pw - 1);
         }
       }
-      l = labels[p.id] = { key: key, canvas: oc, w: w, top: top };
+      l = labels[p.id] = { key: key, canvas: oc, w: w, h: h, top: top };
       return l;
     }
 
@@ -182,6 +346,11 @@ window.SBRender = (function () {
       if (!events) return;
       for (var i = 0; i < events.length; i++) {
         var e = events[i];
+        // Метки времени для спрайтовой модели: бросок и применение скилла — по playerId.
+        if (e.playerId) {
+          if (e.type === 'throw') rigC(e.playerId).throwAt = performance.now();
+          else if (e.type === 'dash' || e.type === 'special' || e.type === 'wallPlaced') rigC(e.playerId).abilAt = performance.now();
+        }
         switch (e.type) {
           case 'throw': audio.throwWhoosh(e.power || 0); break;
           case 'hit':
@@ -242,7 +411,16 @@ window.SBRender = (function () {
       if (arenaCache.index !== snap.arena) buildArena(snap.arena);
       // При тряске экрана края сдвигаются: подложка тем же фоном закрывает щели.
       ctx.fillStyle = '#c3ddf7'; ctx.fillRect(-12, -12, W + 24, H + 24);
-      ctx.drawImage(arenaCache.canvas, 0, 0);
+      ctx.drawImage(arenaCache.canvas, 0, 0, W, H);
+      // «Река»: бегущий блик по льду — сразу читается «скользко».
+      var arn = Sim.ARENAS[snap.arena] || Sim.ARENAS[0];
+      if (arn.ice) {
+        var iy0 = arn.ice.y0, iih = arn.ice.y1 - arn.ice.y0;
+        var gx = ((snap.time / 26) % (W + 220)) - 110;
+        var sg = ctx.createLinearGradient(gx - 60, 0, gx + 60, 0);
+        sg.addColorStop(0, 'rgba(255,255,255,0)'); sg.addColorStop(0.5, 'rgba(255,255,255,0.28)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = sg; ctx.fillRect(gx - 60, iy0, 120, iih);
+      }
       // Наледь Фризера на земле (под бойцами).
       if (snap.fx) for (var f = 0; f < snap.fx.length; f++) {
         var fx = snap.fx[f], fa = Math.min(1, fx.ttl / 700);
@@ -278,22 +456,7 @@ window.SBRender = (function () {
         ctx.lineWidth = 1.2; ctx.stroke();
         ctx.restore();
       }
-      // Разрушаемые укрытия арены (не в кэше — меняются).
-      if (snap.destr) for (var d = 0; d < snap.destr.length; d++) { if (snap.destr[d].hp > 0) drawDestructible(snap.destr[d]); }
-      for (var k = 0; k < snap.walls.length; k++) {
-        var wl = snap.walls[k];
-        ctx.globalAlpha = 0.5 + (wl.ttl / wl.life) * 0.5;
-        ctx.fillStyle = wl.team === 'A' ? '#bfe0ff' : '#ffc9c9'; ctx.strokeStyle = '#5a7fa8';
-        ctx.fillRect(wl.x - wl.w / 2, wl.y - wl.h / 2, wl.w, wl.h); ctx.strokeRect(wl.x - wl.w / 2, wl.y - wl.h / 2, wl.w, wl.h);
-        if (wl.maxHp && wl.hp < wl.maxHp) { // трещины по прочности
-          ctx.strokeStyle = 'rgba(50,70,90,0.7)'; ctx.lineWidth = 1;
-          for (var wc = 0; wc < (wl.maxHp - wl.hp); wc++) {
-            var wx = wl.x - wl.w / 2 + (wc + 1) * wl.w / (wl.maxHp + 1);
-            ctx.beginPath(); ctx.moveTo(wx, wl.y - wl.h / 2); ctx.lineTo(wx + 3, wl.y + wl.h / 2); ctx.stroke();
-          }
-        }
-        ctx.globalAlpha = 1;
-      }
+      // Разрушаемые укрытия и стены Щита теперь рисует y-sorted слой в frame().
       // Режим «Защита»: снеговик-объект.
       var pv = snap.pve;
       if (pv && pv.objX != null) {
@@ -503,6 +666,193 @@ window.SBRender = (function () {
       ctx.stroke();
     }
 
+    // Мохнатый силуэт: рваная «звезда» из чередующихся длинных/коротких лучей (клочья шерсти).
+    function furPath(ctx, cx, cy, rx, ry, n, spike) {
+      ctx.beginPath();
+      for (var i = 0; i < n; i++) {
+        var a = i / n * Math.PI * 2 - Math.PI / 2;
+        var m = (i % 2) ? (1 + spike) : (1 - spike * 0.25);
+        var x = cx + Math.cos(a) * rx * m, y = cy + Math.sin(a) * ry * m;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    }
+    function furBlob(ctx, x, y, rx, ry, fill, ink) {
+      furPath(ctx, x, y, rx, ry, 12, 0.18);
+      ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = ink; ctx.stroke();
+    }
+    function yetiArm(ctx, x, y, ang, len, fill, ink) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.lineCap = 'round';
+      ctx.strokeStyle = ink; ctx.lineWidth = len * 0.5 + 4;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, len); ctx.stroke();
+      ctx.strokeStyle = fill; ctx.lineWidth = len * 0.5;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, len); ctx.stroke();
+      furBlob(ctx, 0, len + len * 0.12, len * 0.42, len * 0.42, fill, ink); // кулак
+      ctx.restore();
+    }
+
+    // Снежные големы PvE: roller — ком, boss — чёрный лёд; tank («Йети») — мохнатый монстр.
+    var TAU2 = Math.PI * 2;
+    function drawGolem(ctx, p, snap) {
+      var rc = rigC(p.id);
+      var r = radiusOf(p), kind = p.et, boss = kind === 'boss';
+      var dead = p.koed ? Math.min(1, (snap.time - (p.koAt || snap.time)) / 4000) : -1;
+      var now = dead >= 0 ? 0 : performance.now() + rc.ph * 3; // труп не дёргается
+      var hitAge = snap.time - p.hitAt;
+      var hitT = (dead < 0 && hitAge >= 0 && hitAge < 260) ? hitAge / 260 : -1;
+      var recoil = hitT >= 0 ? Math.sin(hitT * 34) * (1 - hitT) * 5 : 0;
+      var feet = p.y + r;
+      var MAT = boss ? { fill: '#242a36', hi: '#3b4560', ink: '#0a0d14', vein: true }
+                     : { fill: '#5a5a62', hi: '#767680', ink: '#1c1c22', vein: false };
+      if (dead >= 0) { // труп — обесцвеченный, светлее: сразу видно, что это не живой
+        MAT = { fill: boss ? '#575d6b' : '#7b7d88', hi: boss ? '#6d7488' : '#9498a2', ink: '#2b2f38', vein: false };
+      }
+      ctx.save();
+      ctx.translate(p.x + recoil, feet);
+      ctx.fillStyle = 'rgba(20,40,70,0.18)';
+      ctx.beginPath(); ctx.ellipse(0, -2, r * 1.05, r * 0.34, 0, 0, TAU2); ctx.fill();
+      if (dead >= 0) { // труп: оседает, заваливается, тает за 4 с (и уже стартует прозрачным)
+        ctx.translate(0, dead * 6); ctx.rotate(dead * 0.5);
+        ctx.globalAlpha *= Math.max(0, 0.6 - dead * 0.6);
+      }
+
+      if (kind === 'roller') {
+        var dxr = rc.prevX == null ? 0 : p.x - rc.prevX; rc.prevX = p.x;
+        rc.spin = (rc.spin || 0) + dxr * 0.06;
+        var R = r; ctx.translate(0, -R);
+        ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU2);
+        var rg = ctx.createRadialGradient(-R * 0.3, -R * 0.35, R * 0.2, 0, 0, R);
+        rg.addColorStop(0, MAT.hi); rg.addColorStop(1, MAT.fill);
+        ctx.fillStyle = rg; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = MAT.ink; ctx.stroke();
+        ctx.save(); ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU2); ctx.clip(); ctx.rotate(rc.spin);
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 2.5;
+        for (var a1 = 0; a1 < 3; a1++) { var an = a1 * TAU2 / 3; ctx.beginPath(); ctx.moveTo(Math.cos(an) * R, Math.sin(an) * R); ctx.lineTo(-Math.cos(an) * R, -Math.sin(an) * R); ctx.stroke(); }
+        ctx.strokeStyle = MAT.ink; ctx.lineWidth = 2;
+        for (var b1 = 0; b1 < 6; b1++) { var bb = b1 * TAU2 / 6 + 0.4; ctx.beginPath(); ctx.moveTo(Math.cos(bb) * R * 0.35, Math.sin(bb) * R * 0.35); ctx.lineTo(Math.cos(bb) * R * 0.95, Math.sin(bb) * R * 0.95); ctx.stroke(); }
+        ctx.restore();
+        ctx.fillStyle = MAT.ink;
+        ctx.beginPath(); ctx.arc(-R * 0.3, -R * 0.12, 3, 0, TAU2); ctx.arc(R * 0.3, -R * 0.12, 3, 0, TAU2); ctx.fill();
+        ctx.strokeStyle = MAT.ink; ctx.lineWidth = 3; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(-R * 0.38, R * 0.28); ctx.quadraticCurveTo(0, R * 0.02, R * 0.38, R * 0.28); ctx.stroke();
+        if (Math.abs(dxr) > 0.4) {
+          ctx.fillStyle = 'rgba(255,255,255,0.5)';
+          for (var t1 = 0; t1 < 4; t1++) { ctx.beginPath(); ctx.arc((dxr > 0 ? -1 : 1) * (R + 6 + t1 * 7), R * 0.55, 3 - t1 * 0.5, 0, TAU2); ctx.fill(); }
+        }
+      } else if (kind === 'tank') {
+        // «Йети» — мохнатый снежный монстр: сгорбленный, лапы до земли, злая морда.
+        var dxy = rc.prevX == null ? 0 : p.x - rc.prevX; rc.prevX = p.x;
+        var FUR = dead >= 0 ? '#c2cad2' : '#eef4f8', FINK = dead >= 0 ? '#4a525c' : '#26323e';
+        var sway = Math.sin(now * 0.003 + rc.ph) * 0.05 + (dxy > 0.4 ? 0.05 : dxy < -0.4 ? -0.05 : 0);
+        var breathe = Math.sin(now * 0.004 + rc.ph) * r * 0.03;
+        ctx.rotate(sway);
+        // ступни-клочья
+        furBlob(ctx, -r * 0.44, -r * 0.5, r * 0.5, r * 0.62, FUR, FINK);
+        furBlob(ctx, r * 0.44, -r * 0.5, r * 0.5, r * 0.62, FUR, FINK);
+        var bcx = 0, bcy = -r * 1.32 + breathe, bw = r * 1.12, bh = r * 1.24;
+        // руки до земли (задняя рука за корпусом)
+        var armSw = Math.sin(now * 0.004 + rc.ph) * 0.12;
+        yetiArm(ctx, -bw * 0.72, bcy - bh * 0.05, -0.28 + armSw, r * 1.35, FUR, FINK);
+        // корпус
+        ctx.save();
+        furPath(ctx, bcx, bcy, bw, bh, 20, 0.14);
+        var bg = ctx.createRadialGradient(bcx - bw * 0.3, bcy - bh * 0.4, r * 0.3, bcx, bcy, bw * 1.35);
+        bg.addColorStop(0, '#ffffff'); bg.addColorStop(1, FUR);
+        ctx.fillStyle = bg; ctx.fill();
+        ctx.lineWidth = 3.5; ctx.strokeStyle = FINK; ctx.lineJoin = 'round'; ctx.stroke();
+        furPath(ctx, bcx, bcy, bw, bh, 20, 0.14); ctx.clip();
+        ctx.fillStyle = 'rgba(150,180,200,0.45)';
+        ctx.beginPath(); ctx.ellipse(bcx, bcy + bh * 0.55, bw * 1.15, bh * 0.5, 0, 0, TAU2); ctx.fill();
+        ctx.restore();
+        yetiArm(ctx, bw * 0.72, bcy - bh * 0.05, 0.28 - armSw, r * 1.35, FUR, FINK);
+        // голова, вжата в плечи
+        var hy = bcy - bh * 0.66, hr = r * 0.6;
+        furPath(ctx, 0, hy, hr * 1.06, hr, 12, 0.12);
+        ctx.fillStyle = FUR; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = FINK; ctx.stroke();
+        // ледяная корка-надбровье
+        ctx.fillStyle = '#cfe8f2'; ctx.strokeStyle = FINK; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-hr * 0.98, hy - hr * 0.12); ctx.lineTo(hr * 0.98, hy - hr * 0.12);
+        ctx.lineTo(hr * 0.66, hy - hr * 0.62); ctx.lineTo(hr * 0.12, hy - hr * 0.28);
+        ctx.lineTo(-hr * 0.3, hy - hr * 0.62); ctx.lineTo(-hr * 0.74, hy - hr * 0.3);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        // тёмная маска глаз
+        ctx.fillStyle = 'rgba(18,28,38,0.5)';
+        ctx.beginPath(); ctx.ellipse(0, hy + hr * 0.08, hr * 0.82, hr * 0.46, 0, 0, TAU2); ctx.fill();
+        // злые светящиеся глаза
+        ctx.fillStyle = '#bfefff';
+        if (dead < 0) { ctx.shadowColor = '#8fdcff'; ctx.shadowBlur = 6; }
+        ctx.beginPath(); ctx.ellipse(-hr * 0.4, hy + hr * 0.08, hr * 0.22, hr * 0.16, 0.3, 0, TAU2);
+        ctx.ellipse(hr * 0.4, hy + hr * 0.08, hr * 0.22, hr * 0.16, -0.3, 0, TAU2); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#12303c';
+        ctx.beginPath(); ctx.arc(-hr * 0.36, hy + hr * 0.09, hr * 0.09, 0, TAU2); ctx.arc(hr * 0.44, hy + hr * 0.09, hr * 0.09, 0, TAU2); ctx.fill();
+        // разинутая пасть с клыками
+        ctx.fillStyle = '#3a2230'; ctx.strokeStyle = FINK; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(0, hy + hr * 0.66, hr * 0.5, hr * 0.32, 0, 0, TAU2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#fff';
+        for (var fg = -1; fg <= 1; fg += 2) {
+          ctx.beginPath();
+          ctx.moveTo(fg * hr * 0.3 - hr * 0.11, hy + hr * 0.52);
+          ctx.lineTo(fg * hr * 0.3 + hr * 0.11, hy + hr * 0.52);
+          ctx.lineTo(fg * hr * 0.3, hy + hr * 0.86); ctx.closePath(); ctx.fill();
+        }
+        if (hitT >= 0) {
+          ctx.globalAlpha = 0.5 * (1 - hitT); ctx.fillStyle = '#fff';
+          furPath(ctx, bcx, bcy, bw * 1.05, bh * 1.05, 20, 0.14); ctx.fill(); ctx.globalAlpha = 1;
+        }
+      } else {
+        rc.prevX = p.x;
+        var n = boss ? 4 : 3;
+        var sz = boss ? [r * 1.05, r * 0.85, r * 0.62, r * 0.42] : [r * 1.0, r * 0.72, r * 0.5];
+        var lean = Math.sin(now * 0.0025 + rc.ph) * r * 0.06, yy = 0;
+        for (var i = 0; i < n; i++) {
+          var rr = sz[i]; yy -= rr; var bx = lean * (i / n);
+          ctx.beginPath(); ctx.arc(bx, yy, rr, 0, TAU2);
+          var gg = ctx.createRadialGradient(bx - rr * 0.35, yy - rr * 0.4, rr * 0.2, bx, yy, rr);
+          gg.addColorStop(0, MAT.hi); gg.addColorStop(1, MAT.fill);
+          ctx.fillStyle = gg; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = MAT.ink; ctx.stroke();
+          if (MAT.vein) {
+            ctx.strokeStyle = 'rgba(74,123,216,0.55)'; ctx.lineWidth = 1.5;
+            for (var v = 0; v < 3; v++) { var va = v * 2.1 + i; ctx.beginPath(); ctx.moveTo(bx + Math.cos(va) * rr * 0.2, yy + Math.sin(va) * rr * 0.2); ctx.lineTo(bx + Math.cos(va + 0.6) * rr * 0.85, yy + Math.sin(va + 0.6) * rr * 0.85); ctx.stroke(); }
+          }
+          yy -= rr - rr * 0.35;
+        }
+        var headY = yy + sz[n - 1] * 0.7, hbx = lean * 0.9;
+        var rage = boss && p.bph === 2;
+        ctx.fillStyle = rage ? '#ff3b3b' : MAT.ink;
+        if (rage) { ctx.shadowColor = '#ff3b3b'; ctx.shadowBlur = 7; }
+        ctx.beginPath(); ctx.arc(hbx - 5, headY, 3, 0, TAU2); ctx.arc(hbx + 5, headY, 3, 0, TAU2); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = MAT.ink; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(hbx - 6, headY + 8); ctx.lineTo(hbx - 2, headY + 6); ctx.lineTo(hbx + 2, headY + 9); ctx.lineTo(hbx + 6, headY + 6); ctx.stroke();
+        var armY = -(sz[0] * 0.65 + sz[1]), aw = Math.sin(now * 0.004 + rc.ph) * 0.18;
+        ctx.strokeStyle = '#5a4230'; ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.moveTo(-sz[1] * 0.7, armY); ctx.lineTo(-sz[1] * 0.7 - 15, armY - 6 + aw * 12);
+        ctx.moveTo(sz[1] * 0.7, armY); ctx.lineTo(sz[1] * 0.7 + 15, armY - 6 - aw * 12);
+        ctx.stroke();
+        if (boss) {
+          var crY = yy - 1;
+          ctx.fillStyle = '#bfe6f5'; ctx.strokeStyle = MAT.ink; ctx.lineWidth = 2;
+          for (var c = -1; c <= 1; c++) { var chh = c === 0 ? 17 : 11; ctx.beginPath(); ctx.moveTo(hbx + c * 8 - 4, crY); ctx.lineTo(hbx + c * 8, crY - chh); ctx.lineTo(hbx + c * 8 + 4, crY); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+          if (rage) {
+            ctx.strokeStyle = 'rgba(255,90,60,0.85)'; ctx.lineWidth = 2; ctx.shadowColor = '#ff5a3c'; ctx.shadowBlur = 5;
+            for (var cr = 0; cr < 5; cr++) { var cra = cr * 1.4; ctx.beginPath(); ctx.moveTo(0, -r * 0.9); ctx.lineTo(Math.cos(cra) * r * 0.8, -r * 0.9 + Math.sin(cra) * r * 0.8); ctx.stroke(); }
+            ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(180,210,240,0.7)';
+            for (var sh = 0; sh < 4; sh++) { var sa = now * 0.001 + sh * TAU2 / 4; ctx.beginPath(); ctx.arc(Math.cos(sa) * (r + 16), -r + Math.sin(sa) * (r + 16) * 0.5, 3, 0, TAU2); ctx.fill(); }
+          }
+        }
+      }
+      if (hitT >= 0 && kind !== 'tank') {
+        ctx.globalAlpha = 0.5 * (1 - hitT); ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(0, -r, r * 1.2, 0, TAU2); ctx.fill(); ctx.globalAlpha = 1;
+        ctx.fillStyle = MAT.fill; ctx.strokeStyle = MAT.ink; ctx.lineWidth = 2;
+        var chd = hitT * 22;
+        ctx.beginPath(); ctx.arc(r * 0.5 + chd, -r * 1.3 - chd * 0.5, 5 * (1 - hitT * 0.5), 0, TAU2); ctx.fill(); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     function drawCharacter(snap, p, isMe, local) {
       var r = radiusOf(p), vx = p.x, vy = p.y;
       var charging = isMe && local && local.charging ? true : p.charging;
@@ -510,6 +860,9 @@ window.SBRender = (function () {
       var aimX = isMe && local && local.charging ? local.aimX : p.aimX;
       var aimY = isMe && local && local.charging ? local.aimY : p.aimY;
       var alive = p.hp > 0 && !p.koed;
+      // Труп истаял (см. koFade / drawGolem, 4 с) — кадр на него не тратим. У союзника в PvE
+      // (p.lives не null) действует то же правило, что у врага (p.et).
+      if (p.koed && (p.et || p.lives != null) && (snap.time - (p.koAt || snap.time)) > 4400) return;
       if (p.moving && alive) vy -= Math.abs(Math.sin(p.anim)) * 2;
       if (charging) {
         var dx = aimX - p.x, dy = aimY - p.y, d = Math.hypot(dx, dy) || 1;
@@ -518,14 +871,20 @@ window.SBRender = (function () {
       var color = p.team === 'A' ? '#4aa8ff' : (p.et && ENEMY_COLORS[p.et] ? ENEMY_COLORS[p.et] : '#ff5b5b');
       var flashing = (snap.time - p.hitAt) < 150;
 
+      var golemKind = (p.et === 'tank' || p.et === 'roller' || p.et === 'boss') ? p.et : null;
+      var useRig = Rig && !golemKind && Rig.GEAR[p.role]; // игроки + порченые core/swarm
+
       ctx.save();
-      if (p.koed) {
-        var progress = Math.min(1, (snap.time - p.koAt) / Sim.KO_ANIM_MS);
-        ctx.globalAlpha = 1 - 0.65 * progress;
+      if (p.koed && !useRig && !golemKind) {
+        var isDissolve = !!p.et || p.lives != null;
+        var progress = Math.min(1, (snap.time - p.koAt) / (isDissolve ? 4000 : Sim.KO_ANIM_MS));
+        ctx.globalAlpha = 1 - (isDissolve ? 0.6 : 0.22) * progress; // враг/союзник PvE тает, боец PvP только тускнеет
         ctx.translate(p.x, p.y); ctx.rotate(progress * Math.PI / 2.2); ctx.translate(-p.x, -p.y);
       }
       ctx.beginPath(); ctx.ellipse(p.x, p.y + r * 0.6, r * 0.9, r * 0.35, 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fill();
+      // Тень тает вместе с трупом (тело гасит koFade/drawGolem) — у врага и у союзника в PvE.
+      var shA = (p.koed && (p.et || p.lives != null)) ? 0.15 * Math.max(0, 1 - (snap.time - (p.koAt || snap.time)) / 4000) : 0.15;
+      ctx.fillStyle = 'rgba(0,0,0,' + shA + ')'; ctx.fill();
 
       var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
 
@@ -540,35 +899,55 @@ window.SBRender = (function () {
         ctx.globalAlpha = 1;
       }
 
-      ctx.save();
-      if (p.iframe) ctx.globalAlpha *= 0.6;
-      ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
-      ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
-      ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
-      // Замедление: наледь и аура Фризера — это ледяная корка со снежинками, лёд арены —
-      // прежний слабый тон. Различать важно: иначе в уроке Фризера не понять, что сработало.
+      var slowIced = false;
       if (p.slow) {
-        var cause = slowCause(snap, p);
-        var iced = cause === 'frost' || cause === 'aura';
-        ctx.fillStyle = iced ? 'rgba(150,216,255,0.55)' : 'rgba(150,216,255,0.42)';
-        ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill();
-        if (iced) {
-          ctx.strokeStyle = 'rgba(200,240,255,0.9)'; ctx.lineWidth = 1.5;
-          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.stroke();
-          ctx.fillStyle = 'rgba(235,250,255,0.95)';
-          for (var fl = 0; fl < 3; fl++) {
-            var fa2 = snap.time / 420 + fl * Math.PI * 2 / 3;
-            ctx.beginPath(); ctx.arc(vx + Math.cos(fa2) * (r + 5), vy + Math.sin(fa2) * (r + 5) * 0.6, 1.6, 0, Math.PI * 2);
-            ctx.fill();
+        var _c = slowCause(snap, p);
+        slowIced = _c === 'frost' || _c === 'aura';
+      }
+
+      if (golemKind) {
+        try { drawGolem(ctx, p, snap); }
+        catch (e) {
+          if (!drawGolem._warned) { console.error('drawGolem failed:', e); drawGolem._warned = 1; }
+          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.35)'; ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill(); }
+      } else if (useRig) {
+        try { Rig.drawFighter(ctx, p.x, p.y + r * 0.9, r, rigStateFor(snap, p, isMe, local)); }
+        catch (e) { Rig = null; drawRoleModel(ctx, p.role, vx, vy, r, faceAng); }
+        if (p.slow) {
+          ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.42)' : 'rgba(150,216,255,0.30)';
+          ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill();
+        }
+      } else {
+        ctx.save();
+        if (p.iframe) ctx.globalAlpha *= 0.6;
+        ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
+        ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
+        ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
+        // Замедление: наледь и аура Фризера — это ледяная корка со снежинками, лёд арены —
+        // прежний слабый тон. Различать важно: иначе в уроке Фризера не понять, что сработало.
+        if (p.slow) {
+          ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.55)' : 'rgba(150,216,255,0.42)';
+          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill();
+          if (slowIced) {
+            ctx.strokeStyle = 'rgba(200,240,255,0.9)'; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.stroke();
+            ctx.fillStyle = 'rgba(235,250,255,0.95)';
+            for (var fl = 0; fl < 3; fl++) {
+              var fa2 = snap.time / 420 + fl * Math.PI * 2 / 3;
+              ctx.beginPath(); ctx.arc(vx + Math.cos(fa2) * (r + 5), vy + Math.sin(fa2) * (r + 5) * 0.6, 1.6, 0, Math.PI * 2);
+              ctx.fill();
+            }
           }
         }
+        ctx.restore();
+
+        drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
       }
-      ctx.restore();
 
-      drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
-
-      // PvE-враги: босс — корона и аура ярости; танк/босс — полоска HP.
-      if (p.et === 'boss') {
+      // PvE-босс: корона рисуется в drawGolem; здесь только кольцо ярости в фазе 2.
+      if (p.et === 'boss' && !golemKind) {
         ctx.save();
         ctx.translate(vx, vy);
         ctx.fillStyle = '#ffd24a'; ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 1.5;
@@ -579,11 +958,13 @@ window.SBRender = (function () {
           ctx.lineTo(Math.cos(aa + Math.PI / 5) * (r + 1), Math.sin(aa + Math.PI / 5) * (r + 1));
         }
         ctx.closePath(); ctx.fill(); ctx.stroke();
-        if (p.bph === 2) {
-          ctx.globalAlpha = 0.35 + 0.15 * Math.sin(snap.time / 90);
-          ctx.beginPath(); ctx.arc(0, 0, r + 12, 0, Math.PI * 2);
-          ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
-        }
+        ctx.restore();
+      }
+      if (p.et === 'boss' && p.bph === 2) {
+        ctx.save();
+        ctx.globalAlpha = 0.35 + 0.15 * Math.sin(snap.time / 90);
+        ctx.beginPath(); ctx.arc(vx, vy, r + 14, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
         ctx.restore();
       }
       if (p.team === 'B' && p.mhp && p.hp < p.mhp && alive) {
@@ -641,7 +1022,10 @@ window.SBRender = (function () {
       }
 
       var lb = labelOf(p, isMe, r);
-      ctx.drawImage(lb.canvas, Math.round(vx - lb.w / 2), Math.round(vy - lb.top));
+      // Големы/Йети/босс намного выше кружка-бойца — поднимаем подпись над макушкой.
+      var lblLift = golemKind === 'boss' ? r * 4.6 : golemKind === 'tank' ? r * 2.5
+                  : golemKind === 'roller' ? r * 1.2 : 0;
+      ctx.drawImage(lb.canvas, Math.round(vx - lb.w / 2), Math.max(2, Math.round(vy - lb.top - lblLift)), lb.w, lb.h);
       ctx.restore();
 
       if (charging) {
@@ -650,6 +1034,32 @@ window.SBRender = (function () {
         ctx.fillStyle = '#0b1622'; ctx.fillRect(p.x - bw / 2, p.y - r - 20, bw, 6);
         ctx.fillStyle = p.special ? '#b478ff' : (power > 0.7 ? '#ff5b5b' : '#ffd166');
         ctx.fillRect(p.x - bw / 2, p.y - r - 20, bw * power, 6);
+      }
+    }
+    // Единый y-sorted проход: «высокие» объекты (укрытия, ёлки, разрушаемые, стены, бойцы,
+    // мобы) рисуются в порядке нижней кромки — кто ниже по экрану, тот ближе и рисуется поверх.
+    function drawTallLayer(snap, meId, local) {
+      var arena = Sim.ARENAS[snap.arena] || Sim.ARENAS[0], items = [];
+      for (var i = 0; i < arena.obstacles.length; i++) {
+        var ob = arena.obstacles[i];
+        if (ob.hp != null) continue;
+        if (ob.type === 'rect') items.push({ y: ob.y + ob.h / 2, f: drawCoverBlock, a: ob });
+        else items.push({ y: ob.y + 12, f: drawTree, a: ob });
+      }
+      if (snap.destr) for (var d = 0; d < snap.destr.length; d++) {
+        var dd = snap.destr[d];
+        if (dd.hp > 0) items.push({ y: dd.y + (dd.h ? dd.h / 2 : dd.r), f: drawDestructible, a: dd });
+      }
+      for (var w = 0; w < snap.walls.length; w++) items.push({ y: snap.walls[w].y + snap.walls[w].h / 2, f: drawWall, a: snap.walls[w] });
+      for (var p = 0; p < snap.players.length; p++) {
+        var pl = snap.players[p];
+        items.push({ y: pl.y + radiusOf(pl) * 0.9, pl: pl, isMe: pl.id === meId });
+      }
+      items.sort(function (u, v) { return u.y - v.y; });
+      for (var k = 0; k < items.length; k++) {
+        var it = items[k];
+        if (it.pl) drawCharacter(snap, it.pl, it.isMe, it.isMe ? local : null);
+        else it.f(it.a);
       }
     }
     function drawSnowball(s) {
@@ -703,20 +1113,16 @@ window.SBRender = (function () {
       var now = performance.now();
       var dt = Math.min((now - lastFrame) / 1000, 0.05);
       lastFrame = now;
+      applyRS(); // подстроить внутреннее разрешение под текущий размер канваса
       var shakeX = 0, shakeY = 0;
       if (now < shake.until) { var rem = (shake.until - now) / shake.total; shakeX = (Math.random() - 0.5) * shake.mag * rem; shakeY = (Math.random() - 0.5) * shake.mag * rem; }
+      ctx.setTransform(RS, 0, 0, RS, 0, 0);
       ctx.save(); ctx.translate(shakeX, shakeY);
       var myTeam = null;
       for (var t = 0; t < snap.players.length; t++) if (snap.players[t].id === meId) { myTeam = snap.players[t].team; break; }
       drawArena(snap, myTeam); drawSnowflakes(dt);
       if (marks.length) drawMarks(now);
-      var me = null;
-      for (var i = 0; i < snap.players.length; i++) {
-        var p = snap.players[i];
-        if (p.id === meId) { me = p; continue; }
-        drawCharacter(snap, p, false, null);
-      }
-      if (me) drawCharacter(snap, me, true, local);
+      drawTallLayer(snap, meId, local);
       var seen = {};
       for (var k = 0; k < snap.balls.length; k++) { drawSnowball(snap.balls[k]); seen[snap.balls[k].id] = true; }
       for (var id in trails) if (!seen[id]) delete trails[id];
@@ -771,6 +1177,9 @@ window.SBRender = (function () {
     if (!b || t <= 0) return a;
     if (t >= 1) return b;
     var o2 = lerpOut;
+    // Снять ключи, которых в свежем снапшоте больше нет: иначе необязательные поля (напр. pve)
+    // от прошлого матча «протекают» в следующий — PvP после PvE включал волновой HUD.
+    for (var kd in o2) if (kd !== 'players' && kd !== 'balls' && !(kd in b)) delete o2[kd];
     for (var k2 in b) if (k2 !== 'players' && k2 !== 'balls') o2[k2] = b[k2];
     o2.time = a.time + (b.time - a.time) * t;
     var players = o2.players; players.length = b.players.length;
