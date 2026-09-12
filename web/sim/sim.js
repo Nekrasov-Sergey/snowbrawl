@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.10.0';
+  var SIM_VERSION = '1.11.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -1003,6 +1003,20 @@
     }
     resolveObstacleCollisions(obs, p);
   }
+  // Модель бойца рисуется в полный рост — голова заметно выше игровой точки (x,y), ноги заметно
+  // ниже, — а не кругом ровно по radius, как было раньше. Проверка попадания расширена под силуэт:
+  // область смещена вниз (там больше рисунка) и вытянута по вертикали сильнее, чем по горизонтали,
+  // иначе выстрел в ноги проходил мимо старого маленького кружка. Множители — из размеров модели
+  // в web/client/rig.js (drawModel), не точная геометрия, а разумный охват силуэта.
+  var HIT_BOX_DOWN = 0.8;    // смещение центра проверки вниз, в долях radius
+  var HIT_BOX_HALF_W = 1.15; // половина ширины охвата, в долях radius
+  var HIT_BOX_HALF_H = 1.7;  // половина высоты охвата, в долях radius
+  function hitTest(p, x, y, extraR) {
+    var hw = p.radius * HIT_BOX_HALF_W + (extraR || 0);
+    var hh = p.radius * HIT_BOX_HALF_H + (extraR || 0);
+    var hcy = p.y + p.radius * HIT_BOX_DOWN;
+    return Math.abs(x - p.x) <= hw && Math.abs(y - hcy) <= hh;
+  }
   /** killerId — чей снаряд или взрыв; контактный урон мобов приходит без него и фрага не даёт. */
   function applyHit(state, target, freezeBonus, x, y, killerId) {
     if (target.bubble) { // Щит: пассив «Закалка» гасит одно попадание целиком
@@ -1051,7 +1065,7 @@
         for (var k = 0; k < state.players.length; k++) {
           var p = state.players[k];
           if (p.team === s.team || !alive(p) || state.time < p.iframeUntil) continue;
-          if (Math.hypot(p.x - s.x, p.y - s.y) <= p.radius + s.radius) {
+          if (hitTest(p, s.x, s.y, s.radius)) {
             applyHit(state, p, s.freeze ? 1.0 : 0, s.x, s.y, s.ownerId); dead = true; directHit = true; break;
           }
         }
