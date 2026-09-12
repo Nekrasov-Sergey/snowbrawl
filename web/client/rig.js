@@ -621,5 +621,13 @@ window.SBRig = (function () {
     ctx.restore();
   }
 
-  return { drawFighter: drawModel, GEAR: GEAR, ROLES: Object.keys(GEAR) };
+  /** Высота модели над точкой отрисовки, в пикселях арены: клиент вешает над макушкой ник и
+      полоску HP, а макушка зависит от роли (GEAR[].big) и радиуса бойца. 78 — верх головного
+      убора в локальных единицах: капюшон и помпон поднимаются выше круга головы (headCY-HR). */
+  function topOf(R, role, scaleMul) {
+    var g = GEAR[role] || GEAR["Раннер"];
+    return 78 * (R / 46 * (scaleMul || 1) * (g.big || 1));
+  }
+
+  return { drawFighter: drawModel, topOf: topOf, GEAR: GEAR, ROLES: Object.keys(GEAR) };
 })();

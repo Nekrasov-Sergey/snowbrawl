@@ -202,8 +202,9 @@ window.SBRender = (function () {
       ctx.globalAlpha = 1;
     }
 
-    // Подписи бойцов (ник сверху, роль снизу) — спрайт на бойца, fillText со сменой шрифта
-    // каждый кадр на телефонах заметно дорог (особенно эмодзи бота).
+    // Подписи бойцов (ник, под ним полоска HP с числом) — спрайт на бойца, fillText со сменой
+    // шрифта каждый кадр на телефонах заметно дорог (особенно эмодзи бота). Спрайт пересобирается
+    // при смене HP: состояний мало даже у босса.
     var labels = {};
     var names = null; // карта id → ник из состава матча (match.start / match.roster)
     var ranks = null; // карта id → роль модерации: ник рисуется её цветом
@@ -211,12 +212,14 @@ window.SBRender = (function () {
     var RANK_COLORS = { creator: '#ffc94d', admin: '#b478ff' };
     function nickOf(p) { return (names && names[p.id]) || p.nick; }
     function rankOf(p) { return (ranks && ranks[p.id]) || ''; }
-    // pips — рисовать ли HP под подписью. На телефоне HUD-строки скрыты (они налезали на
-    // арену), и HP видно только здесь. Хранится в спрайте: hp меняется редко, три состояния.
-    var opts = { pips: false };
-    function setOptions(o) {
-      if (!o) return;
-      if (o.pips !== undefined && o.pips !== opts.pips) { opts.pips = !!o.pips; labels = {}; }
+    // Масштаб риг-модели: тем же множителем считается её высота (Rig.topOf), чтобы подпись
+    // вставала точно над макушкой.
+    var RIG_SCALE = 1.32;
+    // Цвет подписи и полоски HP — по принадлежности, а не по команде: свой зелёный, союзник
+    // голубой, противник красный. Так здоровье читается одинаково за обе стороны и в PvE.
+    function sideColor(p, isMe, myTeam) {
+      if (isMe) return '#3ddc84';
+      return p.team === myTeam ? '#62b8ff' : '#ff5b5b';
     }
 
     // Спрайтовая модель бойца (web/client/rig.js). Пер-игроковое состояние: гистерезис
@@ -276,45 +279,49 @@ window.SBRender = (function () {
       };
     }
 
-    function labelOf(p, isMe, r) {
+    function labelOf(p, isMe, myTeam) {
       var base = nickOf(p), rank = rankOf(p);
-      // У врагов PvE своя полоса HP (mhp), пипсы там врали бы: у босса их десятки.
-      var pips = opts.pips && p.mhp == null && !p.koed ? p.hp : -1;
-      // Подпись роли убрана — роль теперь читается по скину модели.
-      var key = base + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + r + '|' + rank +
-        '|' + pips + '|' + p.team;
+      var maxHp = p.mhp || 3, hp = Math.max(0, Math.min(maxHp, p.hp));
+      var bar = !p.koed;                       // у выбитых полоски нет
+      var col = sideColor(p, isMe, myTeam);
+      var key = base + '|' + (p.bot ? 1 : 0) + '|' + (isMe ? 1 : 0) + '|' + rank + '|' + col +
+        '|' + (bar ? hp + '/' + maxHp : 'ko');
       var l = labels[p.id];
       if (l && l.key === key) return l;
       var nick = base + (p.bot ? ' 🤖' : '');
       var oc = document.createElement('canvas'), c = oc.getContext('2d');
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
       var w = Math.ceil(Math.max(c.measureText(nick).width, 20)) + 8;
-      var top = r + 16, h = top + (pips >= 0 ? 14 : 2); // ник на базовой линии top-6, пипсы сразу под ним
-      if (pips >= 0) w = Math.max(w, 40);
+      var NICK_H = 12, BAR_H = 9, GAP = 2;     // ник сверху, под ним полоска
+      if (bar) w = Math.max(w, 38);
+      var h = NICK_H + (bar ? GAP + BAR_H : 0);
       // Спрайт подписи растеризуем во внутреннем разрешении канваса (RS), рисуется он с явным
       // логическим размером (w×h) — иначе на крупной арене текст мылится вместе с апскейлом.
       oc.width = Math.max(1, Math.round(w * RS)); oc.height = Math.max(1, Math.round(h * RS));
       c = oc.getContext('2d'); c.setTransform(RS, 0, 0, RS, 0, 0); c.textAlign = 'center';
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
-      var rc = RANK_COLORS[rank];
-      if (rc) { // цветной ник по роли, с тёмной обводкой — иначе тонет в снегу
-        c.lineWidth = 2.5; c.strokeStyle = '#0b1622'; c.strokeText(nick, w / 2, top - 6);
-        c.fillStyle = rc;
-      } else {
-        c.fillStyle = '#0b1622';
+      // Роль модерации перебивает цвет принадлежности: создателя и админа видно по нику, а
+      // сторону всё равно показывает полоска под ним.
+      c.lineWidth = 2.5; c.strokeStyle = '#0b1622'; c.strokeText(nick, w / 2, NICK_H - 2);
+      c.fillStyle = RANK_COLORS[rank] || col;
+      c.fillText(nick, w / 2, NICK_H - 2);
+      if (bar) {
+        // Полоска цельная: длина заливки — доля здоровья, цвет постоянный (по принадлежности),
+        // по центру число оставшихся HP. Одинаково у бойцов (3 HP) и у мобов PvE (до 12).
+        var bw = w - 8, bx = 4, by = NICK_H + GAP;
+        c.fillStyle = 'rgba(11,22,34,0.62)';
+        c.fillRect(bx, by, bw, BAR_H);
+        c.fillStyle = col;
+        c.fillRect(bx + 1, by + 1, Math.max(0, (bw - 2) * (hp / maxHp)), BAR_H - 2);
+        c.strokeStyle = 'rgba(11,22,34,0.85)'; c.lineWidth = 1;
+        c.strokeRect(bx + 0.5, by + 0.5, bw - 1, BAR_H - 1);
+        c.font = 'bold 8px Segoe UI, Arial';
+        c.lineWidth = 2.5; c.strokeStyle = 'rgba(11,22,34,0.9)';
+        c.strokeText(String(hp), w / 2, by + BAR_H - 2);
+        c.fillStyle = '#ffffff';
+        c.fillText(String(hp), w / 2, by + BAR_H - 2);
       }
-      c.fillText(nick, w / 2, top - 6);
-      if (pips >= 0) {
-        // Три квадратика под ником: на снегу пустые нужны с обводкой, иначе их не видно.
-        var pw = 7, gap = 3, all = 3 * pw + 2 * gap, px = (w - all) / 2, py = top - 1;
-        for (var i = 0; i < 3; i++, px += pw + gap) {
-          c.fillStyle = i < pips ? (p.team === 'A' ? '#4aa8ff' : '#ff5b5b') : 'rgba(11,22,34,0.25)';
-          c.fillRect(px, py, pw, pw);
-          c.strokeStyle = 'rgba(11,22,34,0.55)'; c.lineWidth = 1;
-          c.strokeRect(px + 0.5, py + 0.5, pw - 1, pw - 1);
-        }
-      }
-      l = labels[p.id] = { key: key, canvas: oc, w: w, h: h, top: top };
+      l = labels[p.id] = { key: key, canvas: oc, w: w, h: h };
       return l;
     }
 
@@ -853,7 +860,7 @@ window.SBRender = (function () {
       ctx.restore();
     }
 
-    function drawCharacter(snap, p, isMe, local) {
+    function drawCharacter(snap, p, isMe, local, myTeam) {
       var r = radiusOf(p), vx = p.x, vy = p.y;
       var charging = isMe && local && local.charging ? true : p.charging;
       var power = isMe && local && local.charging ? local.power : p.power;
@@ -967,13 +974,6 @@ window.SBRender = (function () {
         ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
         ctx.restore();
       }
-      if (p.team === 'B' && p.mhp && p.hp < p.mhp && alive) {
-        var bw2 = Math.max(24, r * 1.6), bh2 = 4, by2 = vy - r - 10;
-        ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(vx - bw2 / 2, by2, bw2, bh2);
-        ctx.fillStyle = p.et === 'boss' ? '#ff5b5b' : '#ffd166';
-        ctx.fillRect(vx - bw2 / 2, by2, bw2 * Math.max(0, p.hp / p.mhp), bh2);
-      }
-
       // Заряженная способность: цветной ореол вокруг бойца.
       if (p.armed) {
         var ac = p.armed === 'explosive' ? '#ffb347' : (p.armed === 'frost' ? '#9fe8ff' : '#c9a6ff');
@@ -1021,11 +1021,14 @@ window.SBRender = (function () {
         ctx.lineCap = 'butt';
       }
 
-      var lb = labelOf(p, isMe, r);
-      // Големы/Йети/босс намного выше кружка-бойца — поднимаем подпись над макушкой.
-      var lblLift = golemKind === 'boss' ? r * 4.6 : golemKind === 'tank' ? r * 2.5
-                  : golemKind === 'roller' ? r * 1.2 : 0;
-      ctx.drawImage(lb.canvas, Math.round(vx - lb.w / 2), Math.max(2, Math.round(vy - lb.top - lblLift)), lb.w, lb.h);
+      var lb = labelOf(p, isMe, myTeam);
+      // Подпись встаёт НАД макушкой, а не над центром бойца: модели разной высоты (риг втрое
+      // выше прежнего кружка, Йети и босс ещё выше), и от центра ник с полоской ложились на лицо.
+      var above = golemKind === 'boss' ? r * 4.6 : golemKind === 'tank' ? r * 2.5
+                : golemKind === 'roller' ? r * 1.2
+                : (useRig && Rig.topOf ? Rig.topOf(r, p.role, RIG_SCALE) - r * 0.9 : r + 4);
+      ctx.drawImage(lb.canvas, Math.round(p.x - lb.w / 2),
+        Math.max(2, Math.round(p.y - above - 4 - lb.h)), lb.w, lb.h);
       ctx.restore();
 
       if (charging) {
@@ -1038,7 +1041,7 @@ window.SBRender = (function () {
     }
     // Единый y-sorted проход: «высокие» объекты (укрытия, ёлки, разрушаемые, стены, бойцы,
     // мобы) рисуются в порядке нижней кромки — кто ниже по экрану, тот ближе и рисуется поверх.
-    function drawTallLayer(snap, meId, local) {
+    function drawTallLayer(snap, meId, local, myTeam) {
       var arena = Sim.ARENAS[snap.arena] || Sim.ARENAS[0], items = [];
       for (var i = 0; i < arena.obstacles.length; i++) {
         var ob = arena.obstacles[i];
@@ -1058,7 +1061,7 @@ window.SBRender = (function () {
       items.sort(function (u, v) { return u.y - v.y; });
       for (var k = 0; k < items.length; k++) {
         var it = items[k];
-        if (it.pl) drawCharacter(snap, it.pl, it.isMe, it.isMe ? local : null);
+        if (it.pl) drawCharacter(snap, it.pl, it.isMe, it.isMe ? local : null, myTeam);
         else it.f(it.a);
       }
     }
@@ -1122,7 +1125,7 @@ window.SBRender = (function () {
       for (var t = 0; t < snap.players.length; t++) if (snap.players[t].id === meId) { myTeam = snap.players[t].team; break; }
       drawArena(snap, myTeam); drawSnowflakes(dt);
       if (marks.length) drawMarks(now);
-      drawTallLayer(snap, meId, local);
+      drawTallLayer(snap, meId, local, myTeam);
       var seen = {};
       for (var k = 0; k < snap.balls.length; k++) { drawSnowball(snap.balls[k]); seen[snap.balls[k].id] = true; }
       for (var id in trails) if (!seen[id]) delete trails[id];
@@ -1157,7 +1160,7 @@ window.SBRender = (function () {
     function reset() { particles = []; explosions = []; trails = {}; labels = {}; shake.until = 0; marks = []; }
 
     return { frame: frame, handleEvents: handleEvents, reset: reset, setMarks: setMarks,
-      setOptions: setOptions, obstaclesOf: obstaclesOf };
+      obstaclesOf: obstaclesOf };
   }
 
   /**
@@ -1186,6 +1189,10 @@ window.SBRender = (function () {
     for (var i = 0; i < b.players.length; i++) {
       var pb = b.players[i], pa = findById(a.players, pb.id, i);
       var o = players[i] || (players[i] = {});
+      // Ключи, исчезнувшие из свежего снапшота, снимаем и у бойца: объекты переиспользуются по
+      // индексу, и боец, попавший на место моба из прошлого матча, наследовал его mhp и et —
+      // рисовался големом и с чужой полоской HP.
+      for (var kp in o) if (!(kp in pb)) delete o[kp];
       for (var k in pb) o[k] = pb[k];
       if (pa) {
         o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;

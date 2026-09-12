@@ -254,6 +254,23 @@ canvas {
 #overlay h2 { font-size: 34px; margin: 0 0 6px 0; }
 #overlaySub { color: #a9c2e0; font-size: 14px; margin-bottom: 8px; }
 #overlay .ovRow { display: flex; gap: 10px; }
+/* Итог матча: плашка висит 3 секунды, поэтому счёт должен читаться одним взглядом — крупные
+   цифры, команды рядом, ничего лишнего. */
+#overlayScore { display: flex; gap: 28px; justify-content: center; margin-bottom: 6px; }
+#overlayScore .scoreCol { min-width: 148px; }
+#overlayScore h4 {
+  margin: 0 0 4px 0; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #a9c2e0; font-weight: 700; text-align: left;
+}
+#overlayScore .scoreRow {
+  display: flex; justify-content: space-between; gap: 16px; font-size: 14px; padding: 1px 0;
+  color: #eaf2ff;
+}
+#overlayScore .scoreRow.me { font-weight: 700; }
+#overlayScore .scoreRow .kv { font-variant-numeric: tabular-nums; }
+html.touch #overlayScore { gap: 16px; }
+html.touch #overlayScore .scoreCol { min-width: 116px; }
+html.touch #overlayScore .scoreRow { font-size: 12px; }
 #overlay button {
   padding: 10px 22px; font-size: 15px; border: none; border-radius: 8px;
   background: #4aa8ff; color: #06121f; font-weight: 700; cursor: pointer;

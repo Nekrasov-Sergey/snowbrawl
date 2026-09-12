@@ -22,7 +22,7 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.9.0',                 // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.10.0',                 // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, HIT_Z, CHARGE_FULL_MS, KO_ANIM_MS,      // HIT_Z — с 1.6.0
   FREEZER_AURA_R, FREEZER_AURA_SLOW, FREEZER_AURA_RELOAD,      // с 1.8.0
   FROST_R, FROST_SLOW,                                         // с 1.8.0
@@ -267,10 +267,11 @@ config = {
 ```
 { v, tick, time, timeLeft, mode, arena, ice, over, winner,
   gameMode, reason,                                           // с 1.3.0
-  players: [{ id, team, role, nick, bot, x, y, hp, stun, koed, koAt, hitAt,
+  players: [{ id, team, role, nick, bot, x, y, hp, stun, koed, koAt, hitAt, k,
               moving, anim, charging, power, aimX, aimY, special, cd,
               armed, iframe, dash, bubble, slow, rl,           // armed…rl — с 1.2.0
               bb,                                              // с 1.8.0, заряд пузыря Щита
+                                                               // k — с 1.10.0, счёт выбитых
               lives?, et?, mhp?, bk?, bph? }],                 // PvE, с 1.3.0
   balls:   [{ id, x, y, z, r, team, ex, fr, sn }],
   walls:   [{ x, y, w, h, team, hp, maxHp, ttl, life }],
@@ -289,6 +290,13 @@ config = {
 реального урона, поэтому `bb` считается по **позднему** из двух сроков — иначе дуга у бойца под
 обстрелом врала бы. Поле присутствует у каждого бойца, а не только у Щита: клиент переиспользует
 объекты бойцов при интерполяции, и пропущенный ключ сохранял бы прошлое значение.
+
+`k` (с 1.10.0) — сколько соперников выбил этот боец за матч; растёт в `applyHit` у владельца
+снаряда или взрыва (`snowballs[].ownerId`) и только при попадании по чужой команде. Контактный
+урон мобов PvE и самоподрыв «катка» фрага никому не дают — бить некому. Счётчик переживает
+возрождение в PvE и, раз он в снапшоте, одинаково верен после реконнекта и у зрителя. Событие
+`ko` с 1.10.0 несёт `killerId` (может быть `null`) — им пользуется тот, кому нужен сам факт, а не
+итог. Клиент показывает эти числа только на плашке итогов.
 
 Клиент интерполирует `players[].x/y/anim/power` и `balls[].x/y/z` по `id` между снапшотами —
 поэтому у снежков **обязательно** стабильный `id`. Округление до десятых сделано ради

@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.9.0';
+  var SIM_VERSION = '1.10.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -263,6 +263,7 @@
       botLevel: botLevel == null ? 1 : (botLevel | 0),
       x: x, y: y, radius: es ? es.radius : stats.radius, speed: es ? es.speed : stats.speed,
       hp: hp0, maxHp: hp0, stunTimer: 0, koed: false, koAt: 0, hitAt: -1e9,
+      kills: 0, // счёт выбитых соперников; растёт только от снаряда и взрыва, см. applyHit
       moveTarget: { x: x, y: y }, isMoving: false, animPhase: 0,
       vx: 0, vy: 0, // текущее направление хода — используется только на льду (см. moveCharacter)
       charging: false, chargeStart: 0, aimX: x, aimY: y,
@@ -1002,7 +1003,8 @@
     }
     resolveObstacleCollisions(obs, p);
   }
-  function applyHit(state, target, freezeBonus, x, y) {
+  /** killerId — чей снаряд или взрыв; контактный урон мобов приходит без него и фрага не даёт. */
+  function applyHit(state, target, freezeBonus, x, y, killerId) {
     if (target.bubble) { // Щит: пассив «Закалка» гасит одно попадание целиком
       target.bubble = false; target.bubbleReadyAt = state.time + BUBBLE_REGEN_MS;
       target.stunTimer = Math.max(target.stunTimer, 0.2); target.hitAt = state.time; target.charging = false;
@@ -1026,7 +1028,9 @@
     target.charging = false; target.dashUntil = 0; // после попадания боец теряет атаку и рывок
     if (target.hp <= 0) {
       target.hp = 0; target.koed = true; target.stunTimer = 0; target.koAt = state.time;
-      emit(state, { type: 'ko', targetId: target.id, x: x, y: y });
+      var killer = killerId ? findPlayer(state, killerId) : null;
+      if (killer && killer.team !== target.team) killer.kills += 1;
+      emit(state, { type: 'ko', targetId: target.id, x: x, y: y, killerId: killer ? killer.id : null });
     } else {
       var base = (target.hp === 2 ? 0.5 : 1.0) + (freezeBonus || 0);
       if (target.role === 'Танк') base *= TANK_STUN_FACTOR; // пассив «Броня»
@@ -1048,7 +1052,7 @@
           var p = state.players[k];
           if (p.team === s.team || !alive(p) || state.time < p.iframeUntil) continue;
           if (Math.hypot(p.x - s.x, p.y - s.y) <= p.radius + s.radius) {
-            applyHit(state, p, s.freeze ? 1.0 : 0, s.x, s.y); dead = true; directHit = true; break;
+            applyHit(state, p, s.freeze ? 1.0 : 0, s.x, s.y, s.ownerId); dead = true; directHit = true; break;
           }
         }
         // защита объекта: вражеский снежок бьёт снеговика
@@ -1065,7 +1069,7 @@
           for (var m = 0; m < state.players.length; m++) {
             var q = state.players[m];
             if (q.team === s.team || !alive(q) || state.time < q.iframeUntil) continue;
-            if (Math.hypot(q.x - s.x, q.y - s.y) <= EXPLOSION_RADIUS) applyHit(state, q, 0, s.x, s.y);
+            if (Math.hypot(q.x - s.x, q.y - s.y) <= EXPLOSION_RADIUS) applyHit(state, q, 0, s.x, s.y, s.ownerId);
           }
           // пассив «Сапёр»: взрыв ломает разрушаемые укрытия и мгновенно сносит чужую стену
           for (var d = 0; d < obs.length; d++) {
@@ -1591,6 +1595,7 @@
         id: p.id, team: p.team, role: p.role, nick: p.nick, bot: p.bot,
         x: round1(p.x), y: round1(p.y), hp: p.hp,
         stun: round1(p.stunTimer), koed: p.koed, koAt: p.koAt, hitAt: p.hitAt,
+        k: p.kills,
         moving: p.isMoving, anim: round1(p.animPhase),
         charging: p.charging, power: round1(chargePower(state, p) * 100) / 100,
         aimX: round1(p.aimX), aimY: round1(p.aimY),

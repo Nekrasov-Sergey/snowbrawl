@@ -461,7 +461,9 @@ func TestMatchEndsWithKO(t *testing.T) {
 		RL   float64 `json:"rl"`
 		Stun float64 `json:"stun"`
 		Koed bool    `json:"koed"`
+		K    int     `json:"k"`
 	}
+	var lastPlayers []snapPlayer // снапшот перед match.end — по нему клиент строит плашку итогов
 	var end protocol.MatchEnd
 	deadline := time.After(60 * time.Second)
 	var throwAt time.Time // когда отпускать замах; ноль — замаха нет
@@ -494,6 +496,7 @@ func TestMatchEndsWithKO(t *testing.T) {
 				if json.Unmarshal(env.Data, &snap) != nil {
 					continue
 				}
+				lastPlayers = snap.S.Players
 				var me, enemy *snapPlayer
 				for i := range snap.S.Players {
 					q := &snap.S.Players[i]
@@ -535,6 +538,22 @@ func TestMatchEndsWithKO(t *testing.T) {
 	// матч закончился по KO и сообщение доехало.
 	if end.Reason != "ko" || end.Winner == "" || end.YourTeam != "A" {
 		t.Fatalf("unexpected match end: %+v", end)
+	}
+	// Снапшот перед match.end обязан содержать УЖЕ и финальный KO, и фраг за него: клиент
+	// показывает счёт по последнему пришедшему снапшоту, и если сервер отправит его до
+	// добивающего попадания, на плашке пропадёт последний фраг.
+	kills, koed := 0, 0
+	for _, q := range lastPlayers {
+		kills += q.K
+		if q.Koed {
+			koed++
+		}
+	}
+	if koed == 0 {
+		t.Fatal("в последнем снапшоте никто не выбит, хотя матч кончился по KO")
+	}
+	if kills != koed {
+		t.Fatalf("в последнем снапшоте фрагов %d, выбито %d — счёт отстаёт от конца матча", kills, koed)
 	}
 	// После матча из комнаты приходит room.state с результатом.
 	st := p.waitRoom("матч закончен", func(st protocol.RoomState) bool { return !st.InMatch })

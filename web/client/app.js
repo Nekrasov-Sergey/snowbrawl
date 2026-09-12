@@ -950,6 +950,7 @@
   // Матч: общая часть (ввод, HUD, рендер)
   // ------------------------------------------------------------
   var canvas = $('c'), overlay = $('overlay'), overlayText = $('overlayText'), overlaySub = $('overlaySub');
+  var overlayScore = $('overlayScore');
   var countdownEl = $('countdown');
   var abilityBtn = $('abilityBtn'), abilityCd = $('abilityCd');
   var touchAbility = $('touchAbility'), touchAbilityCd = $('touchAbilityCd'), touchLayer = $('touchLayer');
@@ -1228,6 +1229,11 @@
     var g = app.game; if (!g || app.screen !== 'game') return null;
     var fr = g.frame();
     if (!fr || !fr.snap) return null;
+    // Матч кончился — симуляция замерла, и добивающий KO застыл бы на полпути: его анимация
+    // считается от snap.time. Ведём время дальше сами, не опуская его ниже пришедшего.
+    if (g.over && g.overAt != null) {
+      fr.snap.time = Math.max(fr.snap.time, g.overTime + (performance.now() - g.overAt));
+    }
     if (fr.events && fr.events.length) { render.handleEvents(fr.events, Audio_); myHitEvents(fr.events); }
     intent.tick(); // сила замаха, сброс при оглушении, переотправка цели движения по стику
     render.frame(fr.snap, g.meId, local, g.names, g.ranks);
@@ -1269,8 +1275,6 @@
     $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
     Device.apply();
     touchLayer.hidden = !isTouch;
-    // HP на канвасе под ником — и на ПК тоже: так здоровье бойцов видно прямо на арене.
-    render.setOptions({ pips: true });
     touch.reset(); intent.reset();
     $('fsBtn').hidden = !(isTouch && Device.fullscreenAvailable());
     clearTimeout(zonesHintTimer);
@@ -1294,9 +1298,58 @@
     return false;
   }
   var PVE_REASONS = { cleared: 1, wiped: 1, objective: 1, expired: 1 };
+  var RESULT_MS = 3000; // сколько висит плашка итогов, прежде чем игрок сам окажется в лобби
+
+  // «Кто сколько выбил»: столбец на команду, мобы PvE в счёт не идут — считаются только бойцы.
+  function resultScoreHtml(snap, pve) {
+    var g = app.game;
+    function column(team, title, color) {
+      var list = [];
+      for (var i = 0; i < snap.players.length; i++) {
+        var p = snap.players[i];
+        if (p.team === team && !p.et) list.push(p);
+      }
+      if (!list.length) return '';
+      list.sort(function (a, b) { return (b.k || 0) - (a.k || 0); });
+      var rows = '';
+      for (var j = 0; j < list.length; j++) {
+        var q = list[j];
+        rows += '<div class="scoreRow' + (g && q.id === g.meId ? ' me' : '') + '">' +
+          '<span>' + escapeHtml(nickOf(q)) + (q.bot ? ' 🤖' : '') + '</span>' +
+          '<span class="kv">' + (q.k || 0) + '</span></div>';
+      }
+      return '<div class="scoreCol"><h4 style="color:' + color + '">' + title + '</h4>' + rows + '</div>';
+    }
+    if (pve) return column('A', 'Отряд', '#4aa8ff');
+    return column('A', 'Команда A', '#4aa8ff') + column('B', 'Команда B', '#ff5b5b');
+  }
+  function showResultScore(snap, pve) {
+    var html = snap && snap.players ? resultScoreHtml(snap, pve) : '';
+    overlayScore.innerHTML = html;
+    overlayScore.hidden = !html;
+  }
+  // Матч комнаты сам возвращает в лобби: состав там уже сохранён сервером, и кнопок на плашке
+  // нет — только «В лобби», чтобы не ждать три секунды.
+  function autoLeaveAfterResult(g) {
+    clearTimeout(g.endTimer);
+    g.endTimer = setTimeout(function () {
+      g.endTimer = null;
+      if (app.game !== g || app.screen !== 'game') return;
+      stopGame();
+      goto('lobby');
+      if (app.room) renderLobby();
+    }, RESULT_MS);
+  }
   function showResult(winner, myTeam, reason, snap) {
     var g = app.game; if (!g) return;
+    var last = snap || g.lastSnap;
     g.over = true;
+    g.overAt = performance.now();
+    // Время ведём от ПОКАЗАННОГО кадра, а не от итогового снапшота: они разъезжаются на задержку
+    // интерполяции, и с итогового картинка прыгнула бы вперёд, снова оборвав добивающий KO.
+    // Сравнение с null, а не «||»: время первого тика равно нулю и это не «нет значения».
+    var shownTime = g.lastSnap && typeof g.lastSnap.time === 'number' ? g.lastSnap.time : null;
+    g.overTime = shownTime !== null ? shownTime : ((last && last.time) || 0);
     intent.reset(); touch.reset();
     $('toMenuBtn').textContent = 'Главное меню'; // в обучении подпись другая, см. showTutorialResult
     // Кнопки обучения не должны протекать в обычный матч: табло у них одно.
@@ -1311,6 +1364,12 @@
     else if (winner === myTeam) { overlayText.textContent = 'ПОБЕДА 🎉'; overlayText.style.color = '#7CFFB2'; overlaySub.textContent = 'Команда ' + winner + ' вывела из строя всех соперников.'; Audio_.victoryFanfare(); }
     else { overlayText.textContent = 'ПОРАЖЕНИЕ'; overlayText.style.color = '#ff8080'; overlaySub.textContent = 'Команда ' + winner + ' оказалась сильнее.'; Audio_.defeatChord(); }
     $('againBtn').textContent = g.offline ? 'Играть снова' : (g.roomCode ? 'В лобби' : 'Играть снова');
+    // Матч в комнате: короткая плашка с фрагами и автовыход. Тренировка и обучение живут по
+    // прежним правилам — возвращаться там некуда, и повтор в один клик там по делу.
+    var auto = !g.offline && !g.tutorial && !!g.roomCode;
+    showResultScore(auto ? last : null, !!PVE_REASONS[reason]);
+    $('toMenuBtn').hidden = auto;
+    if (auto) autoLeaveAfterResult(g);
   }
   function showPveResult(reason, snap) {
     var pve = snap && snap.pve;
@@ -1338,6 +1397,8 @@
     intent.reset(); touch.reset();
     render.setMarks([]);
     overlay.style.display = 'flex';
+    showResultScore(null, false);
+    $('toMenuBtn').hidden = false;
     var next = firstUndoneTutorial();
     if (scn && scn.id !== 'basics') {
       overlayText.textContent = (scn.role || '').toUpperCase() + ': ОБУЧЕНИЕ ПРОЙДЕНО';
@@ -1360,6 +1421,7 @@
 
   function stopGame() {
     var g = app.game; if (!g) return;
+    if (g.endTimer) { clearTimeout(g.endTimer); g.endTimer = null; }
     app.game = null;
     if (g.offline) sendTraining(false);
     intent.reset(); touch.reset(); keys = {}; releaseMouse();
@@ -1682,13 +1744,15 @@
         if (s.e && s.e.length) pending = pending.concat(s.e);
       },
       onEnd: function (e) {
-        if (g.lastSnap == null && buffer.latest()) g.lastSnap = buffer.latest();
-        showResult(e.winner, e.yourTeam || myTeam, e.reason, g.lastSnap);
+        // Итоги считаем по последнему ПРИШЕДШЕМУ снапшоту, а не по отрисованному: рендер идёт
+        // с задержкой интерполяции (два тика), и добивающего KO в нём ещё нет — в таблице
+        // пропадал последний фраг. Сервер шлёт снапшот раньше match.end, так что он уже здесь.
+        showResult(e.winner, e.yourTeam || myTeam, e.reason, buffer.latest() || g.lastSnap);
       },
       frame: function () {
         var snap = buffer.current();
         if (!snap) return null;
-        g.lastSnap = snap;
+        g.lastSnap = snap; // отрисованный кадр: по нему целятся и ведут время, но не итоги матча
         var ev = pending; pending = [];
         return { snap: snap, events: ev };
       },
