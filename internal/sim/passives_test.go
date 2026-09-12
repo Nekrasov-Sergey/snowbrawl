@@ -78,14 +78,20 @@ func shooterAt(t *testing.T, p *sim.Program, role string, seed uint32) *sim.Matc
 }
 
 // fireAt бросает в точку, дождавшись конца перезарядки: иначе chargeStart отклоняется и
-// «промах» теста означает лишь то, что боец ещё перезаряжался.
+// «промах» теста означает лишь то, что боец ещё перезаряжался. Ждём по самому замаху, а не по
+// полю rl: оно округлено до сотых и показывает ноль, когда до конца осталось несколько мс.
 func fireAt(t *testing.T, m *sim.Match, x, y, power float64) {
 	t.Helper()
-	for i := 0; i < 60 && fighterByID(t, m, "me").RL > 0; i++ {
+	body, _ := json.Marshal(map[string]any{"kind": "chargeStart", "x": x, "y": y})
+	charged := false
+	for i := 0; i < 60 && !charged; i++ {
+		if ok, _ := m.ApplyInput("me", body); ok {
+			charged = true
+			break
+		}
 		steps(t, m, 1)
 	}
-	body, _ := json.Marshal(map[string]any{"kind": "chargeStart", "x": x, "y": y})
-	if ok, _ := m.ApplyInput("me", body); !ok {
+	if !charged {
 		t.Fatal("замах отклонён — перезарядка не кончилась")
 	}
 	steps(t, m, 9)

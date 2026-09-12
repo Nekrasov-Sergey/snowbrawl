@@ -77,9 +77,11 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 		if !from.Before(to) {
 			from = to.Add(-time.Hour)
 		}
+		// Потолок поднят под кэш админки: она один раз тянет неделю поминутно (10080 точек,
+		// около 150 КБ) и дальше рисует панораму и зум из памяти, не трогая сеть.
 		maxPoints := 720
 		if v, err := strconv.Atoi(c.Query("max")); err == nil && v > 0 {
-			maxPoints = min(v, 4000)
+			maxPoints = min(v, 12000)
 		}
 		step, points := series.Points(from, to, maxPoints)
 		// Пары вместо объектов: у ряда две величины, а размер ответа это уменьшает втрое.

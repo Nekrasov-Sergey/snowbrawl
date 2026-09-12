@@ -57,6 +57,7 @@ input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a8
   <div class="chartBar">
     <button data-range="3600">1 ч</button><button data-range="21600">6 ч</button>
     <button data-range="86400">24 ч</button><button data-range="604800">7 д</button>
+    <button data-range="2592000">30 д</button>
     <button id="chartNow">Сейчас</button>
     <span id="chartHint">тянуть — сдвиг, колесо или щипок — масштаб</span>
   </div>
@@ -278,45 +279,114 @@ document.getElementById('chatClear').onclick = async () => {
 };
 
 // ---- график онлайна ----
-// Живёт отдельно от SSE: ряд не входит в сводку (10080 точек в каждом кадре — впустую, и он
-// менялся бы каждую минуту, убивая диффинг потока). Поэтому своя ручка и свой опрос.
+// Живёт отдельно от SSE: ряд не входит в сводку (десятки тысяч точек в каждом кадре — впустую,
+// и он менялся бы каждую минуту, убивая диффинг потока). Поэтому своя ручка и свой опрос.
+//
+// Плавность держится на кэше: неделю поминутно тянем ОДИН раз и дальше рисуем панораму и зум
+// из памяти на каждое движение мыши. Раньше кадр появлялся только после ответа сервера, и
+// перетаскивание шло рывками со скоростью запросов.
 const chart = {
   canvas: document.getElementById('onlineChart'),
-  from: 0, to: 0,          // окно в секундах unix
-  step: 60, points: [],    // фактический шаг ряда и точки [сек, онлайн]
-  loading: false, timer: null, hover: null, drag: null, pinch: null
+  from: 0, to: 0,                                  // окно в секундах unix
+  fine: { from: 0, to: 0, step: 60, points: [] },  // неделя поминутно
+  deep: { from: 0, to: 0, step: 0, points: [] },   // глубже недели — крупным шагом
+  hover: null, drag: null, pinch: null, broken: false,
+  loading: false, err: false, deepTimer: null, deepAbort: null,
+  yTop: 4, holdY: false, holdTimer: null
 };
-const MIN_SPAN = 600, MAX_SPAN = 8 * 24 * 3600;
+const MIN_SPAN = 600, MAX_SPAN = 31 * 24 * 3600;
+const FINE_SPAN = 7 * 24 * 3600, FINE_MAX = 12000;
 
 function chartSetRange(span) {
   const now = Math.floor(Date.now() / 1000);
   chart.to = now; chart.from = now - span;
-  chartLoad();
+  chartDraw();
+  chartNeedDeep();
 }
 function chartAtNow() { return Math.abs(chart.to - Math.floor(Date.now() / 1000)) < 90; }
 
-function chartLoad() {
-  clearTimeout(chart.timer);
-  chart.timer = setTimeout(async () => {
-    if (chart.loading) { chartLoad(); return; }
+async function chartFetch(from, to, max, signal) {
+  const q = '/admin/online-series?from=' + Math.round(from) + '&to=' + Math.round(to) +
+    '&max=' + max + '&token=' + encodeURIComponent(token);
+  const res = await fetch(q, { headers: { 'X-Admin-Token': token }, signal });
+  if (!res.ok) throw new Error('http ' + res.status);
+  const data = await res.json();
+  return { step: data.step || 60, points: data.points || [], broken: !!data.broken };
+}
+
+// Неделя поминутно: первый раз целиком, дальше только хвост с момента последней точки.
+async function chartTopUp() {
+  const now = Math.floor(Date.now() / 1000);
+  const full = !chart.fine.points.length;
+  const from = full ? now - FINE_SPAN : chart.fine.points[chart.fine.points.length - 1][0] - 120;
+  try {
+    const got = await chartFetch(from, now, full ? FINE_MAX : 4000);
+    chart.broken = got.broken;
+    chart.err = false;
+    if (full || got.step !== 60) {
+      chart.fine.points = got.points;
+      chart.fine.step = got.step;
+    } else {
+      const last = chart.fine.points.length ? chart.fine.points[chart.fine.points.length - 1][0] : 0;
+      for (const pt of got.points) if (pt[0] > last) chart.fine.points.push(pt);
+    }
+    // Держим в памяти ровно неделю: точки левее приедут при необходимости крупным шагом.
+    const cut = now - FINE_SPAN;
+    while (chart.fine.points.length && chart.fine.points[0][0] < cut) chart.fine.points.shift();
+    chart.fine.from = chart.fine.points.length ? chart.fine.points[0][0] : cut;
+    chart.fine.to = now;
+  } catch (err) {
+    chart.err = true;
+  }
+  chartDraw();
+}
+
+// Окно ушло левее недели — тянем его крупным шагом. Отдельный запрос с отменой предыдущего:
+// во время перетаскивания окно меняется чаще, чем успевает отвечать сервер.
+function chartNeedDeep() {
+  if (chart.from >= chart.fine.from) return;
+  clearTimeout(chart.deepTimer);
+  chart.deepTimer = setTimeout(async () => {
+    const from = chart.from - (chart.to - chart.from) * 0.5;
+    const to = chart.to + (chart.to - chart.from) * 0.5;
+    if (chart.deepAbort) chart.deepAbort.abort();
+    const ac = new AbortController();
+    chart.deepAbort = ac;
     chart.loading = true;
+    chartDraw();
     try {
       const width = Math.max(120, Math.round(chart.canvas.clientWidth));
-      const q = '/admin/online-series?from=' + Math.round(chart.from) + '&to=' + Math.round(chart.to) +
-        '&max=' + width + '&token=' + encodeURIComponent(token);
-      const res = await fetch(q, { headers: { 'X-Admin-Token': token } });
-      if (!res.ok) throw new Error('http ' + res.status);
-      const data = await res.json();
-      chart.step = data.step || 60;
-      chart.points = data.points || [];
-      chart.broken = !!data.broken;
+      const got = await chartFetch(from, to, width * 2, ac.signal);
+      chart.deep = { from: from, to: to, step: got.step, points: got.points };
+      chart.broken = got.broken;
+      chart.err = false;
     } catch (err) {
-      chart.points = null; // отличаем «ошибка» от «данных нет»
+      if (err.name !== 'AbortError') chart.err = true;
     } finally {
-      chart.loading = false;
+      if (chart.deepAbort === ac) { chart.deepAbort = null; chart.loading = false; }
       chartDraw();
     }
-  }, 250);
+  }, 180);
+}
+
+// Какой ряд рисуем: поминутный, пока окно внутри недели, иначе крупный.
+function chartSeries() {
+  if (chart.from >= chart.fine.from && chart.fine.points.length) return chart.fine;
+  if (chart.deep.points.length && chart.from >= chart.deep.from && chart.to <= chart.deep.to) return chart.deep;
+  return chart.fine.points.length ? chart.fine : chart.deep;
+}
+// Точки окна с прореживанием: на экран шириной 900 px больше пары тысяч точек не нужно, а
+// ломаная из десяти тысяч заметно тормозила бы перетаскивание.
+function chartVisible(series, limit) {
+  const pts = series.points, out = [];
+  const lo = chart.from - series.step, hi = chart.to + series.step;
+  let i = 0;
+  while (i < pts.length && pts[i][0] < lo) i++;
+  let n = 0;
+  for (let j = i; j < pts.length && pts[j][0] <= hi; j++) n++;
+  const stride = Math.max(1, Math.ceil(n / limit));
+  for (let j = i; j < pts.length && pts[j][0] <= hi; j += stride) out.push(pts[j]);
+  return { points: out, step: series.step * stride };
 }
 
 function chartDraw() {
@@ -337,12 +407,15 @@ function chartDraw() {
   const padL = 34, padR = 8, padT = 10, padB = 20;
   const plotW = Math.max(1, w - padL - padR), plotH = Math.max(1, h - padT - padB);
 
-  if (chart.points === null) {
-    g.fillStyle = '#ff8b8b'; g.font = '13px system-ui'; g.fillText('ряд не загрузился', padL, padT + 16);
-    return;
+  const vis = chartVisible(chartSeries(), Math.round(plotW * 2));
+  const pts = vis.points;
+  // Шкала Y замирает на время жеста: иначе при каждом новом максимуме график прыгал по
+  // вертикали прямо под рукой.
+  if (!chart.holdY) {
+    const maxN = pts.length ? Math.max(1, ...pts.map(p => p[1])) : 1;
+    chart.yTop = maxN <= 4 ? 4 : Math.ceil(maxN * 1.15);
   }
-  const maxN = Math.max(1, ...chart.points.map(p => p[1]));
-  const top = maxN <= 4 ? 4 : Math.ceil(maxN * 1.15);
+  const top = chart.yTop;
   const xOf = sec => padL + ((sec - chart.from) / Math.max(1, chart.to - chart.from)) * plotW;
   const yOf = n => padT + plotH - (n / top) * plotH;
 
@@ -365,23 +438,29 @@ function chartDraw() {
   }
   g.textAlign = 'left';
 
-  if (!chart.points.length) {
+  if (pts.length) {
+    // Ломаная с разрывом: пропуск больше 1.5 шага — сервер был выключен, и соединять точки
+    // прямой значило бы придумать онлайн, которого никто не измерял.
+    const gap = vis.step * 1.5;
+    g.strokeStyle = '#4aa8ff'; g.lineWidth = 2; g.lineJoin = 'round';
+    g.beginPath();
+    let started = false;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], prev = i ? pts[i - 1] : null;
+      if (!started || (prev && p[0] - prev[0] > gap)) { g.moveTo(xOf(p[0]), yOf(p[1])); started = true; }
+      else g.lineTo(xOf(p[0]), yOf(p[1]));
+    }
+    g.stroke();
+  } else if (!chart.loading) {
     g.fillStyle = '#86a0bd'; g.font = '13px system-ui';
     g.fillText('за это время данных нет', padL + 8, padT + 18);
-    return;
   }
-  // Ломаная с разрывом: пропуск больше 1.5 шага — сервер был выключен, и соединять точки
-  // прямой значило бы придумать онлайн, которого никто не измерял.
-  const gap = chart.step * 1.5;
-  g.strokeStyle = '#4aa8ff'; g.lineWidth = 2; g.lineJoin = 'round';
-  g.beginPath();
-  let started = false;
-  for (let i = 0; i < chart.points.length; i++) {
-    const p = chart.points[i], prev = i ? chart.points[i - 1] : null;
-    if (!started || (prev && p[0] - prev[0] > gap)) { g.moveTo(xOf(p[0]), yOf(p[1])); started = true; }
-    else g.lineTo(xOf(p[0]), yOf(p[1]));
+  if (chart.loading || chart.err) {
+    g.font = '11px system-ui'; g.textAlign = 'right';
+    g.fillStyle = chart.err ? '#ff8b8b' : '#86a0bd';
+    g.fillText(chart.err ? 'ряд не загрузился' : 'подгружаю…', w - padR, padT + 10);
+    g.textAlign = 'left';
   }
-  g.stroke();
 
   if (chart.hover) {
     const p = chart.hover, x = xOf(p[0]), y = yOf(p[1]);
@@ -410,12 +489,19 @@ function chartZoom(sec, factor) {
   chart.from = sec - span * frac;
   chart.to = chart.from + span;
   chartClamp();
-  chartLoad();
+  chartDraw();
+  chartNeedDeep();
 }
 // Окно не пускаем в будущее: справа всегда «сейчас».
 function chartClamp() {
   const now = Math.floor(Date.now() / 1000);
   if (chart.to > now) { const span = chart.to - chart.from; chart.to = now; chart.from = now - span; }
+}
+// Жест начался — шкалу Y держим; через полсекунды после последнего движения отпускаем.
+function chartHoldY(on) {
+  clearTimeout(chart.holdTimer);
+  if (on) { chart.holdY = true; return; }
+  chart.holdTimer = setTimeout(() => { chart.holdY = false; chartDraw(); }, 500);
 }
 
 chart.canvas.addEventListener('pointerdown', e => {
@@ -423,6 +509,7 @@ chart.canvas.addEventListener('pointerdown', e => {
   chart.canvas.setPointerCapture(e.pointerId);
   chart.drag = { x: e.clientX, from: chart.from, to: chart.to };
   chart.canvas.classList.add('drag');
+  chartHoldY(true);
 });
 chart.canvas.addEventListener('pointermove', e => {
   if (chart.drag) {
@@ -431,24 +518,33 @@ chart.canvas.addEventListener('pointermove', e => {
     const shift = (e.clientX - chart.drag.x) * perPx;
     chart.from = chart.drag.from - shift;
     chart.to = chart.drag.to - shift;
+    if (chart.from < Math.floor(Date.now() / 1000) - MAX_SPAN) {
+      const span = chart.to - chart.from;
+      chart.from = Math.floor(Date.now() / 1000) - MAX_SPAN;
+      chart.to = chart.from + span;
+    }
     chartClamp();
-    chartLoad();
+    chartDraw();      // кадр сразу, из уже загруженных точек
+    chartNeedDeep();  // сеть — следом и только если вышли за неделю
     return;
   }
-  if (!chart.points || !chart.points.length) return;
+  const series = chartSeries();
+  if (!series.points.length) return;
   const sec = chartSecAt(e.clientX);
   let best = null, bestD = Infinity;
-  for (const p of chart.points) { const d = Math.abs(p[0] - sec); if (d < bestD) { bestD = d; best = p; } }
-  chart.hover = bestD <= chart.step * 2 ? best : null;
+  for (const p of series.points) { const d = Math.abs(p[0] - sec); if (d < bestD) { bestD = d; best = p; } }
+  chart.hover = bestD <= series.step * 2 ? best : null;
   chartDraw();
 });
 chart.canvas.addEventListener('pointerup', e => {
   chart.drag = null; chart.canvas.classList.remove('drag');
+  chartHoldY(false);
   if (chart.canvas.hasPointerCapture(e.pointerId)) chart.canvas.releasePointerCapture(e.pointerId);
 });
 chart.canvas.addEventListener('pointerleave', () => { chart.hover = null; chartDraw(); });
 chart.canvas.addEventListener('wheel', e => {
   e.preventDefault();
+  chartHoldY(true); chartHoldY(false);
   chartZoom(chartSecAt(e.clientX), e.deltaY > 0 ? 1.25 : 0.8);
 }, { passive: false });
 // Щипок двумя пальцами: без него на телефоне масштаб недоступен.
@@ -457,22 +553,29 @@ chart.canvas.addEventListener('touchmove', e => {
   e.preventDefault();
   const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
   const mid = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+  chartHoldY(true);
   if (chart.pinch) chartZoom(chartSecAt(mid), chart.pinch / Math.max(1, dist));
   chart.pinch = dist;
   chart.drag = null;
 }, { passive: false });
-chart.canvas.addEventListener('touchend', () => { chart.pinch = null; });
+chart.canvas.addEventListener('touchend', () => { chart.pinch = null; chartHoldY(false); });
 
 document.querySelectorAll('.chartBar button[data-range]').forEach(b => {
   b.onclick = () => chartSetRange(Number(b.dataset.range));
 });
 document.getElementById('chartNow').onclick = () => chartSetRange(chart.to - chart.from);
-window.addEventListener('resize', () => { chartDraw(); chartLoad(); });
-// Догоняем время только у правого края: иначе автообновление дёргало бы окно, которое
-// администратор увёл в прошлое.
-setInterval(() => { if (!paused && chartAtNow()) chartSetRange(chart.to - chart.from); }, 60000);
+window.addEventListener('resize', () => { chartDraw(); });
+// Хвост ряда догоняем всегда (он дешёвый), а окно двигаем только у правого края: иначе
+// автообновление дёргало бы график, который администратор увёл в прошлое.
+setInterval(() => {
+  if (paused) return;
+  const atNow = chartAtNow();
+  chartTopUp().then(() => { if (atNow) chartSetRange(chart.to - chart.from); });
+}, 60000);
 
-chartSetRange(21600);
+chart.from = Math.floor(Date.now() / 1000) - 21600;
+chart.to = Math.floor(Date.now() / 1000);
+chartTopUp();
 connect();
 </script>
 </body>

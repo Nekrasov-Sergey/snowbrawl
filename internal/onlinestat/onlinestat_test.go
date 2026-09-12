@@ -50,10 +50,12 @@ func TestRetentionTrims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < RetentionPoints+120; i++ {
+	for i := 0; i < RetentionPoints+3*trimSlack; i++ {
 		s.Observe(base.Add(time.Duration(i)*time.Minute), i%9)
 	}
-	if len(s.ring) > RetentionPoints {
+	// Подрезка идёт пачками по trimSlack, поэтому кольцо может перерасти ретенцию на пачку —
+	// но не больше: иначе память растёт без границы.
+	if len(s.ring) > RetentionPoints+trimSlack {
 		t.Fatalf("в кольце %d точек при ретенции %d", len(s.ring), RetentionPoints)
 	}
 }
@@ -191,10 +193,11 @@ func TestCompactionRewritesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Пишем чуть больше порога компактизации, флашим по частям.
+	// Пишем чуть больше порога компактизации, флашим по частям. Порог — два месяца поминутно,
+	// поэтому флашим редко: каждый вызов делает fsync, и под -race сотня их заметна в CI.
 	for i := 0; i < compactAt+10; i++ {
 		s.Observe(base.Add(time.Duration(i)*time.Minute), i%7)
-		if i%500 == 0 {
+		if i%5000 == 0 {
 			if err := s.Flush(); err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +221,7 @@ func TestCompactionRewritesFile(t *testing.T) {
 	if s2.Broken() {
 		t.Fatal("после компактизации файл читается как битый")
 	}
-	if len(s2.ring) != RetentionPoints {
-		t.Fatalf("после перезапуска точек %d, ожидалось %d", len(s2.ring), RetentionPoints)
+	if len(s2.ring) < RetentionPoints || len(s2.ring) > RetentionPoints+trimSlack {
+		t.Fatalf("после перезапуска точек %d, ожидалось около %d", len(s2.ring), RetentionPoints)
 	}
 }

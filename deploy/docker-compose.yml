@@ -9,6 +9,9 @@ services:
     image: ${SNOWBRAWL_IMAGE:-ghcr.io/nekrasov-sergey/snowbrawl:latest}
     container_name: snowbrawl-server
     restart: unless-stopped
+    # Дефолтных 10 с не всегда хватает: сервер сначала закрывает HTTP (до 5 с) и ждёт живые
+    # сокеты, а историю онлайна дописывает последней — при SIGKILL терялись её свежие минуты.
+    stop_grace_period: 30s
     environment:
       SNOWBRAWL_ADDR: ":8080"
       SNOWBRAWL_ADMIN_TOKEN: ${SNOWBRAWL_ADMIN_TOKEN:?set SNOWBRAWL_ADMIN_TOKEN in .env}
@@ -17,7 +20,7 @@ services:
       SNOWBRAWL_TRUST_PROXY: ${SNOWBRAWL_TRUST_PROXY:-false}
       # Роли и баны по IP.
       SNOWBRAWL_MODERATION_FILE: ${SNOWBRAWL_MODERATION_FILE:-/data/moderation.json}
-      # История онлайна для графика в админке: точка в минуту, семь дней. Пустое значение —
+      # История онлайна для графика в админке: точка в минуту, 30 дней. Пустое значение —
       # график живёт только в памяти и теряется при перезапуске.
       SNOWBRAWL_ONLINE_FILE: ${SNOWBRAWL_ONLINE_FILE:-/data/online.log}
     volumes:
