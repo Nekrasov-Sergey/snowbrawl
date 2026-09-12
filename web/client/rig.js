@@ -5,13 +5,17 @@ window.SBRig = (function () {
   var TAU = Math.PI * 2, D2R = Math.PI / 180;
   var INK = "#13293f";
   var TEAM = { A: "#4aa8ff", B: "#ff6a6a" };
+  // w/big/leg одинаковые у всех ролей: тело одного размера и пропорций для всех, чтобы силуэт
+  // (и проверка попадания в sim.js, которая теперь считается от него) не отличался по роли —
+  // раньше Танк рисовался заметно крупнее, а Раннер мельче остальных без игровой причины.
+  // Роль по-прежнему читается по головному убору, снаряжению и цвету — их не трогаем.
   var GEAR = {
-    "Раннер":  { accent: "#7fd4ff", boot: "#eef4fb", mitt: "#eef4fb", w: 0.84, big: 0.95, tint: "#f7fbff", leg: [7, 6] },
-    "Снайпер": { accent: "#9b8cff", boot: "#8f86c9", mitt: "#8f86c9", w: 0.90, big: 1.02, tint: "#f1effb", leg: [7, 6] },
-    "Фризер":  { accent: "#4fc9ff", boot: "#cfeefb", mitt: "#a9e3f4", w: 1.02, big: 0.98, tint: "#e9f7ff", leg: [10, 9] },
-    "Бомбер":  { accent: "#ff9e2e", boot: "#ff9e2e", mitt: "#ff9e2e", w: 1.10, big: 1.0,  tint: "#fff4e6", leg: [11, 10] },
-    "Щит":     { accent: "#5fd08a", boot: "#57b981", mitt: "#57b981", w: 1.16, big: 1.02, tint: "#ecfbf1", leg: [11, 10] },
-    "Танк":    { accent: "#8ea3bd", boot: "#5f7488", mitt: "#8ea3bd", w: 1.14, big: 1.12, tint: "#c8d4e1", leg: [12, 11] }
+    "Раннер":  { accent: "#7fd4ff", boot: "#eef4fb", mitt: "#eef4fb", w: 1.0, big: 1.0, tint: "#f7fbff", leg: [9, 8] },
+    "Снайпер": { accent: "#9b8cff", boot: "#8f86c9", mitt: "#8f86c9", w: 1.0, big: 1.0, tint: "#f1effb", leg: [9, 8] },
+    "Фризер":  { accent: "#4fc9ff", boot: "#cfeefb", mitt: "#a9e3f4", w: 1.0, big: 1.0, tint: "#e9f7ff", leg: [9, 8] },
+    "Бомбер":  { accent: "#ff9e2e", boot: "#ff9e2e", mitt: "#ff9e2e", w: 1.0, big: 1.0, tint: "#fff4e6", leg: [9, 8] },
+    "Щит":     { accent: "#5fd08a", boot: "#57b981", mitt: "#57b981", w: 1.0, big: 1.0, tint: "#ecfbf1", leg: [9, 8] },
+    "Танк":    { accent: "#8ea3bd", boot: "#5f7488", mitt: "#8ea3bd", w: 1.0, big: 1.0, tint: "#c8d4e1", leg: [9, 8] }
   };
 
   // мягкая cel-заливка формы: белое тело, нижняя лужа тени, блик сверху, толстая обводка
