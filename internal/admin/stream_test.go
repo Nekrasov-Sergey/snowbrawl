@@ -171,7 +171,7 @@ func TestStreamSendsFirstStateImmediately(t *testing.T) {
 	br := bufio.NewReader(res.Body)
 	first := readFrame(t, br, 3*time.Second)
 	// build в сводке — из конфига hub, а не из admin.Info: проверяем поле протокола.
-	if !strings.Contains(first, `"proto":3`) {
+	if !strings.Contains(first, `"proto":4`) {
 		t.Fatalf("первый кадр: %q", first)
 	}
 	// Состояние не менялось — второго кадра быть не должно.

@@ -20,7 +20,7 @@
     rank: '',                 // роль модерации: '' | 'admin' | 'creator' (цвет ника, права в чате)
     net: null,
     connected: false,
-    ping: { at: 0, rtt: 0, jitter: 0 },  // задержка до сервера: меряется всегда, а не только в матче
+    ping: { rtt: 0, jitter: 0 },  // задержка: её мерит сервер и присылает в зонде, см. onMessage 'ping'
     draining: false,
     section: 'pvp',           // pvp | pve — раздел, в котором игрок сейчас ходит
     create: { mode: 3, arena: 0, visibility: 'open', botLevel: 1 },
@@ -216,7 +216,8 @@
   function setOnline(n) { onlineCount = n; renderOnline(); }
 
   // Задержка до сервера рядом с точкой соединения — на всех экранах, а не только в бою.
-  // Пинг раз в 2 с, RTT сглаживается по половине; при обрыве число убираем.
+  // Число меряет сервер и присылает в зонде: то же самое видно в лобби у соседей и в админке,
+  // своего замера клиент не делает. При обрыве число убираем.
   function renderConn() {
     var el = $('connPing');
     if (!el) return;
@@ -225,20 +226,6 @@
     // Красный — только про лаг: рваные снапшоты (джиттер) портят бой не меньше самой задержки.
     el.className = known && (app.ping.rtt > 200 || app.ping.jitter > 100) ? 'bad' : '';
   }
-  function onPong() {
-    if (!app.ping.at) return;
-    var sample = performance.now() - app.ping.at;
-    app.ping.at = 0;
-    app.ping.rtt = app.ping.rtt ? app.ping.rtt * 0.5 + sample * 0.5 : sample;
-    renderConn();
-  }
-  setInterval(function () {
-    // app.me появляется из welcome: до него сокет открыт, но сессии нет, и сервер на любое
-    // сообщение кроме hello отвечает not_allowed — тост перебивал бы ошибку про ник.
-    if (!app.connected || !app.net || !app.me) return;
-    app.ping.at = performance.now();
-    app.net.send('ping');
-  }, 2000);
   var toastTimer = null;
   function toast(msg) {
     var t = $('toast'); t.textContent = msg; t.hidden = false;
@@ -381,12 +368,12 @@
       case 'snapshot':
         if (app.game && !app.game.offline) app.game.onSnapshot(d);
         break;
-      case 'pong':
-        onPong();
-        break;
       case 'ping':
-        // Зонд сервера: он мерит задержку сам, чтобы показать её в лобби и в админке.
+        // Зонд сервера: отвечаем тем же номером, а в теле зонда он прислал прошлое измерение.
+        // Пока не измерил, ms нет — в углу пусто, а не «0 мс».
         app.net.send('pong', { seq: (d && d.seq) || 0 });
+        app.ping.rtt = (d && d.ms) || 0;
+        renderConn();
         break;
       case 'room.ping':
         onRoomPing(d);
@@ -1083,10 +1070,11 @@
 
   // Возврат из фона: сервер через 20 с без ввода отдаёт бойца боту; любой ввод возвращает управление.
   document.addEventListener('visibilitychange', function () {
-    // Пока вкладка скрыта, браузер тормозит таймеры: измеренный пинг устаревает, а состояние
-    // кнопки мыши могло измениться без нас.
+    // Пока вкладка скрыта, состояние кнопки мыши могло измениться без нас, а джиттер меряется
+    // по приходу снапшотов и в фоне недостоверен. Пинг не трогаем: его мерит сервер, зонды
+    // приходят и в скрытой вкладке, и обнуление заставило бы число моргать при возврате.
     releaseMouse();
-    app.ping.rtt = 0; app.ping.jitter = 0; renderConn();
+    app.ping.jitter = 0; renderConn();
     if (document.visibilityState !== 'visible' || !app.game || app.game.over || app.screen !== 'game') return;
     touch.reset(); intent.reset();
     var me = myPlayer(app.game.lastSnap);

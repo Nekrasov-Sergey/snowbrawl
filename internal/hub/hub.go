@@ -158,13 +158,6 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 	switch env.Type {
 	case protocol.CHello:
 		h.sendErr(c, protocol.ErrNotAllowed, "already said hello")
-	case protocol.CPing:
-		// Клиентский зонд: отвечаем его же номером, чтобы клиент не считал RTT по чужому ответу.
-		var ping protocol.Ping
-		if len(env.Data) > 0 {
-			_ = json.Unmarshal(env.Data, &ping)
-		}
-		c.Send(protocol.MustEncode(protocol.SPong, protocol.Ping{Seq: ping.Seq}))
 	case protocol.CPong:
 		h.handlePong(p, env.Data)
 	case protocol.CRoomCreate:
@@ -985,7 +978,7 @@ type PlayerStat struct {
 	Where        string     `json:"where,omitempty"` // код комнаты, режим очереди или id матча
 	Online       bool       `json:"online"`
 	Rank         string     `json:"rank,omitempty"`         // роль модерации по IP
-	Ping         int        `json:"ping,omitempty"`         // задержка до сервера, мс, кратно 10
+	Ping         int        `json:"ping,omitempty"`         // задержка до сервера, мс; её же игрок видит у себя
 	Banned       bool       `json:"banned,omitempty"`       // адрес в бане (сессия ещё не выкинута)
 	Since        time.Time  `json:"since"`                  // когда игрок зашёл в игру
 	OfflineSince *time.Time `json:"offlineSince,omitempty"` // с какого момента нет связи
