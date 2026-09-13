@@ -99,10 +99,31 @@ const RANKS = { creator: 'Создатель', admin: 'Админ' };
 // Ник цветом роли — как в игре: создатель золотой, админ фиолетовый.
 const nickHtml = p => p.rank ? '<span class="rank-' + p.rank + '">' + esc(p.nick) + '</span>' : esc(p.nick);
 
+// Нарисованное состояние таблиц: id → { keys, cells }. Нужно, чтобы менять ячейки точечно.
+const drawn = {};
+
 // Таблица или строка «сейчас никого», если данных нет.
+//
+// Пока состав и порядок строк те же, меняем только изменившиеся ячейки. Пересобирать таблицу
+// целиком нельзя: задержка живая, сводка приходит каждые пару секунд, и полная перерисовка
+// захлопывала бы открытый выпадающий список роли прямо под курсором. Каждая строка приносит
+// key — устойчивый признак (id сессии, код комнаты, IP), по нему и сверяем состав.
 function table(id, head, rows, empty) {
   const el = document.getElementById(id);
-  if (!rows || !rows.length) { el.innerHTML = '<p class="empty">' + empty + '</p>'; return; }
+  if (!rows || !rows.length) { el.innerHTML = '<p class="empty">' + empty + '</p>'; drawn[id] = null; return; }
+  const keys = rows.map(r => r.key);
+  const cells = rows.map(r => r.cells);
+  const was = drawn[id];
+  const body = el.querySelector('tbody');
+  drawn[id] = { keys: keys, cells: cells };
+  if (body && was && was.keys.length === keys.length && was.keys.every((k, i) => k === keys[i])) {
+    rows.forEach((r, i) => {
+      const tr = body.children[i];
+      tr.classList.toggle('off', !!r.off);
+      r.cells.forEach((c, j) => { if (was.cells[i][j] !== c) tr.children[j].innerHTML = c; });
+    });
+    return;
+  }
   el.innerHTML = '<table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
     rows.map(r => '<tr' + (r.off ? ' class="off"' : '') + '>' +
       r.cells.map((c, i) => '<td data-h="' + head[i] + '">' + c + '</td>').join('') + '</tr>').join('') +
@@ -189,10 +210,12 @@ function render(s) {
   const now = new Date(s.now).getTime();
   table('sessions', ['ник', 'роль', 'где', 'связь', 'пинг', 'зашёл', 'в игре', 'IP', 'действия'],
     (s.sessions || []).map(p => ({
+      key: p.id,
       off: !p.online,
       cells: [nickHtml(p), (RANKS[p.rank] || 'Игрок') + (p.banned ? ' 🚫' : ''), place(p, now),
         p.online ? 'онлайн' : 'нет связи ' + secs(now - new Date(p.offlineSince).getTime()),
-        // Задержку мерит сервер; «—» значит «ещё не измерена», а не «нулевая».
+        // Задержку мерит сервер — это ровно то число, что игрок видит у себя в углу экрана;
+        // «—» значит «ещё не измерена», а не «нулевая».
         p.ping ? p.ping + ' мс' : '—',
         when(p.since), secs(now - new Date(p.since).getTime()),
         '<span class="ip">' + esc(p.ip) + '</span>',
@@ -206,6 +229,7 @@ function render(s) {
 
   table('matches', ['состав', 'режим', 'арена', 'людей', 'на связи', 'начат', 'длительность', 'комната'],
     (s.matches || []).map(m => ({
+      key: m.id,
       cells: [roster(m.players), mode(m.mode), m.arena, m.humans, m.online,
         new Date(m.created).toLocaleTimeString(),
         // До конца отсчёта боя ещё нет: показываем это отдельно, иначе длительность врёт.
@@ -217,6 +241,7 @@ function render(s) {
 
   table('rooms', ['код', 'участники', 'игра', 'режим', 'арена', 'доступ', 'в матче'],
     (s.rooms || []).map(r => ({
+      key: r.code,
       cells: [esc(r.code),
         (r.players || []).map(p => esc(p.nick || p.id) + (p.host ? ' ★' : '') +
           (p.team ? ' (' + p.team + ')' : '') + (p.ready ? ' ✓' : '') + (p.online ? '' : ' ⚠')).join(', ') || '—',
@@ -227,6 +252,7 @@ function render(s) {
 
   table('ranks', ['IP', 'роль', 'ник при выдаче', 'выдана', 'действия'],
     (s.ranks || []).map(e => ({
+      key: e.ip,
       cells: ['<span class="ip">' + esc(e.ip) + '</span>', RANKS[e.rank] || esc(e.rank),
         esc(e.nick || '—'), when(e.since),
         '<div class="act"><button class="rankOff" data-ip="' + esc(e.ip) + '">Снять</button></div>'],
@@ -234,13 +260,15 @@ function render(s) {
 
   table('bans', ['IP', 'ник при бане', 'причина', 'когда', 'действия'],
     (s.bans || []).map(b => ({
+      key: b.ip,
       cells: ['<span class="ip">' + esc(b.ip) + '</span>', esc(b.nick || '—'), esc(b.reason || '—'), when(b.at),
         '<div class="act"><button class="unbanBtn" data-ip="' + esc(b.ip) + '">Разбанить</button></div>'],
     })), 'Банов нет.');
 
   document.getElementById('chatSize').textContent = 'сообщений в чате: ' + (s.chatSize || 0);
 
-  // Обработчики навешиваем после перерисовки: таблицы собираются целиком заново.
+  // Обработчики навешиваем после каждого кадра: строки могли пересобраться целиком, а при
+  // точечном обновлении — отдельные ячейки. Назначение onclick идемпотентно, дублей не будет.
   document.querySelectorAll('.rankPick').forEach(el => { el.onchange = () => setRank(el.dataset.ip, el.value); });
   document.querySelectorAll('.rankOff').forEach(el => { el.onclick = () => setRank(el.dataset.ip, ''); });
   document.querySelectorAll('.banBtn').forEach(el => { el.onclick = () => ban(el.dataset.ip, ''); });

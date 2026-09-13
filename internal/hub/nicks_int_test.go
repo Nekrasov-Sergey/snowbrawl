@@ -2,6 +2,7 @@ package hub_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 	var st protocol.RoomState
 	cl.expect(protocol.SRoomState, &st)
 
-	// Отвечаем на зонды сервера сами: первый уходит через pingProbeEvery от начала сессии.
+	// Отвечаем на зонды сервера сами: первый уходит сразу, дальше раз в pingProbeEvery.
 	collect := func(d time.Duration) []protocol.RoomPing {
 		var out []protocol.RoomPing
 		deadline := time.After(d)
@@ -94,9 +95,16 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 		t.Fatalf("своей задержки нет в %+v", last.Pings)
 	}
 
-	// На loopback задержка не меняется, значит повторных рассылок быть не должно.
-	if again := collect(6 * time.Second); len(again) > 0 {
-		t.Fatalf("задержки разосланы повторно без изменений: %+v", again)
+	// Рассылка идёт только при изменении: два кадра подряд с одинаковым набором задержек —
+	// это сломанный диффинг. Проверять «на loopback вообще не меняется» больше нельзя:
+	// задержка публикуется с точностью до миллисекунды и на петле гуляет между 1 и 2 мс.
+	all := make([]protocol.RoomPing, 0, len(got))
+	all = append(all, got...)
+	all = append(all, collect(6*time.Second)...)
+	for i := 1; i < len(all); i++ {
+		if fmt.Sprint(all[i].Pings) == fmt.Sprint(all[i-1].Pings) {
+			t.Fatalf("задержки разосланы повторно без изменений: %+v", all[i])
+		}
 	}
 }
 

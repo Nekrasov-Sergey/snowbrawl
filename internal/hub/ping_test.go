@@ -20,8 +20,8 @@ type sentConn struct{ msgs [][]byte }
 func (c *sentConn) Send(msg []byte) { c.msgs = append(c.msgs, msg) }
 func (c *sentConn) Closed() bool    { return false }
 
-// lastPing возвращает номер последнего отправленного зонда и сколько их всего было.
-func lastPing(t *testing.T, c *sentConn) (seq uint32, count int) {
+// lastPing возвращает последний отправленный зонд и сколько их всего было.
+func lastPing(t *testing.T, c *sentConn) (last protocol.Ping, count int) {
 	t.Helper()
 	for _, raw := range c.msgs {
 		env, err := protocol.Decode(raw)
@@ -32,10 +32,10 @@ func lastPing(t *testing.T, c *sentConn) (seq uint32, count int) {
 		if err := json.Unmarshal(env.Data, &ping); err != nil {
 			t.Fatal(err)
 		}
-		seq = ping.Seq
+		last = ping
 		count++
 	}
-	return seq, count
+	return last, count
 }
 
 func pingHub(now *time.Time) *Hub {
@@ -53,19 +53,15 @@ func TestPingProbeAndMeasure(t *testing.T) {
 	conn := &sentConn{}
 	p := &session.Player{ID: "p1", CreatedAt: base, Conn: conn}
 
-	// Первый зонд не раньше pingProbeEvery от начала сессии: иначе задержка появлялась бы в
-	// первые же миллисекунды и ломала стабильность сводки админки.
-	now = base.Add(pingProbeEvery - time.Millisecond)
+	// Первый зонд уходит сразу: от него живёт индикатор связи у игрока, и держать его пустым
+	// лишние секунды незачем.
 	h.probePing(p, now)
-	if _, n := lastPing(t, conn); n != 0 {
-		t.Fatalf("зондов %d, ожидалось 0 до истечения %v", n, pingProbeEvery)
+	first, n := lastPing(t, conn)
+	if n != 1 || first.Seq != 1 {
+		t.Fatalf("зондов %d, seq %d; ожидались 1 и 1", n, first.Seq)
 	}
-
-	now = base.Add(pingProbeEvery)
-	h.probePing(p, now)
-	seq, n := lastPing(t, conn)
-	if n != 1 || seq != 1 {
-		t.Fatalf("зондов %d, seq %d; ожидались 1 и 1", n, seq)
+	if first.Ms != 0 {
+		t.Fatalf("в первом зонде ms=%d, задержка ещё не измерена", first.Ms)
 	}
 	// Пока зонд в полёте, второй не уходит — иначе номер перестал бы что-то значить.
 	now = now.Add(pingProbeEvery)
@@ -75,7 +71,7 @@ func TestPingProbeAndMeasure(t *testing.T) {
 	}
 
 	// Чужой номер игнорируется.
-	now = base.Add(pingProbeEvery + 40*time.Millisecond)
+	now = base.Add(40 * time.Millisecond)
 	h.handlePong(p, json.RawMessage(`{"seq":99}`))
 	if p.PingMs != 0 {
 		t.Fatalf("ответ с чужим номером принят: ping=%d", p.PingMs)
@@ -84,9 +80,17 @@ func TestPingProbeAndMeasure(t *testing.T) {
 	if p.PingMs != 40 {
 		t.Fatalf("ping=%d, ожидалось 40", p.PingMs)
 	}
+
+	// Измеренное значение уезжает клиенту в следующем зонде: отдельного сообщения нет.
+	now = now.Add(pingProbeEvery)
+	h.probePing(p, now)
+	next, _ := lastPing(t, conn)
+	if next.Ms != 40 {
+		t.Fatalf("в зонде ms=%d, ожидалось 40", next.Ms)
+	}
 }
 
-func TestPingDeadbandAndQuantization(t *testing.T) {
+func TestPingPublishesExactMs(t *testing.T) {
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	now := base
 	h := pingHub(&now)
@@ -96,33 +100,29 @@ func TestPingDeadbandAndQuantization(t *testing.T) {
 	probe := func(rtt time.Duration) {
 		now = now.Add(pingProbeEvery)
 		h.probePing(p, now)
-		seq, _ := lastPing(t, conn)
+		last, _ := lastPing(t, conn)
 		now = now.Add(rtt)
-		body, _ := json.Marshal(protocol.Ping{Seq: seq})
+		body, _ := json.Marshal(protocol.Ping{Seq: last.Seq})
 		h.handlePong(p, body)
 	}
 
-	probe(80 * time.Millisecond)
-	if p.PingMs != 80 {
-		t.Fatalf("ping=%d, ожидалось 80", p.PingMs)
+	// Публикуется ровно то, что измерено, с точностью до миллисекунды: раньше здесь были шаг
+	// 10 мс и зона нечувствительности 12 мс, и число врало — переход на одну ступень не
+	// публиковался никогда, потому что зона была шире шага.
+	probe(43 * time.Millisecond)
+	if p.PingMs != 43 {
+		t.Fatalf("ping=%d, ожидалось 43", p.PingMs)
 	}
-	// Дрожание в пределах зоны нечувствительности не публикуется: иначе админка получала бы
-	// новый SSE-кадр каждую секунду и мигала целыми таблицами.
-	before := p.PingMs
-	probe(84 * time.Millisecond)
-	if p.PingMs != before {
-		t.Fatalf("дрожание опубликовано: было %d, стало %d", before, p.PingMs)
+	// Небольшой сдвиг доходит, а не гасится: сглаживание пополам, 43 и 51 дают 47.
+	probe(51 * time.Millisecond)
+	if p.PingMs != 47 {
+		t.Fatalf("ping=%d, ожидалось 47", p.PingMs)
 	}
-	// Заметный сдвиг публикуется и округляется до шага.
-	probe(300 * time.Millisecond)
-	if p.PingMs%pingStep != 0 || p.PingMs < 150 {
-		t.Fatalf("ping=%d, ожидалось кратное %d и заметно больше прежнего", p.PingMs, pingStep)
-	}
-	// Loopback: сырой RTT почти ноль, но ноль означает «неизвестно», поэтому показываем шаг.
+	// Loopback: сырой RTT почти ноль, но ноль означает «неизвестно», поэтому показываем 1 мс.
 	p.RTT = 0
 	probe(0)
-	if p.PingMs != pingStep {
-		t.Fatalf("ping=%d, ожидалось %d", p.PingMs, pingStep)
+	if p.PingMs != 1 {
+		t.Fatalf("ping=%d, ожидалось 1", p.PingMs)
 	}
 }
 
@@ -133,11 +133,10 @@ func TestPingLostAndReset(t *testing.T) {
 	conn := &sentConn{}
 	p := &session.Player{ID: "p1", CreatedAt: base, Conn: conn}
 
-	now = base.Add(pingProbeEvery)
 	h.probePing(p, now)
-	seq, _ := lastPing(t, conn)
+	last, _ := lastPing(t, conn)
 	now = now.Add(50 * time.Millisecond)
-	body, _ := json.Marshal(protocol.Ping{Seq: seq})
+	body, _ := json.Marshal(protocol.Ping{Seq: last.Seq})
 	h.handlePong(p, body)
 	if p.PingMs == 0 {
 		t.Fatal("задержка не измерена")
