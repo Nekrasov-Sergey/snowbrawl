@@ -17,7 +17,7 @@
     nick: store.get('sb.nick') || '',
     token: store.get('sb.token') || '',
     me: null,                 // playerId с сервера
-    rank: '',                 // роль модерации: '' | 'admin' | 'creator' (цвет ника, права в чате)
+    rank: '',                 // роль модерации: '' | 'moderator' | 'admin' (цвет ника, права в чате)
     net: null,
     connected: false,
     ping: { rtt: 0, jitter: 0 },  // задержка: её мерит сервер и присылает в зонде, см. onMessage 'ping'
@@ -71,6 +71,10 @@
           // списка комнат: «назад» приходилось нажимать дважды — первое нажатие съедало дубль.
           // Отдельная запись им и не нужна: onPop разбирает бой и лобби по app.screen, ещё до
           // обращения к состоянию записи, поэтому «назад» там всё равно работает как «Выйти».
+          return;
+        }
+        if (opts && opts.keep) {
+          // Экран меняем, историю не трогаем: вызывающий сам делает настоящий history.back().
           return;
         }
         if (!ROUTABLE[name]) {
@@ -197,6 +201,10 @@
   }
   // Экраны, на которые имеет смысл возвращаться кнопкой «Назад».
   var CAN_RETURN = { menu: 1, createroom: 1, rooms: 1, settings: 1, tutlist: 1 };
+  // Откуда экран открывается, то есть куда с него ведёт «Назад». Корень — меню, его в таблице нет.
+  // Повторяет переходы интерфейса: создание комнаты открывается только из списка комнат, а список,
+  // настройки и уроки — только из меню. Нужна, чтобы восстановить путь после перезагрузки страницы.
+  var PARENT = { rooms: 'menu', createroom: 'rooms', tutlist: 'menu', settings: 'menu' };
   function goBack() {
     Audio_.uiClick();
     // История браузера — только транспорт: куда возвращаться, решает app.nav, а переход
@@ -592,7 +600,13 @@
   // ------------------------------------------------------------
   // Список комнат: страницу присылает сервер и обновляет её сам, пока экран открыт
   // ------------------------------------------------------------
-  function watchRooms() { send('room.list', { section: app.section, page: app.rooms.page }); }
+  function watchRooms() {
+    // До welcome сокет ещё только открывается: после F5 в списке комнат это давало ложный тост
+    // «Нет соединения с сервером». Подписку в этом случае делает сама ветка welcome в onMessage,
+    // поэтому здесь молчим. При настоящем обрыве связи тост остаётся на смене страницы и раздела.
+    if (!app.connected) return;
+    send('room.list', { section: app.section, page: app.rooms.page });
+  }
   function unwatchRooms() {
     app.rooms.data = null; app.rooms.slots = null;
     if (app.net) app.net.send('room.unlist', {});
@@ -757,6 +771,16 @@
   };
   function leaveLobby() {
     send('room.leave'); app.room = null; app.roomMatch = null;
+    // Лобби своей записи в истории не заводит, поэтому наверху лежит запись того экрана, с
+    // которого игрок вошёл в комнату. Если это экран создания, подменять её списком комнат
+    // нельзя: такая запись уже лежит ниже (createroom открывается только из списка), и «назад»
+    // пришлось бы жать дважды — первое нажатие уходило бы на дубль и onPop молчал бы, увидев тот
+    // же экран. Снимаем запись настоящим шагом назад, экран при этом меняем сами.
+    var st = history.state;
+    if (st && st.sb && st.screen === 'createroom') {
+      goto('rooms', { back: true, keep: true });
+      try { history.back(); return; } catch (e) { /* истории нет — остаёмся на списке комнат */ }
+    }
     goto('rooms', { back: true });
   }
   $('leaveLobby').onclick = function () { Audio_.uiClick(); leaveLobby(); };
@@ -1548,8 +1572,8 @@
     el.hidden = left === 0;
     el.textContent = left === scns.length ? 'новое' : String(left);
   }
-  // Админка в меню — только «Создателю». Токен клиенту не выдаётся: сервер пускает его по адресу.
-  function renderAdminBtn() { $('btnAdmin').hidden = app.rank !== 'creator'; }
+  // Админка в меню — только «Админу». Токен клиенту не выдаётся: сервер пускает его по адресу.
+  function renderAdminBtn() { $('btnAdmin').hidden = app.rank !== 'admin'; }
   $('btnAdmin').onclick = function () { Audio_.uiClick(); window.open('/admin/', '_blank'); };
 
   // Короткая плашка поверх арены (в обучении вместо нижнего тоста, чтобы не улетала за край).
@@ -1612,8 +1636,8 @@
   // Права на клиенте — только чтобы показать мусорку; решает всё равно сервер.
   function canDeleteChat(m) {
     if (m.pid && m.pid === app.me) return true;             // своё сообщение
-    if (app.rank === 'creator') return true;                // создатель — любое
-    return app.rank === 'admin' && !m.rank;                 // админ — только обычных игроков
+    if (app.rank === 'admin') return true;                  // админ — любое
+    return app.rank === 'moderator' && !m.rank;             // модератор — только обычных игроков
   }
   function chatRowHtml(m) {
     var mine = !!(m.pid && m.pid === app.me);
@@ -1767,9 +1791,18 @@
     // выбрасывал в главное меню. Раздел берём из адреса, иначе из последнего выбранного.
     var start = parseHash(location.hash);
     app.section = (start && start.section) || store.get('sb.section') || 'pvp';
+    // Восстанавливаем не только сам экран, но и путь к нему: иначе под ним не оказывалось ни одной
+    // записи, «назад» с экрана создания комнаты упиралось в стража и уводило в главное меню мимо
+    // списка комнат, а «Выйти» из восстановленной комнаты — туда же. Записи родителей кладём в
+    // историю, экран при этом не меняем.
+    var first = start ? start.screen : 'menu';
+    var chain = [];
+    for (var up = PARENT[first]; up; up = PARENT[up]) chain.unshift(up);
+    chain.forEach(function (name) { route.write(name, null); });
+    app.nav = chain.slice(); // запасной стек возврата держим в том же порядке
     // Именно push, а не replace: запись стража должна остаться под нами отдельной строкой
     // истории, иначе «назад» на корневом экране сразу уводит с сайта.
-    goto(start ? start.screen : 'menu');
+    goto(first);
   } else {
     // Ника нет — адрес не при чём: сначала имя. Разобранный хэш выбрасываем, иначе после
     // ввода ника игрок телепортируется в раздел, которого не ждёт.

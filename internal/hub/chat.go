@@ -76,8 +76,8 @@ func (h *Hub) sendChatHistory(p *session.Player) {
 	p.Send(protocol.MustEncode(protocol.SChatHistory, protocol.ChatHistory{Messages: hist}))
 }
 
-// handleChatDel удаляет сообщение у всех. Права: автор — своё; «Создатель» — любое;
-// «Админ» — только сообщения обычных игроков (ни создателя, ни других админов).
+// handleChatDel удаляет сообщение у всех. Права: автор — своё; «Админ» — любое;
+// «Модератор» — только сообщения обычных игроков (ни админов, ни других модераторов).
 // Вызывать под h.mu.
 func (h *Hub) handleChatDel(p *session.Player, data json.RawMessage) {
 	var req protocol.ChatDel
@@ -114,9 +114,9 @@ func (h *Hub) canDeleteChat(p *session.Player, e chatEntry) bool {
 		return true // своё сообщение может удалить любой
 	}
 	switch h.rank(p.IP) {
-	case protocol.RankCreator:
-		return true
 	case protocol.RankAdmin:
+		return true
+	case protocol.RankModerator:
 		return h.rank(e.authorIP) == protocol.RankPlayer
 	default:
 		return false

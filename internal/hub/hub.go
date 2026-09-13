@@ -83,9 +83,17 @@ func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderati
 		matchPush: map[string]string{},
 		pingPush:  map[string]string{},
 		nicks:     map[string]nickHold{},
-		rng:       rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0xDEADBEEF)),
+		rng:       rand.New(rand.NewPCG(seedOf(cfg), 0xDEADBEEF)),
 		stopCh:    make(chan struct{}),
 	}
+}
+
+// seedOf — зерно случайности hub'а: заданное в конфигурации или время. См. config.Config.Seed.
+func seedOf(cfg config.Config) uint64 {
+	if cfg.Seed != 0 {
+		return cfg.Seed
+	}
+	return uint64(time.Now().UnixNano())
 }
 
 // OnlineSeries — ряд онлайна для админки. Поле пишется один раз в New, мьютекс не нужен.
@@ -684,10 +692,17 @@ func (h *Hub) broadcastRoom(r *room.Room) {
 // launchMatch дополняет состав ботами, создаёт матч и переводит игроков в него.
 func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, campaign bool, difficulty int, humans []protocol.MatchPlayer) *match.Match {
 	players := h.fillTeams(mode, gameMode, difficulty, humans)
-	m, err := match.New(h.prog, roomCode, mode, arena, players, match.Options{
+	opts := match.Options{
 		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Countdown: h.cfg.Countdown, Log: h.log, Now: h.now,
 		GameMode: gameMode, Campaign: campaign, Difficulty: difficulty,
-	}, h.onMatchEnd)
+	}
+	if h.cfg.Seed != 0 {
+		// Зерно матча — производная от h.rng, а не от cfg.Seed напрямую: иначе все матчи одного
+		// сервера играли бы по одному и тому же сценарию.
+		seed := h.rng.Uint32()
+		opts.Seed = &seed
+	}
+	m, err := match.New(h.prog, roomCode, mode, arena, players, opts, h.onMatchEnd)
 	if err != nil {
 		h.log.Error().Err(err).Msg("create match")
 		for _, hp := range humans {

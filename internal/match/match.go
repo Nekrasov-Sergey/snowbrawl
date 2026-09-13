@@ -53,6 +53,9 @@ type Options struct {
 	Campaign   bool
 	Difficulty int
 	Pve        *sim.PveConfig
+	// Seed — зерно симуляции матча. nil — из crypto/rand, то есть каждый матч свой.
+	// Задаётся только из конфигурации с ненулевым Seed (тесты), см. config.Config.Seed.
+	Seed *uint32
 }
 
 type human struct {
@@ -106,11 +109,17 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 		pc := sim.PlayerConfig{ID: p.ID, Team: p.Team, Role: p.Role, Bot: p.Bot, Nick: p.Nick, BotLevel: p.BotLevel}
 		cfg.Players = append(cfg.Players, pc)
 	}
-	var seedBytes [4]byte
-	if _, err := rand.Read(seedBytes[:]); err != nil {
-		return nil, errors.Wrap(err, "seed")
+	var seed uint32
+	if opts.Seed != nil {
+		seed = *opts.Seed
+	} else {
+		var seedBytes [4]byte
+		if _, err := rand.Read(seedBytes[:]); err != nil {
+			return nil, errors.Wrap(err, "seed")
+		}
+		seed = binary.LittleEndian.Uint32(seedBytes[:])
 	}
-	s, err := prog.NewMatch(cfg, binary.LittleEndian.Uint32(seedBytes[:]))
+	s, err := prog.NewMatch(cfg, seed)
 	if err != nil {
 		return nil, errors.Wrap(err, "create sim match")
 	}

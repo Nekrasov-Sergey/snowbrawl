@@ -19,8 +19,8 @@ tr.off td { opacity: .5 }
 .bar { display: flex; align-items: center; gap: 10px; margin: 12px 0; font-size: 12px; color: #86a0bd }
 button { background: #274363; border: none; color: #eaf2ff; padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer }
 .team-A { color: #7cc4ff } .team-B { color: #ffb37c }
-.rank-creator { color: #ffc94d; font-weight: 600 }
-.rank-admin { color: #b478ff; font-weight: 600 }
+.rank-admin { color: #ffc94d; font-weight: 600 }
+.rank-moderator { color: #b478ff; font-weight: 600 }
 .act { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
 .act select { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 12px; padding: 3px 6px }
 input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 13px; padding: 5px 8px }
@@ -70,7 +70,7 @@ input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a8
 <h3>Роли по IP</h3><div id="ranks"></div>
 <div class="tools">
   <input type="text" id="rankIp" placeholder="IP адрес" size="16">
-  <select id="rankVal"><option value="admin">Админ</option><option value="creator">Создатель</option><option value="">Игрок (снять)</option></select>
+  <select id="rankVal"><option value="moderator">Модератор</option><option value="admin">Админ</option><option value="">Игрок (снять)</option></select>
   <button id="rankSet">Выдать роль</button>
 </div>
 <h3>Баны по IP</h3><div id="bans"></div>
@@ -95,8 +95,8 @@ const secs = ms => {
 };
 const mode = n => n + '×' + n;
 const when = t => t ? new Date(t).toLocaleString('ru-RU') : '—';
-const RANKS = { creator: 'Создатель', admin: 'Админ' };
-// Ник цветом роли — как в игре: создатель золотой, админ фиолетовый.
+const RANKS = { admin: 'Админ', moderator: 'Модератор' };
+// Ник цветом роли — как в игре: админ золотой, модератор фиолетовый.
 const nickHtml = p => p.rank ? '<span class="rank-' + p.rank + '">' + esc(p.nick) + '</span>' : esc(p.nick);
 
 // Нарисованное состояние таблиц: id → { keys, cells }. Нужно, чтобы менять ячейки точечно.
@@ -220,7 +220,7 @@ function render(s) {
         when(p.since), secs(now - new Date(p.since).getTime()),
         '<span class="ip">' + esc(p.ip) + '</span>',
         '<div class="act"><select data-ip="' + esc(p.ip) + '" class="rankPick">' +
-          ['', 'admin', 'creator'].map(v => '<option value="' + v + '"' + (v === (p.rank || '') ? ' selected' : '') + '>' +
+          ['', 'moderator', 'admin'].map(v => '<option value="' + v + '"' + (v === (p.rank || '') ? ' selected' : '') + '>' +
             (RANKS[v] || 'Игрок') + '</option>').join('') + '</select>' +
           (p.banned
             ? '<button class="unbanBtn" data-ip="' + esc(p.ip) + '">Разбанить</button>'

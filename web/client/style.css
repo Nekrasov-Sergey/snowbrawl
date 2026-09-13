@@ -537,9 +537,9 @@ html.ingame #pageBody { display: none; } /* в бою чат недоступе�
 .chatRow .chatT { color: #4b6a8a; font-size: 11px; }
 .chatRow .chatN { color: #7fd4ff; }
 .chatRow.mine .chatN { color: #7CFFB2; }
-/* Роли модерации: создатель — золотой, админ — фиолетовый. Цвет только у ника. */
-.rank-creator { color: #ffc94d !important; text-shadow: 0 0 6px rgba(255,201,77,0.35); }
-.rank-admin { color: #b478ff !important; }
+/* Роли модерации: админ — золотой, модератор — фиолетовый. Цвет только у ника. */
+.rank-admin { color: #ffc94d !important; text-shadow: 0 0 6px rgba(255,201,77,0.35); }
+.rank-moderator { color: #b478ff !important; }
 .chatDel {
   background: none; border: none; color: #4b6a8a; cursor: pointer; font-size: 12px;
   padding: 0 4px; margin-left: 4px; line-height: 1;

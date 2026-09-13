@@ -74,9 +74,9 @@ const (
 // и на права в чате. ВНИМАНИЕ: это НЕ поле Role у RoomPlayer/MatchPlayer — там класс бойца
 // («Раннер»). Роль модерации везде называется rank именно поэтому.
 const (
-	RankPlayer  = ""        // обычный игрок: записи в сторе нет
-	RankAdmin   = "admin"   // удаляет сообщения обычных игроков
-	RankCreator = "creator" // удаляет любые сообщения, забанить его нельзя
+	RankPlayer    = ""          // обычный игрок: записи в сторе нет
+	RankModerator = "moderator" // удаляет сообщения обычных игроков
+	RankAdmin     = "admin"     // удаляет любые сообщения, забанить его нельзя
 )
 
 // Коды ошибок в SError.
@@ -127,7 +127,7 @@ type Welcome struct {
 	Proto      int    `json:"proto"`
 	Draining   bool   `json:"draining,omitempty"`
 	Online     int    `json:"online"`         // сколько игроков сейчас на сервере, включая этого
-	Rank       string `json:"rank,omitempty"` // роль модерации этого игрока (RankAdmin/RankCreator)
+	Rank       string `json:"rank,omitempty"` // роль модерации этого игрока (RankModerator/RankAdmin)
 	// Куда клиент должен вернуться после реконнекта: "menu" | "room" | "match".
 	Resume string `json:"resume"`
 }

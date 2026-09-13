@@ -59,7 +59,7 @@ func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.St
 	return srv, h, mod, stop
 }
 
-// Вход в админку по роли «Создатель»: токен ему не выдаётся, пускаем по адресу запроса.
+// Вход в админку по роли «Админ»: токен ему не выдаётся, пускаем по адресу запроса.
 func TestCreatorEntersWithoutToken(t *testing.T) {
 	srv, _, mod, _ := newAdminWithStore(t)
 
@@ -73,7 +73,7 @@ func TestCreatorEntersWithoutToken(t *testing.T) {
 	}
 
 	// httptest слушает loopback, поэтому адрес запроса — 127.0.0.1.
-	if err := mod.SetRank("127.0.0.1", protocol.RankCreator, "Хозяин", time.Now()); err != nil {
+	if err := mod.SetRank("127.0.0.1", protocol.RankAdmin, "Хозяин", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	res2, err := http.Get(srv.URL + "/admin/state")
@@ -82,11 +82,11 @@ func TestCreatorEntersWithoutToken(t *testing.T) {
 	}
 	defer res2.Body.Close()
 	if res2.StatusCode != http.StatusOK {
-		t.Fatalf("создателя должно пускать без токена, получен %d", res2.StatusCode)
+		t.Fatalf("админа должно пускать без токена, получен %d", res2.StatusCode)
 	}
 
-	// «Админ» — не «Создатель»: доступа к странице у него нет.
-	if err := mod.SetRank("127.0.0.1", protocol.RankAdmin, "Аня", time.Now()); err != nil {
+	// «Модератор» — не «Админ»: доступа к странице у него нет.
+	if err := mod.SetRank("127.0.0.1", protocol.RankModerator, "Аня", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	res3, err := http.Get(srv.URL + "/admin/state")
@@ -99,7 +99,7 @@ func TestCreatorEntersWithoutToken(t *testing.T) {
 	}
 
 	// Подделка адреса заголовком не работает: trustProxy выключен.
-	if err := mod.SetRank("10.1.2.3", protocol.RankCreator, "", time.Now()); err != nil {
+	if err := mod.SetRank("10.1.2.3", protocol.RankAdmin, "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/state", nil)

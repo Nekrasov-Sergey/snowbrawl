@@ -118,27 +118,27 @@ func TestRankPushedAndSeenInChatAndLobby(t *testing.T) {
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
 
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankAdmin, "Аня", time.Now()); err != nil {
+	if err := s.mod.SetRank("127.0.0.1", protocol.RankModerator, "Аня", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	s.hub.ApplyRank("127.0.0.1")
 	var upd protocol.RankUpdate
 	a.expect(protocol.SRank, &upd)
-	if upd.Rank != protocol.RankAdmin {
+	if upd.Rank != protocol.RankModerator {
 		t.Fatalf("роль в пуше: %q", upd.Rank)
 	}
 
 	a.send(protocol.CChatSend, protocol.ChatSend{Text: "привет"})
 	var m protocol.ChatMessage
 	b.expect(protocol.SChatMsg, &m)
-	if m.Rank != protocol.RankAdmin || m.PID != a.ID {
+	if m.Rank != protocol.RankModerator || m.PID != a.ID {
 		t.Fatalf("сообщение без роли или автора: %+v", m)
 	}
 
 	a.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
 	var st protocol.RoomState
 	a.expect(protocol.SRoomState, &st)
-	if len(st.Players) != 1 || st.Players[0].Rank != protocol.RankAdmin {
+	if len(st.Players) != 1 || st.Players[0].Rank != protocol.RankModerator {
 		t.Fatalf("роль в лобби: %+v", st.Players)
 	}
 
@@ -157,7 +157,7 @@ func TestChatDeleteRights(t *testing.T) {
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 0 })
 	a := s.connect(t, "Аня", "")  // станет админом
 	b := s.connect(t, "Боря", "") // обычный игрок
-	c := s.connect(t, "Вика", "") // станет создателем
+	c := s.connect(t, "Вика", "") // станет админом
 
 	// Роль по IP одна на всех в тесте, поэтому проверяем правила по одному, меняя роль.
 	send := func(cl *client, text string) protocol.ChatMessage {
@@ -196,22 +196,22 @@ func TestChatDeleteRights(t *testing.T) {
 		t.Fatalf("код %q, ожидался not_allowed", e.Code)
 	}
 
-	// 3. Админ не может удалить сообщение другого админа. Роль в тесте одна на IP, поэтому
-	// «админ удаляет обычного игрока» проверяется отдельно в TestCanDeleteChatRules, где
+	// 3. Модератор не может удалить сообщение другого модератора. Роль в тесте одна на IP, поэтому
+	// «модератор удаляет обычного игрока» проверяется отдельно в TestCanDeleteChatRules, где
 	// адреса разные.
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankAdmin, "Аня", time.Now()); err != nil {
+	if err := s.mod.SetRank("127.0.0.1", protocol.RankModerator, "Аня", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	s.hub.ApplyRank("127.0.0.1")
-	adminMsg := send(b, "сообщение админа")
+	adminMsg := send(b, "сообщение модератора")
 	a.send(protocol.CChatDel, protocol.ChatDel{ID: adminMsg.ID})
 	a.expect(protocol.SError, &e)
 	if e.Code != protocol.ErrNotAllowed {
-		t.Fatalf("код %q, ожидался not_allowed на сообщение админа", e.Code)
+		t.Fatalf("код %q, ожидался not_allowed на сообщение модератора", e.Code)
 	}
 
-	// 4. Создатель удаляет сообщение админа.
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankCreator, "Вика", time.Now()); err != nil {
+	// 4. Админ удаляет сообщение модератора.
+	if err := s.mod.SetRank("127.0.0.1", protocol.RankAdmin, "Вика", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	s.hub.ApplyRank("127.0.0.1")

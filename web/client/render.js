@@ -209,7 +209,7 @@ window.SBRender = (function () {
     var names = null; // карта id → ник из состава матча (match.start / match.roster)
     var ranks = null; // карта id → роль модерации: ник рисуется её цветом
     // Роли модерации в бою: на белом снегу цветной ник читается только с тёмной обводкой.
-    var RANK_COLORS = { creator: '#ffc94d', admin: '#b478ff' };
+    var RANK_COLORS = { admin: '#ffc94d', moderator: '#b478ff' };
     function nickOf(p) { return (names && names[p.id]) || p.nick; }
     function rankOf(p) { return (ranks && ranks[p.id]) || ''; }
     // Масштаб риг-модели: тем же множителем считается её высота (Rig.topOf), чтобы подпись
@@ -300,7 +300,7 @@ window.SBRender = (function () {
       oc.width = Math.max(1, Math.round(w * RS)); oc.height = Math.max(1, Math.round(h * RS));
       c = oc.getContext('2d'); c.setTransform(RS, 0, 0, RS, 0, 0); c.textAlign = 'center';
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
-      // Роль модерации перебивает цвет принадлежности: создателя и админа видно по нику, а
+      // Роль модерации перебивает цвет принадлежности: админа и модератора видно по нику, а
       // сторону всё равно показывает полоска под ним.
       c.lineWidth = 2.5; c.strokeStyle = '#0b1622'; c.strokeText(nick, w / 2, NICK_H - 2);
       c.fillStyle = RANK_COLORS[rank] || col;
