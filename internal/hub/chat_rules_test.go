@@ -21,15 +21,15 @@ func TestCanDeleteChatRules(t *testing.T) {
 	}
 	now := time.Now()
 	const (
-		playerIP  = "10.0.0.1"
-		adminIP   = "10.0.0.2"
-		admin2IP  = "10.0.0.3"
-		creatorIP = "10.0.0.4"
+		playerIP = "10.0.0.1"
+		modIP    = "10.0.0.2"
+		mod2IP   = "10.0.0.3"
+		adminIP  = "10.0.0.4"
 	)
 	for ip, rank := range map[string]string{
-		adminIP:   protocol.RankAdmin,
-		admin2IP:  protocol.RankAdmin,
-		creatorIP: protocol.RankCreator,
+		modIP:   protocol.RankModerator,
+		mod2IP:  protocol.RankModerator,
+		adminIP: protocol.RankAdmin,
 	} {
 		if err := mod.SetRank(ip, rank, "", now); err != nil {
 			t.Fatal(err)
@@ -38,9 +38,9 @@ func TestCanDeleteChatRules(t *testing.T) {
 	h := &Hub{mod: mod}
 
 	player := &session.Player{ID: "p1", IP: playerIP}
-	admin := &session.Player{ID: "p2", IP: adminIP}
-	admin2 := &session.Player{ID: "p3", IP: admin2IP}
-	creator := &session.Player{ID: "p4", IP: creatorIP}
+	moder := &session.Player{ID: "p2", IP: modIP}
+	moder2 := &session.Player{ID: "p3", IP: mod2IP}
+	admin := &session.Player{ID: "p4", IP: adminIP}
 
 	msg := func(author *session.Player) chatEntry {
 		return chatEntry{msg: protocol.ChatMessage{ID: 1, PID: author.ID}, authorIP: author.IP}
@@ -53,13 +53,13 @@ func TestCanDeleteChatRules(t *testing.T) {
 		want    bool
 	}{
 		{"игрок удаляет своё", player, msg(player), true},
-		{"игрок удаляет чужое", player, msg(admin), false},
+		{"игрок удаляет чужое", player, msg(moder), false},
+		{"модератор удаляет игрока", moder, msg(player), true},
+		{"модератор удаляет своё", moder, msg(moder), true},
+		{"модератор удаляет другого модератора", moder, msg(moder2), false},
+		{"модератор удаляет админа", moder, msg(admin), false},
+		{"админ удаляет модератора", admin, msg(moder), true},
 		{"админ удаляет игрока", admin, msg(player), true},
-		{"админ удаляет своё", admin, msg(admin), true},
-		{"админ удаляет другого админа", admin, msg(admin2), false},
-		{"админ удаляет создателя", admin, msg(creator), false},
-		{"создатель удаляет админа", creator, msg(admin), true},
-		{"создатель удаляет игрока", creator, msg(player), true},
 	}
 	for _, c := range cases {
 		if got := h.canDeleteChat(c.deleter, c.entry); got != c.want {
@@ -67,11 +67,11 @@ func TestCanDeleteChatRules(t *testing.T) {
 		}
 	}
 
-	// Роль автора берётся актуальная: снятие роли с админа делает его сообщения удаляемыми.
-	if err := mod.SetRank(admin2IP, protocol.RankPlayer, "", now); err != nil {
+	// Роль автора берётся актуальная: снятие роли с модератора делает его сообщения удаляемыми.
+	if err := mod.SetRank(mod2IP, protocol.RankPlayer, "", now); err != nil {
 		t.Fatal(err)
 	}
-	if !h.canDeleteChat(admin, msg(admin2)) {
-		t.Error("после снятия роли сообщение должно стать удаляемым для админа")
+	if !h.canDeleteChat(moder, msg(moder2)) {
+		t.Error("после снятия роли сообщение должно стать удаляемым для модератора")
 	}
 }

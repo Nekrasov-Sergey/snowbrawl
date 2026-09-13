@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 )
 
 func testLog() zerolog.Logger { return zerolog.New(io.Discard) }
@@ -119,16 +121,61 @@ func TestBrokenFileIsMovedAside(t *testing.T) {
 	}
 }
 
+// Файл версии 1 знал роли «admin» (младшая) и «creator» (старшая). Версия 2 переименовала их в
+// «moderator» и «admin»: перевод обязан случиться при открытии, иначе владелец сервера теряет
+// доступ в админку, а прежний админ получает полные права.
+func TestMigratesRanksFromVersion1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "moderation.json")
+	old := `{"version":1,"ranks":[
+		{"ip":"10.0.0.1","rank":"admin","nick":"Аня","since":"2026-01-01T00:00:00Z"},
+		{"ip":"10.0.0.2","rank":"creator","nick":"Вика","since":"2026-01-01T00:00:00Z"}
+	],"bans":[{"ip":"10.0.0.3","at":"2026-01-01T00:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Rank("10.0.0.1") != protocol.RankModerator {
+		t.Fatalf("прежний admin должен стать модератором, получено %q", s.Rank("10.0.0.1"))
+	}
+	if s.Rank("10.0.0.2") != protocol.RankAdmin {
+		t.Fatalf("прежний creator должен стать админом, получено %q", s.Rank("10.0.0.2"))
+	}
+	if !s.Banned("10.0.0.3") {
+		t.Fatal("баны миграция терять не должна")
+	}
+	// Файл переписан на месте: следующий запуск (в том числе старой сборки) читает уже новые роли.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"version": 2`) {
+		t.Fatalf("версия файла не поднята: %s", data)
+	}
+	if strings.Contains(string(data), "creator") {
+		t.Fatalf("старая роль осталась в файле: %s", data)
+	}
+	s2, err := Open(path, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Rank("10.0.0.1") != protocol.RankModerator || s2.Rank("10.0.0.2") != protocol.RankAdmin {
+		t.Fatal("после перечитывания роли должны остаться новыми")
+	}
+}
+
 func TestEmptyPathIsMemoryOnly(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open("", testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetRank("10.0.0.5", "creator", "Вика", time.Now()); err != nil {
+	if err := s.SetRank("10.0.0.5", "admin", "Вика", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if s.Rank("10.0.0.5") != "creator" {
+	if s.Rank("10.0.0.5") != "admin" {
 		t.Fatal("роль должна работать и без файла")
 	}
 	ents, _ := os.ReadDir(dir)

@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 )
 
 // Entry — выданная роль. Обычный игрок записи не имеет.
@@ -44,7 +46,10 @@ type file struct {
 	Bans    []Ban   `json:"bans"`
 }
 
-const fileVersion = 1
+// Версия 2 переименовала роли: прежний «admin» (удаляет сообщения обычных игроков) стал
+// «moderator», а прежний «creator» (удаляет любые, забанить нельзя) — «admin». Файлы версии 1
+// переводятся при открытии, см. migrateRanks.
+const fileVersion = 2
 
 // Store — роли и баны. Все методы безопасны на nil-приёмнике: так hub и тесты обходятся без
 // проверок, а сервер может работать вообще без файла.
@@ -90,6 +95,16 @@ func Open(path string, log zerolog.Logger) (*Store, error) {
 			s.ranks[e.IP] = e
 		}
 	}
+	if f.Version < 2 {
+		// Файл со старыми названиями ролей: переводим и сразу переписываем, иначе владелец
+		// сервера потерял бы доступ в админку, а прежние админы молча получили бы полные права.
+		if n := s.migrateRanks(); n > 0 {
+			if err := s.save(); err != nil {
+				log.Error().Err(err).Str("path", path).Msg("moderation: роли переведены, но файл не записан")
+			}
+		}
+		log.Info().Int("ranks", len(s.ranks)).Str("path", path).Msg("moderation: файл переведён на версию 2 (creator→admin, admin→moderator)")
+	}
 	for _, b := range f.Bans {
 		if b.IP != "" {
 			s.bans[b.IP] = b
@@ -97,6 +112,29 @@ func Open(path string, log zerolog.Logger) (*Store, error) {
 	}
 	log.Info().Int("ranks", len(s.ranks)).Int("bans", len(s.bans)).Str("path", path).Msg("moderation: список загружен")
 	return s, nil
+}
+
+// migrateRanks переводит роли файла версии 1 в нынешние названия. Порядок важен: «admin»
+// меняет смысл, поэтому сначала он уезжает в «moderator» и только потом «creator» занимает
+// освободившееся имя. Незнакомые значения оставляем как есть — их никто не выдавал.
+// Вызывать до того, как стор отдан наружу (в Open), поэтому мьютекс не нужен.
+func (s *Store) migrateRanks() int {
+	n := 0
+	for ip, e := range s.ranks {
+		var to string
+		switch e.Rank {
+		case "admin":
+			to = protocol.RankModerator
+		case "creator":
+			to = protocol.RankAdmin
+		default:
+			continue
+		}
+		e.Rank = to
+		s.ranks[ip] = e
+		n++
+	}
+	return n
 }
 
 // Rank возвращает роль адреса; пустая строка — обычный игрок.

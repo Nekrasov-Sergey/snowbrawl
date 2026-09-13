@@ -29,7 +29,7 @@ type Info struct {
 //
 // mod может быть nil — тогда ручки ролей и банов отвечают ошибкой, а игра работает как раньше.
 // trustProxy определяет, верить ли X-Forwarded-For при проверке роли по адресу (см. вход по роли
-// «Создатель» ниже) — то же правило, что у игрового WebSocket.
+// «Админ» ниже) — то же правило, что у игрового WebSocket.
 func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token string, started time.Time, trustProxy bool) func() {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "build": info.Build, "uptime": time.Since(started).Round(time.Second).String()})
@@ -46,7 +46,7 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 	if token == "" {
 		return func() {}
 	}
-	// Пускаем по токену (им ходят deploy.sh и человек со ссылкой) либо по роли «Создатель»:
+	// Пускаем по токену (им ходят deploy.sh и человек со ссылкой) либо по роли «Админ»:
 	// у него кнопка «Админка» есть прямо в меню игры, и токен ему выдавать незачем. Защита
 	// получается ровно такой же, как у самой роли, — она тоже по адресу.
 	g := r.Group("/admin", func(c *gin.Context) {
@@ -57,7 +57,7 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 		if got == token {
 			return
 		}
-		if mod.Rank(ws.ClientIP(c.Request, trustProxy)) == protocol.RankCreator {
+		if mod.Rank(ws.ClientIP(c.Request, trustProxy)) == protocol.RankAdmin {
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bad token"})
@@ -168,7 +168,7 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 			return
 		}
 		switch req.Rank {
-		case protocol.RankPlayer, protocol.RankAdmin, protocol.RankCreator:
+		case protocol.RankPlayer, protocol.RankModerator, protocol.RankAdmin:
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "bad rank"})
 			return
@@ -189,8 +189,8 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 			c.JSON(http.StatusBadRequest, gin.H{"error": "bad ip"})
 			return
 		}
-		if mod.Rank(req.IP) == protocol.RankCreator {
-			c.JSON(http.StatusConflict, gin.H{"error": "нельзя забанить создателя: сначала снимите роль"})
+		if mod.Rank(req.IP) == protocol.RankAdmin {
+			c.JSON(http.StatusConflict, gin.H{"error": "нельзя забанить админа: сначала снимите роль"})
 			return
 		}
 		if err := mod.Ban(req.IP, nickByIP(h, req.IP), req.Reason, time.Now()); err != nil {

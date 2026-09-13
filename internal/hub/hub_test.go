@@ -48,7 +48,8 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
-	cfg.TickRate = 40 // быстрее, чтобы тесты не ждали
+	cfg.TickRate = 40   // быстрее, чтобы тесты не ждали
+	cfg.Seed = 20260914 // бой воспроизводим: роли ботов и разброс в симуляции одни и те же
 	cfg.ReconnectTTL = 2 * time.Second
 	cfg.AFKTimeout = 0 // в тестах не трогаем
 	if mutate != nil {
@@ -436,8 +437,12 @@ func (cl *client) waitBall(wait time.Duration, team string) bool {
 
 // TestMatchEndsWithKO — бой до KO и сообщение match.end. Чтобы это не было лотереей:
 // отсчёт выключен, бот самого слабого уровня (уклоняется в 10 % случаев вместо 62 %), игрок
-// играет Раннером (перезарядка 500 мс) и целится по снапшотам с силой, посчитанной по
-// дистанции. Всё в одной горутине: второй читатель inbox мог бы проглотить сам match.end.
+// играет Раннером (перезарядка 500 мс), зерно случайности задано в newServer (роль бота и
+// разброс в симуляции одни и те же), а замах отсчитывается по модельному времени из снапшота,
+// а не по настенным часам. Настенные часы тут врали: тикер матча роняет тики под -race, модельное
+// время отстаёт, сервер считает силу сам и отвергает заявленную при расхождении больше 0.25
+// (sim.js, applyInput) — броски уходили слабее и не долетали, а тест падал по таймауту.
+// Всё в одной горутине: второй читатель inbox мог бы проглотить сам match.end.
 func TestMatchEndsWithKO(t *testing.T) {
 	s := newServer(t, func(c *config.Config) { c.Countdown = 0 })
 	p := s.connect(t, "Игрок", "")
@@ -454,25 +459,46 @@ func TestMatchEndsWithKO(t *testing.T) {
 	p.expect(protocol.SMatchStart, &ms)
 
 	type snapPlayer struct {
-		ID   string  `json:"id"`
-		Team string  `json:"team"`
-		X    float64 `json:"x"`
-		Y    float64 `json:"y"`
-		RL   float64 `json:"rl"`
-		Stun float64 `json:"stun"`
-		Koed bool    `json:"koed"`
-		K    int     `json:"k"`
+		ID       string  `json:"id"`
+		Team     string  `json:"team"`
+		Role     string  `json:"role"`
+		X        float64 `json:"x"`
+		Y        float64 `json:"y"`
+		HP       int     `json:"hp"`
+		RL       float64 `json:"rl"`
+		Stun     float64 `json:"stun"`
+		Koed     bool    `json:"koed"`
+		K        int     `json:"k"`
+		Charging bool    `json:"charging"`
+		Power    float64 `json:"power"`
+	}
+	// Сила заряда по дистанции: снежок улетает ровно на 140 + power*380 (throwKinematics
+	// в sim.js) и по дороге бьёт только пока не поднялся выше HIT_Z, поэтому дальность
+	// подгоняем под цель, а не берём максимум. +20 — запас за спину цели.
+	powerFor := func(dist float64) float64 {
+		return math.Min(1, math.Max(0, (dist+20-140)/380))
 	}
 	var lastPlayers []snapPlayer // снапшот перед match.end — по нему клиент строит плашку итогов
 	var end protocol.MatchEnd
-	deadline := time.After(60 * time.Second)
-	var throwAt time.Time // когда отпускать замах; ноль — замаха нет
-	var aimX, aimY float64
+	// Настенный дедлайн — только страховка от зависания: судим по модельному времени, оно одно
+	// и определяет, сколько боя реально сыграно (под -race тики идут медленнее реального времени).
+	deadline := time.After(2 * time.Minute)
+	const modelLimit = 60000 // мс модельного времени на весь бой; матч по таймеру длится 5 минут
+	// aiming — замах идёт, wantPower — сила, до которой копим. Флаг отдельно от силы: у цели
+	// вплотную нужная сила равна нулю, и по одному wantPower замах было бы не отличить от его
+	// отсутствия — тест копил бы его вечно.
+	aiming := false
+	var wantPower float64
+	var prevX, prevY, prevT float64
+	var modelTime float64
+	var throws int
+	var botRole string
 	got := false
 	for !got {
 		select {
 		case <-deadline:
-			t.Fatal("матч не закончился за 60 секунд")
+			t.Fatalf("матч не закончился: модельное время %.0f мс, бросков %d, бот %q",
+				modelTime, throws, botRole)
 		case env, ok := <-p.inbox:
 			if !ok {
 				t.Fatal("соединение закрылось до конца матча")
@@ -490,6 +516,7 @@ func TestMatchEndsWithKO(t *testing.T) {
 			case protocol.SSnapshot:
 				var snap struct {
 					S struct {
+						Time    float64      `json:"time"`
 						Players []snapPlayer `json:"players"`
 					} `json:"s"`
 				}
@@ -497,6 +524,7 @@ func TestMatchEndsWithKO(t *testing.T) {
 					continue
 				}
 				lastPlayers = snap.S.Players
+				modelTime = snap.S.Time
 				var me, enemy *snapPlayer
 				for i := range snap.S.Players {
 					q := &snap.S.Players[i]
@@ -509,27 +537,62 @@ func TestMatchEndsWithKO(t *testing.T) {
 				if me == nil || enemy == nil {
 					continue
 				}
-				if !throwAt.IsZero() { // замах идёт — ждём нужной силы и бросаем
-					if time.Now().After(throwAt) {
-						pw := math.Min(1, math.Max(0, (math.Hypot(aimX-me.X, aimY-me.Y)+20-140)/380))
-						p.send(protocol.CInput, protocol.Input{Kind: "throw", X: aimX, Y: aimY, Power: &pw})
-						throwAt = time.Time{}
-					}
+				botRole = enemy.Role
+				if modelTime > modelLimit {
+					t.Fatalf("бой не закончился за %d мс модельного времени: у меня %d HP, у бота %d HP, бот %q, бросков %d",
+						modelLimit, me.HP, enemy.HP, botRole, throws)
+				}
+				// Скорость соперника — по разнице двух снапшотов: в снапшоте её нет, а без
+				// упреждения бросок уходит туда, где бот уже не стоит.
+				var vx, vy float64
+				if dt := (snap.S.Time - prevT) / 1000; dt > 0 && dt < 0.5 && prevT > 0 {
+					vx, vy = (enemy.X-prevX)/dt, (enemy.Y-prevY)/dt
+				}
+				prevX, prevY, prevT = enemy.X, enemy.Y, snap.S.Time
+				if me.Koed {
 					continue
 				}
-				if me.RL > 0 || me.Stun > 0 || me.Koed {
-					continue // перезарядка, оглушение или уже выбит
-				}
+				// Держим дистанцию в полосе 150..240: вплотную снежок проходит над головой
+				// (минимальная дальность броска 140), а издали бой тянется и замахи сбивают.
 				dist := math.Hypot(enemy.X-me.X, enemy.Y-me.Y)
-				if dist > 340 { // дальше максимальной дальности броска (140 + 380) — сближаемся
-					p.send(protocol.CInput, protocol.Input{Kind: "move", X: enemy.X, Y: enemy.Y})
+				if dist > 240 || dist < 150 {
+					to := 200.0
+					k := (dist - to) / math.Max(dist, 1)
+					p.send(protocol.CInput, protocol.Input{Kind: "move",
+						X: me.X + (enemy.X-me.X)*k, Y: me.Y + (enemy.Y-me.Y)*k})
+				}
+				if aiming {
+					if !me.Charging {
+						aiming = false // замах сбили попаданием — бросать нечего, начнём заново
+						continue
+					}
+					if me.Power < wantPower {
+						continue // ещё копим; сервер считает силу сам по модельному времени
+					}
+					// Целимся в точку, куда соперник придёт к прилёту снежка, и отпускаем на
+					// той силе, которую сервер видит сам, — тогда заявленная сходится с его.
+					flight := 0.4 + me.Power*0.35
+					tx, ty := enemy.X+vx*flight, enemy.Y+vy*flight
+					d := math.Hypot(tx-me.X, ty-me.Y)
+					if d < 1 {
+						d = 1
+					}
+					travel := 140 + me.Power*380
+					pw := me.Power
+					p.send(protocol.CInput, protocol.Input{Kind: "throw",
+						X: me.X + (tx-me.X)/d*travel, Y: me.Y + (ty-me.Y)/d*travel, Power: &pw})
+					aiming = false
+					throws++
 					continue
 				}
-				aimX, aimY = enemy.X, enemy.Y
-				// Сила по дистанции — та же формула, что у ИИ (updateAI в sim.js).
-				power := math.Min(1, math.Max(0, (math.Hypot(aimX-me.X, aimY-me.Y)+20-140)/380))
-				p.send(protocol.CInput, protocol.Input{Kind: "chargeStart", X: aimX, Y: aimY})
-				throwAt = time.Now().Add(time.Duration(power*1200+60) * time.Millisecond)
+				if me.RL > 0 || me.Stun > 0 {
+					continue // перезарядка или оглушение
+				}
+				flight := 0.4 + powerFor(dist)*0.35
+				wantPower = powerFor(math.Hypot(enemy.X+vx*flight-me.X, enemy.Y+vy*flight-me.Y))
+				aiming = true
+				p.send(protocol.CInput, protocol.Input{Kind: "chargeStart",
+					X: enemy.X + vx*flight, Y: enemy.Y + vy*flight})
 			}
 		}
 	}
