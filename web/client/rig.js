@@ -632,6 +632,13 @@ window.SBRig = (function () {
     var g = GEAR[role] || GEAR["Раннер"];
     return 78 * (R / 46 * (scaleMul || 1) * (g.big || 1));
   }
+  /** Насколько ниже точки отрисовки стоят подошвы, в пикселях арены: якорь модели — середина
+      тела, а не ступни (бедро hipY 26 + голень 11 + стопа 12 + ботинок ≈ 58 локальных единиц).
+      Нужно куполу Щита, который обволакивает силуэт от подошв до макушки. */
+  function bottomOf(R, role, scaleMul) {
+    var g = GEAR[role] || GEAR["Раннер"];
+    return 58 * (R / 46 * (scaleMul || 1) * (g.big || 1));
+  }
 
-  return { drawFighter: drawModel, topOf: topOf, GEAR: GEAR, ROLES: Object.keys(GEAR) };
+  return { drawFighter: drawModel, topOf: topOf, bottomOf: bottomOf, GEAR: GEAR, ROLES: Object.keys(GEAR) };
 })();
