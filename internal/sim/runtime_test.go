@@ -2,24 +2,47 @@ package sim_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/dop251/goja"
 
 	snowbrawl "github.com/Nekrasov-Sergey/snowbrawl"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 )
 
-func loadProgram(t testing.TB) *sim.Program {
-	t.Helper()
+// Тесты пакета идут параллельно (t.Parallel в каждом), поэтому тяжёлое общее готовим один раз
+// в TestMain: sim.js — это 100 КБ, и компилировать их на каждый из двух десятков тестов незачем.
+// Переиспользовать *sim.Program безопасно: после Compile он только читается, а NewMatch создаёт
+// собственный goja-рантайм на каждый матч — так же живёт и сервер, один Program на все матчи.
+var (
+	sharedProgram *sim.Program
+	sharedAimJS   *goja.Program
+)
+
+func TestMain(m *testing.M) {
 	src, err := snowbrawl.Web.ReadFile(snowbrawl.SimPath)
 	if err != nil {
-		t.Fatalf("read sim.js: %v", err)
+		fmt.Fprintf(os.Stderr, "read sim.js: %v\n", err)
+		os.Exit(1)
 	}
-	p, err := sim.Compile(src)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
+	if sharedProgram, err = sim.Compile(src); err != nil {
+		fmt.Fprintf(os.Stderr, "compile sim.js: %v\n", err)
+		os.Exit(1)
 	}
-	return p
+	if sharedAimJS, err = goja.Compile(snowbrawl.SimPath, string(src), true); err != nil {
+		fmt.Fprintf(os.Stderr, "compile sim.js for goja: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+func loadProgram(t testing.TB) *sim.Program {
+	t.Helper()
+	return sharedProgram
 }
 
 func botsConfig(mode int, roles []string) sim.MatchConfig {
@@ -50,6 +73,7 @@ type snap struct {
 // TestCancelCharge — отмена замаха: chargeStart → cancelCharge не бросает снежок,
 // повторный chargeStart принимается, cancelCharge без замаха отклоняется.
 func TestCancelCharge(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cfg := botsConfig(1, p.Roles())
 	cfg.Players[0].Bot = false
@@ -89,6 +113,7 @@ func TestCancelCharge(t *testing.T) {
 }
 
 func TestCompileExports(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	if p.Version() == "" || p.ArenaCount() < 1 || len(p.Roles()) < 6 {
 		t.Fatalf("bad program meta: %q %d %v", p.Version(), p.ArenaCount(), p.Roles())
@@ -116,6 +141,7 @@ func TestCompileExports(t *testing.T) {
 }
 
 func TestBotsOnlyMatchFinishes(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	m, err := p.NewMatch(botsConfig(3, p.Roles()), 42)
 	if err != nil {
@@ -126,7 +152,7 @@ func TestBotsOnlyMatchFinishes(t *testing.T) {
 		if _, err := m.Step(dt); err != nil {
 			t.Fatal(err)
 		}
-		if m.IsOver() {
+		if i%10 == 0 && m.IsOver() { // IsOver — вызов в JS: на каждом шаге он дороже самого шага
 			break
 		}
 	}
@@ -148,6 +174,7 @@ func TestBotsOnlyMatchFinishes(t *testing.T) {
 }
 
 func TestDeterministic(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	run := func() string {
 		m, err := p.NewMatch(botsConfig(2, p.Roles()), 7)
@@ -169,6 +196,7 @@ func TestDeterministic(t *testing.T) {
 }
 
 func TestHumanInputAndBotToggle(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cfg := botsConfig(1, p.Roles())
 	cfg.Players[0].Bot = false
@@ -250,6 +278,7 @@ type pveSnap struct {
 // Эндлесс + одинокий боец на «Сложном»: волны рано или поздно его выносят (wiped),
 // и это не зависит от того, добьют ли боты босса.
 func TestPveWaveMode(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	endless := false
 	cfg := sim.MatchConfig{GameMode: "survival", Mode: 1, Difficulty: 2, Campaign: &endless}
@@ -260,9 +289,12 @@ func TestPveWaveMode(t *testing.T) {
 	}
 	sawEnemy, sawFighting, sawPve := false, false, false
 	const dt = 1.0 / 20
-	for i := 0; i < 20*600 && !m.IsOver(); i++ {
+	for i := 0; i < 20*600; i++ {
 		if _, err := m.Step(dt); err != nil {
 			t.Fatalf("step %d: %v", i, err)
+		}
+		if i%10 == 0 && m.IsOver() { // IsOver — вызов в JS, на каждом шаге он лишний
+			break
 		}
 		if i%20 != 0 {
 			continue
@@ -303,22 +335,42 @@ func TestPveWaveMode(t *testing.T) {
 
 // TestPveDeterministic — один сид + урезанная кампания дают байт-идентичный снапшот.
 func TestPveDeterministic(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
-	run := func() string {
-		m, err := p.NewMatch(pveConfig("defense", 3, p.Roles()), 5)
+	// Оба прогона одинаковы по построению, поэтому гоняем их одновременно: PvE-шаг самый
+	// дорогой в пакете, и последовательно этот тест был самым долгим. Матчи независимы —
+	// у каждого свой рантайм, — а t.Fatal из горутины звать нельзя, поэтому ошибки собираем.
+	var (
+		out  [2]string
+		errs [2]error
+		wg   sync.WaitGroup
+	)
+	for i := range out {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m, err := p.NewMatch(pveConfig("defense", 3, p.Roles()), 5)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			for s := 0; s < 20*45; s++ {
+				if _, err := m.Step(1.0 / 20); err != nil {
+					errs[i] = err
+					return
+				}
+			}
+			raw, _ := m.Snapshot()
+			out[i] = string(raw)
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for i := 0; i < 20*45; i++ {
-			if _, err := m.Step(1.0 / 20); err != nil {
-				t.Fatal(err)
-			}
-		}
-		raw, _ := m.Snapshot()
-		return string(raw)
 	}
-	first, second := run(), run()
-	if first != second {
+	if out[0] != out[1] {
 		t.Fatal("same seed produced different pve snapshots")
 	}
 }
@@ -358,23 +410,45 @@ func BenchmarkFullLoad(b *testing.B) {
 // TestTutorialMode — правила режима обучения: состав из одного бойца, матч не заканчивается
 // ни по таймеру, ни по KO, боец-человек не опускается ниже 1 HP, соперник ставится и убирается.
 func TestTutorialMode(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
-	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true,
-		Players: []sim.PlayerConfig{{ID: "me", Team: "A", Role: p.Roles()[0], Bot: false}}}
-	m, err := p.NewMatch(cfg, 7)
-	if err != nil {
-		t.Fatalf("tutorial match with a single fighter must be allowed: %v", err)
-	}
-	// Пять минут — штатный таймер PvP; в обучении он не срабатывает.
-	for i := 0; i < 20*60*6; i++ {
-		if _, err := m.Step(1.0 / 20); err != nil {
-			t.Fatal(err)
+	newTutorial := func(t *testing.T) *sim.Match {
+		t.Helper()
+		cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true,
+			Players: []sim.PlayerConfig{{ID: "me", Team: "A", Role: p.Roles()[0], Bot: false}}}
+		m, err := p.NewMatch(cfg, 7)
+		if err != nil {
+			t.Fatalf("tutorial match with a single fighter must be allowed: %v", err)
 		}
-	}
-	if m.IsOver() {
-		t.Fatal("tutorial match must not end by timer")
+		return m
 	}
 
+	// Две независимые проверки на отдельных матчах: так они идут одновременно, а вместе они
+	// были самым долгим тестом пакета.
+	t.Run("матч не заканчивается по таймеру", func(t *testing.T) {
+		t.Parallel()
+		m := newTutorial(t)
+		// Штатный таймер PvP — пять минут; проходим его с запасом в полминуты.
+		for i := 0; i < 20*330; i++ {
+			if _, err := m.Step(1.0 / 20); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if m.IsOver() {
+			t.Fatal("tutorial match must not end by timer")
+		}
+	})
+
+	t.Run("человек не ниже 1 HP", func(t *testing.T) {
+		t.Parallel()
+		testTutorialFloor(t, newTutorial(t))
+	})
+}
+
+// testTutorialFloor — соперник бьёт ученика, но HP упирается в 1, KO не случается,
+// а после TutorialRemove соперник исчезает из снапшота.
+func testTutorialFloor(t *testing.T, m *sim.Match) {
+	t.Helper()
 	id, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Снайпер", X: 320, Y: 200, BotLevel: 2, Bot: true})
 	if err != nil {
 		t.Fatal(err)
@@ -426,6 +500,7 @@ func TestTutorialMode(t *testing.T) {
 // TestTutorialLockEnemy — на последнем шаге соперника нельзя добить обычным попаданием,
 // пока держится замок; после tutorialLock(false) следующее попадание его выносит.
 func TestTutorialLockEnemy(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true,
 		Players: []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Снайпер", Bot: false}}}
@@ -470,12 +545,12 @@ func TestTutorialLockEnemy(t *testing.T) {
 	fire := func(pw float64) {
 		m.ApplyInput("me", json.RawMessage(`{"kind":"chargeStart","x":560,"y":150}`))
 		for i := 0; i < 9; i++ {
-			m.Step(1.0 / 20)
+			_, _ = m.Step(1.0 / 20)
 		}
 		body, _ := json.Marshal(map[string]any{"kind": "throw", "x": 560, "y": 150, "power": pw})
 		m.ApplyInput("me", body)
 		for i := 0; i < 16; i++ {
-			m.Step(1.0 / 20)
+			_, _ = m.Step(1.0 / 20)
 		}
 	}
 
@@ -511,6 +586,7 @@ func TestTutorialLockEnemy(t *testing.T) {
 // TestTutorialShortCooldown — в обучении способность возвращается за 2 секунды, а в обычном
 // матче держит свой полный кулдаун. Иначе шаг про способность превращается в ожидание.
 func TestTutorialShortCooldown(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cd := func(tutorial bool) float64 {
 		cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: tutorial}
@@ -561,6 +637,7 @@ func TestTutorialShortCooldown(t *testing.T) {
 // рабочей дистанции. Раньше ветка отхода выходила из ИИ до стрельбы, и Снайпер (minRange 260)
 // молча пятился от подошедшего игрока — в обучении и в PvP одинаково.
 func TestBotShootsWhileRetreating(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true}
 	cfg.Players = []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Танк"}}

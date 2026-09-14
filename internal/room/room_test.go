@@ -8,6 +8,7 @@ import (
 )
 
 func TestJoinLeaveAndHostTransfer(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "pvp"}, now)
 	if r.Capacity() != 4 {
@@ -44,6 +45,7 @@ func TestJoinLeaveAndHostTransfer(t *testing.T) {
 }
 
 func TestSlotsAndConfig(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	r := New("1234", "h", "1.1.1.1", Config{Mode: 3, GameMode: "pvp"}, now)
 	_ = r.Join("a")
@@ -86,6 +88,7 @@ func TestSlotsAndConfig(t *testing.T) {
 }
 
 func TestPveRoomCapacityAndPlacement(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	r := New("1234", "h", "1.1.1.1", Config{Mode: 4, GameMode: "survival", Campaign: true, Difficulty: 2}, now)
 	if !r.IsPvE() || r.Capacity() != 4 { // пати из 4, только команда A
@@ -117,6 +120,7 @@ func TestPveRoomCapacityAndPlacement(t *testing.T) {
 }
 
 func TestGenerateCode(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
 		c := GenerateCode()
@@ -131,6 +135,7 @@ func TestGenerateCode(t *testing.T) {
 }
 
 func TestReadyAndVisibility(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "pvp", Visibility: VisibilityClosed}, now)
 	if !r.IsClosed() || r.Section() != "pvp" {
@@ -182,6 +187,7 @@ func TestReadyAndVisibility(t *testing.T) {
 }
 
 func TestSlotsDuringMatch(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "pvp"}, now)
 	// Автоместо ведёт туда, где меньше людей (то есть больше ботов).

@@ -175,7 +175,7 @@ cd /opt/snowbrawl && ./deploy.sh v0.2.0     # или ./deploy.sh для latest
 | `SNOWBRAWL_MODERATION_FILE` | `/data/moderation.json` в compose | файл с ролями и банами по IP; пустой — только в памяти |
 | `SNOWBRAWL_ONLINE_FILE` | `/data/online.log` в compose | история онлайна для графика (точка в минуту, 30 дней); пустой — только в памяти |
 | `SNOWBRAWL_ROOMS_PER_IP` | 3 | живых комнат на IP |
-| `SNOWBRAWL_MSG_RATE` | 30 | сообщений/с на соединение |
+| `SNOWBRAWL_MSG_RATE` | 60 | сообщений/с на соединение; сверх лимита отбрасываются только `move`/`aim`, закрытие — при устойчивом превышении втрое (в логе `ws rate limit`) |
 | `SNOWBRAWL_DRAIN_TIMEOUT` | 3m | сколько показывать «до перезапуска» |
 
 ## Резервные копии

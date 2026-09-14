@@ -16,6 +16,7 @@ import (
 func testLog() zerolog.Logger { return zerolog.New(io.Discard) }
 
 func TestStorePersistsAcrossRestart(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "moderation.json")
 	now := time.Now().UTC().Truncate(time.Second)
 	s, err := Open(path, testLog())
@@ -65,6 +66,7 @@ func TestStorePersistsAcrossRestart(t *testing.T) {
 }
 
 func TestSaveIsAtomic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "moderation.json")
 	s, err := Open(path, testLog())
@@ -93,6 +95,7 @@ func TestSaveIsAtomic(t *testing.T) {
 }
 
 func TestBrokenFileIsMovedAside(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "moderation.json")
 	if err := os.WriteFile(path, []byte("{это не json"), 0o600); err != nil {
@@ -125,6 +128,7 @@ func TestBrokenFileIsMovedAside(t *testing.T) {
 // «moderator» и «admin»: перевод обязан случиться при открытии, иначе владелец сервера теряет
 // доступ в админку, а прежний админ получает полные права.
 func TestMigratesRanksFromVersion1(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "moderation.json")
 	old := `{"version":1,"ranks":[
 		{"ip":"10.0.0.1","rank":"admin","nick":"Аня","since":"2026-01-01T00:00:00Z"},
@@ -167,6 +171,7 @@ func TestMigratesRanksFromVersion1(t *testing.T) {
 }
 
 func TestEmptyPathIsMemoryOnly(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s, err := Open("", testLog())
 	if err != nil {
@@ -185,6 +190,7 @@ func TestEmptyPathIsMemoryOnly(t *testing.T) {
 }
 
 func TestNilStoreIsPlayerAndNotBanned(t *testing.T) {
+	t.Parallel()
 	var s *Store
 	if s.Rank("10.0.0.6") != "" || s.Banned("10.0.0.6") || s.Broken() {
 		t.Fatal("nil-стор: все без роли и без бана")

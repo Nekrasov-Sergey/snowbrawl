@@ -29,6 +29,10 @@
   </div>
   <h1 class="title">❄️ SNOWBRAWL</h1>
   <div id="drainBanner" hidden>⚠️ Сервер скоро перезапустится для обновления. Новые матчи не начинаются, текущие доигрываются.</div>
+  <div id="replacedBanner" hidden>
+    <span>Игра открыта ещё в одной вкладке — играть можно только в одной.</span>
+    <button id="takeOverBtn" type="button">Играть здесь</button>
+  </div>
 
   <!-- Ник -->
   <!-- Экраны вне боя и чат: на ПК это две колонки (см. #pageBody в style.css). Экран боя
@@ -216,7 +220,6 @@
         <div id="abilityBox">
           <button id="abilityBtn">Способность (Q)</button>
           <div id="abilityCd">готова</div>
-          <div id="reloadHud" hidden>перезарядка</div>
         </div>
         <div id="hudB" style="text-align:right">
           <div class="teamlabel b" id="teamBLabel">Команда B</div>

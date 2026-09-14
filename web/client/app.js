@@ -283,9 +283,15 @@
         if (state !== 'open') { app.ping.rtt = 0; app.ping.jitter = 0; }
         renderOnline(); renderConn();
         var el = $('connState');
-        el.className = state === 'open' ? 'on' : (state === 'closed' ? 'off' : '');
+        el.className = state === 'open' ? 'on' : (state === 'connecting' ? '' : 'off');
         el.title = state === 'open' ? 'Соединение установлено' : 'Нет соединения с сервером';
-        if (app.game && !app.game.offline) $('reconnectOverlay').hidden = (state === 'open');
+        // 'replaced' — сессию забрала другая вкладка. Переподключаться сами не будем (иначе
+        // вкладки вышибают друг друга по кругу), поэтому вместо «переподключаемся…» показываем
+        // плашку с выбором: играть здесь или уйти в ту вкладку.
+        $('replacedBanner').hidden = (state !== 'replaced');
+        if (app.game && !app.game.offline) {
+          $('reconnectOverlay').hidden = (state === 'open' || state === 'replaced');
+        }
       },
       onMessage: onMessage
     });
@@ -411,6 +417,11 @@
     }
   }
   function setDrain(active) { app.draining = active; $('drainBanner').hidden = !active; }
+  $('takeOverBtn').onclick = function () {
+    Audio_.uiClick();
+    $('replacedBanner').hidden = true;
+    if (app.net) app.net.takeOver(); else connect();
+  };
 
   // ------------------------------------------------------------
   // Ник и меню
@@ -1112,8 +1123,8 @@
   }
 
   // HUD пишется в DOM только при изменении: сигнатура составов/HP, секунда таймера, состояние способности.
-  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', rl: '', pve: '' };
-  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.rl = hudCache.pve = ''; }
+  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', pve: '' };
+  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.pve = ''; }
   function updateHUD(snap) {
     var me = myPlayer(snap);
     // Волновой HUD — только если клиент точно в PvE-матче. Иначе хвост snap.pve от прошлого
@@ -1151,14 +1162,6 @@
     var tm = fmtTime(snap.timeLeft);
     if (tm !== hudCache.timer) { hudCache.timer = tm; $('matchTimer').textContent = tm; }
 
-    // Перезарядка выстрела (обновляется каждый кадр, вне кэша способности).
-    var rlMs = me ? (Sim.RELOAD_MS[me.role] || 900) : 0;
-    var rlSec = me && me.rl > 0.02 ? (me.rl * rlMs / 1000).toFixed(1) : '';
-    if (rlSec !== hudCache.rl) {
-      hudCache.rl = rlSec;
-      var rh = $('reloadHud');
-      if (rh) { rh.hidden = !rlSec; if (rlSec) rh.textContent = 'перезарядка ' + rlSec + ' с'; }
-    }
     if (!me) return;
     var hasSpec = !!Sim.SPECIALS[me.role];
     var abil = (hasSpec ? '1' : '0') + (me.special ? 's' : '-') + (me.cd > 0 ? me.cd.toFixed(1) : '0');

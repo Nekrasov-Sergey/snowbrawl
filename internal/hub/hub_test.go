@@ -50,8 +50,15 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 	cfg := config.Defaults()
 	cfg.TickRate = 40   // быстрее, чтобы тесты не ждали
 	cfg.Seed = 20260914 // бой воспроизводим: роли ботов и разброс в симуляции одни и те же
-	cfg.ReconnectTTL = 2 * time.Second
-	cfg.AFKTimeout = 0 // в тестах не трогаем
+	cfg.AFKTimeout = 0  // в тестах не трогаем
+	// Ниже — тайминги, которые тест иначе просто пережидает. Ноль у любого из них означает
+	// боевое значение, поэтому прод они не задевают (см. config.Config). Тест, которому нужно
+	// именно боевое поведение, ставит своё через mutate — он вызывается после.
+	cfg.ReconnectTTL = 200 * time.Millisecond
+	cfg.Countdown = 0                          // отсчёт перед матчем: 3 с ожидания на каждый матч
+	cfg.TimeScale = 8                          // матч проигрывается в 8 раз быстрее, шаг симуляции тот же
+	cfg.HubTick = 20 * time.Millisecond        // фоновый цикл: TTL, списки комнат, ряд онлайна
+	cfg.PingProbeEvery = 50 * time.Millisecond // зонд задержки
 	if mutate != nil {
 		mutate(&cfg)
 	}
@@ -209,6 +216,7 @@ func (cl *client) waitRoom(what string, cond func(protocol.RoomState) bool) prot
 }
 
 func TestRoomMatchWithBotsToEnd(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
 	guest := s.connect(t, "Гость", "")
@@ -306,6 +314,7 @@ func (cl *client) snapshotPlayers(wait time.Duration) []struct {
 	HP       int     `json:"hp"`
 	Charging bool    `json:"charging"`
 	RL       float64 `json:"rl"`
+	Am       float64 `json:"am"`
 	Koed     bool    `json:"koed"`
 } {
 	cl.t.Helper()
@@ -320,6 +329,7 @@ func (cl *client) snapshotPlayers(wait time.Duration) []struct {
 				HP       int     `json:"hp"`
 				Charging bool    `json:"charging"`
 				RL       float64 `json:"rl"`
+				Am       float64 `json:"am"`
 				Koed     bool    `json:"koed"`
 			} `json:"players"`
 			Balls []struct {
@@ -335,6 +345,7 @@ func (cl *client) snapshotPlayers(wait time.Duration) []struct {
 // Ни боя, ни KO: только движение, замах и появившийся снежок. Отсчёт выключен, иначе ввод
 // первые три секунды отбрасывается сервером.
 func TestHumanInputReachesSim(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.Countdown = 0 })
 	p := s.connect(t, "Игрок", "")
 	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
@@ -357,6 +368,7 @@ func TestHumanInputReachesSim(t *testing.T) {
 		HP       int     `json:"hp"`
 		Charging bool    `json:"charging"`
 		RL       float64 `json:"rl"`
+		Am       float64 `json:"am"`
 		Koed     bool    `json:"koed"`
 	}) *struct {
 		ID       string  `json:"id"`
@@ -367,6 +379,7 @@ func TestHumanInputReachesSim(t *testing.T) {
 		HP       int     `json:"hp"`
 		Charging bool    `json:"charging"`
 		RL       float64 `json:"rl"`
+		Am       float64 `json:"am"`
 		Koed     bool    `json:"koed"`
 	} {
 		for i := range list {
@@ -444,6 +457,7 @@ func (cl *client) waitBall(wait time.Duration, team string) bool {
 // (sim.js, applyInput) — броски уходили слабее и не долетали, а тест падал по таймауту.
 // Всё в одной горутине: второй читатель inbox мог бы проглотить сам match.end.
 func TestMatchEndsWithKO(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.Countdown = 0 })
 	p := s.connect(t, "Игрок", "")
 	easy := 0
@@ -466,6 +480,7 @@ func TestMatchEndsWithKO(t *testing.T) {
 		Y        float64 `json:"y"`
 		HP       int     `json:"hp"`
 		RL       float64 `json:"rl"`
+		Am       float64 `json:"am"`
 		Stun     float64 `json:"stun"`
 		Koed     bool    `json:"koed"`
 		K        int     `json:"k"`
@@ -585,8 +600,8 @@ func TestMatchEndsWithKO(t *testing.T) {
 					throws++
 					continue
 				}
-				if me.RL > 0 || me.Stun > 0 {
-					continue // перезарядка или оглушение
+				if me.RL > 0 || me.Am < 1 || me.Stun > 0 {
+					continue // пауза между выстрелами, пустой запас или оглушение
 				}
 				flight := 0.4 + powerFor(dist)*0.35
 				wantPower = powerFor(math.Hypot(enemy.X+vx*flight-me.X, enemy.Y+vy*flight-me.Y))
@@ -627,6 +642,7 @@ func TestMatchEndsWithKO(t *testing.T) {
 }
 
 func TestPveRoomMatch(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
 
@@ -703,6 +719,7 @@ func TestPveRoomMatch(t *testing.T) {
 }
 
 func TestReconnectIntoMatch(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	p := s.connect(t, "Игрок", "")
 	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 1})
@@ -740,6 +757,7 @@ func TestReconnectIntoMatch(t *testing.T) {
 }
 
 func TestRoomListSectionsOrderAndPaging(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.RoomsPerIP = 100 })
 	// Три PvP-комнаты по очереди и одна PvE: список должен отдать только свой раздел
 	// и в порядке создания, старые первыми.
@@ -757,9 +775,24 @@ func TestRoomListSectionsOrderAndPaging(t *testing.T) {
 	pveHost.expect(protocol.SRoomState, nil)
 
 	viewer := s.connect(t, "Зритель", "")
-	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pvp", Page: 0})
 	var page protocol.RoomListPage
-	viewer.expect(protocol.SRoomList, &page)
+	// Подписка на список живая: тик hub рассылает страницу при каждом изменении, поэтому между
+	// запросом и ответом может прийти страница, собранная раньше — прежнего раздела или без
+	// только что созданной комнаты. Ждём ту, что отвечает проверяемому условию.
+	awaitList := func(what string, ok func(protocol.RoomListPage) bool) {
+		t.Helper()
+		for i := 0; ; i++ {
+			viewer.expect(protocol.SRoomList, &page)
+			if ok(page) {
+				return
+			}
+			if i == 20 {
+				t.Fatalf("%s: не дождались, последняя страница %+v", what, page)
+			}
+		}
+	}
+	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pvp", Page: 0})
+	awaitList("список pvp", func(p protocol.RoomListPage) bool { return p.Section == "pvp" && p.Total == 3 })
 	if page.Total != 3 || len(page.Rooms) != 3 || page.Pages != 1 {
 		t.Fatalf("pvp list: %+v", page)
 	}
@@ -772,7 +805,7 @@ func TestRoomListSectionsOrderAndPaging(t *testing.T) {
 		}
 	}
 	viewer.send(protocol.CRoomList, protocol.RoomList{Section: "pve", Page: 0})
-	viewer.expect(protocol.SRoomList, &page)
+	awaitList("список pve", func(p protocol.RoomListPage) bool { return p.Section == "pve" && p.Total == 1 })
 	if page.Total != 1 || page.Rooms[0].Section != "pve" || page.Rooms[0].GameMode != "survival" {
 		t.Fatalf("pve list: %+v", page)
 	}
@@ -780,13 +813,14 @@ func TestRoomListSectionsOrderAndPaging(t *testing.T) {
 	extra := s.connect(t, "Ещё", "")
 	extra.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, GameMode: "defense"})
 	extra.expect(protocol.SRoomState, nil)
-	viewer.expect(protocol.SRoomList, &page)
+	awaitList("пуш новой комнаты pve", func(p protocol.RoomListPage) bool { return p.Section == "pve" && p.Total == 2 })
 	if page.Total != 2 {
 		t.Fatalf("push must bring the new pve room: %+v", page)
 	}
 }
 
 func TestClosedRoomHidesCodeAndLimitsTries(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
 	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, Visibility: "closed"})
@@ -825,6 +859,7 @@ func TestClosedRoomHidesCodeAndLimitsTries(t *testing.T) {
 }
 
 func TestReadyAutoStartsMatch(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
 	guest := s.connect(t, "Гость", "")
@@ -852,6 +887,7 @@ func TestReadyAutoStartsMatch(t *testing.T) {
 }
 
 func TestConfigChangeResetsReady(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
 	guest := s.connect(t, "Гость", "")
@@ -875,6 +911,7 @@ func TestConfigChangeResetsReady(t *testing.T) {
 }
 
 func TestJoinRunningMatchTakesOwnSlot(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хост", "")
 	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
@@ -960,6 +997,7 @@ func TestJoinRunningMatchTakesOwnSlot(t *testing.T) {
 }
 
 func TestRoomListSortsOpenAndFreeFirst(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.RoomsPerIP = 100 })
 	// Четыре комнаты 1×1: открытая свободная, открытая заполненная, закрытая свободная,
 	// закрытая заполненная. Создаём в обратном порядке — сортировка должна их развернуть.
@@ -1009,6 +1047,7 @@ func TestRoomListSortsOpenAndFreeFirst(t *testing.T) {
 }
 
 func TestDrainBlocksNewMatches(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	p := s.connect(t, "Игрок", "")
 	s.hub.SetDrain(true)
@@ -1033,6 +1072,7 @@ func TestDrainBlocksNewMatches(t *testing.T) {
 }
 
 func TestBadProtocolVersionGetsReload(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1061,6 +1101,7 @@ func TestBadProtocolVersionGetsReload(t *testing.T) {
 // (раньше число бралось отдельным HTTP-запросом, который успевал ответить нулём до hello),
 // а подключение и отключение соседа приходят push-сообщением online.
 func TestOnlineCountFollowsConnections(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 
 	a := s.connect(t, "Аня", "")
@@ -1084,6 +1125,7 @@ func TestOnlineCountFollowsConnections(t *testing.T) {
 
 // Welcome несёт актуальное число игроков, включая самого подключившегося.
 func TestWelcomeCarriesOnline(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	s.connect(t, "Первый", "")
 
@@ -1120,6 +1162,7 @@ func TestWelcomeCarriesOnline(t *testing.T) {
 }
 
 func TestStatsCarriesNicks(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	host := s.connect(t, "Хозяин", "")
 	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
@@ -1172,6 +1215,7 @@ func TestStatsCarriesNicks(t *testing.T) {
 }
 
 func TestTrainingShownInStats(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	p := s.connect(t, "Тренирующийся", "")
 	p.send(protocol.CTraining, protocol.Training{On: true, Mode: 3, Arena: 2, Role: "Снайпер"})
@@ -1219,6 +1263,7 @@ func TestTrainingShownInStats(t *testing.T) {
 // Пауза между сообщениями задрана до часа: любое второе сообщение в тесте — флуд,
 // проверка не зависит от таймингов гонки/CI.
 func TestChat(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = time.Hour })
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
@@ -1259,4 +1304,63 @@ func TestChat(t *testing.T) {
 	a.close()
 	b.close()
 	c.close()
+}
+
+// TestCountdownHoldsSimulation — отсчёт перед стартом: снапшоты идут, но симуляция стоит и ввод
+// не принимается. Остальные тесты пакета отсчёт выключают (newServer ставит Countdown = 0), и без
+// этого теста ветка отсчёта в internal/match не исполнялась бы нигде.
+func TestCountdownHoldsSimulation(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, func(c *config.Config) { c.Countdown = 400 * time.Millisecond })
+	p := s.connect(t, "Игрок", "")
+	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
+	p.expect(protocol.SRoomState, nil)
+	p.send(protocol.CRoomStart, nil)
+	var ms protocol.MatchStart
+	p.expect(protocol.SMatchStart, &ms)
+
+	simTime := func(raw json.RawMessage) float64 {
+		var st struct {
+			Time float64 `json:"time"`
+		}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("снапшот не разбирается: %v", err)
+		}
+		return st.Time
+	}
+
+	var sawCountdown bool
+	var duringCountdown []float64
+	var afterCountdown []float64
+	deadline := time.Now().Add(5 * time.Second)
+	for len(afterCountdown) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("не дождались конца отсчёта: отсчёт видели=%v, кадров после=%d", sawCountdown, len(afterCountdown))
+		}
+		var snap protocol.Snapshot
+		p.expect(protocol.SSnapshot, &snap)
+		if snap.Countdown > 0 {
+			sawCountdown = true
+			duringCountdown = append(duringCountdown, simTime(snap.State))
+			// Ввод во время отсчёта сервер обязан игнорировать.
+			p.send(protocol.CInput, protocol.Input{Kind: "move", X: 700, Y: 480})
+			continue
+		}
+		afterCountdown = append(afterCountdown, simTime(snap.State))
+	}
+
+	if !sawCountdown {
+		t.Fatal("ни одного снапшота с отсчётом: поле cd не доехало до клиента")
+	}
+	if len(duringCountdown) < 2 {
+		t.Fatalf("за отсчёт пришло %d снапшотов, ожидалось хотя бы два", len(duringCountdown))
+	}
+	for i, tm := range duringCountdown {
+		if tm != duringCountdown[0] {
+			t.Fatalf("во время отсчёта симуляция двигалась: кадр %d время %.1f, первый %.1f", i, tm, duringCountdown[0])
+		}
+	}
+	if afterCountdown[len(afterCountdown)-1] <= duringCountdown[0] {
+		t.Fatalf("после отсчёта симуляция не пошла: %.1f → %.1f", duringCountdown[0], afterCountdown[len(afterCountdown)-1])
+	}
 }

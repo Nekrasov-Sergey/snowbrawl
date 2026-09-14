@@ -12,6 +12,7 @@ import (
 
 // TestOnlineSeriesNeedsToken — ряд онлайна закрыт так же, как остальная админка.
 func TestOnlineSeriesNeedsToken(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/online-series")
 	if err != nil {
@@ -24,6 +25,7 @@ func TestOnlineSeriesNeedsToken(t *testing.T) {
 }
 
 func TestOnlineSeriesReturnsWindow(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/online-series?token=" + testToken)
 	if err != nil {
@@ -57,6 +59,7 @@ func TestOnlineSeriesReturnsWindow(t *testing.T) {
 // TestStatsHasNoOnlineSeries — ряд не попадает в сводку. Иначе он менялся бы каждую минуту, и
 // диффинг SSE потерял бы смысл: кадр уходил бы всем подписчикам без причины.
 func TestStatsHasNoOnlineSeries(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/state?token=" + testToken)
 	if err != nil {
@@ -77,6 +80,7 @@ func TestStatsHasNoOnlineSeries(t *testing.T) {
 // TestAdminPageHasChart — у встроенной страницы нет ни линтера, ни тестов, поэтому хотя бы
 // проверяем, что узел графика и его обработчики не выпали при правке HTML.
 func TestAdminPageHasChart(t *testing.T) {
+	t.Parallel()
 	page := string(adminPage)
 	for _, needle := range []string{`id="onlineChart"`, "online-series", "chartSetRange", "пинг"} {
 		if !strings.Contains(page, needle) {
@@ -89,6 +93,7 @@ func TestAdminPageHasChart(t *testing.T) {
 // поминутно и дальше рисует панораму и зум из памяти. С прежними 4000 неделя приезжала
 // пятиминутным шагом, и приблизить её без нового запроса было нечем.
 func TestOnlineSeriesFineResolution(t *testing.T) {
+	t.Parallel()
 	srv, h, _ := newAdmin(t)
 	series := h.OnlineSeries()
 	base := time.Now().UTC().Add(-5000 * time.Minute).Truncate(time.Minute)

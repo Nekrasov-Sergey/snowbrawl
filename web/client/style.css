@@ -292,7 +292,6 @@ html.touch #overlayScore .scoreRow { font-size: 12px; }
 #abilityBtn { padding: 8px 18px; font-size: 13px; border-radius: 8px; border: 1px solid #7a5cff; background: #2a2050; color: #e6d9ff; cursor: pointer; font-weight: 700; }
 #abilityBtn:disabled { opacity: 0.4; cursor: default; }
 #abilityCd { font-size: 11px; color: #b7a6ff; margin-top: 4px; }
-#reloadHud { font-size: 11px; color: #ffcf5b; margin-top: 2px; font-weight: 600; }
 
 /* сенсорное управление */
 #touchLayer { position: absolute; inset: 0; z-index: 4; touch-action: none; overflow: hidden; }
@@ -330,7 +329,8 @@ html.touch.ingame #abilityHint { position: absolute; left: 50%; top: 42px; trans
   max-width: 86%; margin: 0; padding: 4px 10px; border-radius: 8px; background: rgba(22,40,63,0.9);
   font-size: 11px; min-height: 0; z-index: 5; pointer-events: none; transition: opacity .5s; }
 html.touch.ingame #abilityHint.faded { opacity: 0; }
-html.touch.ingame #drainBanner { margin: 0; border-radius: 0; font-size: 11px; padding: 4px 8px; }
+html.touch.ingame #drainBanner, html.touch.ingame #replacedBanner { margin: 0; border-radius: 0; font-size: 11px; padding: 4px 8px; }
+html.touch.ingame #replacedBanner button { padding: 2px 8px; font-size: 11px; }
 html.touch.ingame #screen-game { position: relative; gap: 0; flex: 1; min-height: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
 html.touch.ingame #topGameBar { max-width: none; margin: 0; padding: 4px 10px; box-sizing: border-box; height: 36px; flex: none; }
 html.touch.ingame #topGameBar button { padding: 4px 10px; font-size: 12px; }
@@ -417,6 +417,10 @@ html.touch #volMini { display:none; } /* на телефоне регулиро�
 .modalRow { display: flex; gap: 10px; }
 .modalRow .menuBtn { flex: 1; margin: 0; }
 #drainBanner { background: #3a2f10; border: 1px solid #ffd166; color: #ffd166; border-radius: 8px; padding: 8px 14px; font-size: 13px; margin-bottom: 12px; text-align: center; }
+/* Вкладка уступила сессию соседней: без этой плашки игрок видел бы только «нет связи». */
+#replacedBanner { background: #3a1010; border: 1px solid #ff8a8a; color: #ffc9c9; border-radius: 8px; padding: 8px 14px; font-size: 13px; margin-bottom: 12px; text-align: center; display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+#replacedBanner button { padding: 4px 12px; font-size: 13px; background: #ff8a8a; color: #2a0b0b; border: 0; border-radius: 6px; font-weight: 600; cursor: pointer; }
+#replacedBanner button:hover { background: #ffb0b0; }
 #toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: #16283f; border: 1px solid #ff5b5b; color: #ffd6d6; padding: 10px 18px; border-radius: 8px; font-size: 14px; z-index: 10; max-width: 80vw; text-align: center; }
 .footer { margin-top: auto; padding-top: 24px; font-size: 11px; color: #4b6a8a; }
 

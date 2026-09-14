@@ -17,6 +17,7 @@ var base = time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 // TestMinuteBucketsKeepPeak — точка минуты это её пик: так график не зависит от того, в какой
 // момент минуты сработал семпл.
 func TestMinuteBucketsKeepPeak(t *testing.T) {
+	t.Parallel()
 	s, err := Open("", testLog())
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +47,7 @@ func TestMinuteBucketsKeepPeak(t *testing.T) {
 }
 
 func TestRetentionTrims(t *testing.T) {
+	t.Parallel()
 	s, err := Open("", testLog())
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +65,7 @@ func TestRetentionTrims(t *testing.T) {
 // TestCoarserStepOnWideWindow — на широком окне сервер сам укрупняет шаг и сообщает его: иначе
 // график врал бы о разрешении данных.
 func TestCoarserStepOnWideWindow(t *testing.T) {
+	t.Parallel()
 	s, err := Open("", testLog())
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +90,7 @@ func TestCoarserStepOnWideWindow(t *testing.T) {
 // TestSurvivesRestartAndKeepsGap — история переживает перезапуск, а простой сервера остаётся
 // дыркой в данных: нулями его заполнять нельзя, иначе «выключен» не отличить от «никого нет».
 func TestSurvivesRestartAndKeepsGap(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "online.log")
 	s, err := Open(path, testLog())
 	if err != nil {
@@ -127,6 +131,7 @@ func TestSurvivesRestartAndKeepsGap(t *testing.T) {
 }
 
 func TestBrokenFileMovedAside(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "online.log")
 	if err := os.WriteFile(path, []byte("это не наш формат\n1 2\n"), 0o600); err != nil {
@@ -150,6 +155,7 @@ func TestBrokenFileMovedAside(t *testing.T) {
 
 // TestBrokenLineSkipped — обрыв на дозаписи стоит одной строки, а не всей истории.
 func TestBrokenLineSkipped(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "online.log")
 	content := header + "\n" + "1757505600 4\nмусор\n1757505660 5\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -169,6 +175,7 @@ func TestBrokenLineSkipped(t *testing.T) {
 }
 
 func TestNilSeriesIsSafe(t *testing.T) {
+	t.Parallel()
 	var s *Series
 	s.Observe(base, 3)
 	if step, pts := s.Points(base, base.Add(time.Hour), 10); step != Step || pts != nil {
@@ -188,6 +195,7 @@ func TestNilSeriesIsSafe(t *testing.T) {
 // TestCompactionRewritesFile — append-only файл не растёт вечно: при переполнении он
 // переписывается целиком, и история остаётся читаемой.
 func TestCompactionRewritesFile(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "online.log")
 	s, err := Open(path, testLog())
 	if err != nil {

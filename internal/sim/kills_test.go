@@ -49,6 +49,7 @@ func scorerByID(t *testing.T, m *sim.Match, id string) scorer {
 // TestKillCreditsShooter — три попадания подряд выбивают соперника, и фраг уходит стрелку.
 // Соперник стоит (Bot: false), стрелок бьёт с чистой линии y=150 — см. shooterAt.
 func TestKillCreditsShooter(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	m := shooterAt(t, p, "Снайпер", 11)
 	eid, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Раннер", X: 560, Y: 150, Bot: false})
@@ -83,6 +84,7 @@ func TestKillCreditsShooter(t *testing.T) {
 // TestKillFieldAlwaysPresent — поле k есть у каждого бойца; пропущенный ключ в снапшоте клиент
 // не удаляет при интерполяции, и чужое число осталось бы висеть на бойце.
 func TestKillFieldAlwaysPresent(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	m, err := p.NewMatch(botsConfig(3, p.Roles()), 9)
 	if err != nil {
@@ -114,14 +116,18 @@ func TestKillFieldAlwaysPresent(t *testing.T) {
 // TestKillSumMatchesLosses — в бою ботов сумма фрагов совпадает с числом выбитых. Проверка ловит
 // двойной зачёт (например, если взрыв засчитает и прямое попадание, и осколки).
 func TestKillSumMatchesLosses(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	m, err := p.NewMatch(botsConfig(3, p.Roles()), 21)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 20*90 && !m.IsOver(); i++ {
+	for i := 0; i < 20*90; i++ {
 		if _, err := m.Step(1.0 / 20); err != nil {
 			t.Fatal(err)
+		}
+		if i%10 == 0 && m.IsOver() { // IsOver — вызов в JS, на каждом шаге он лишний
+			break
 		}
 	}
 	kills, koed := 0, 0

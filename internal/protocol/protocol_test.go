@@ -3,6 +3,7 @@ package protocol
 import "testing"
 
 func TestNormalizeNick(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, want string
 		ok       bool
@@ -23,6 +24,7 @@ func TestNormalizeNick(t *testing.T) {
 }
 
 func TestNormalizeRoomCode(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{"1234", " 1234 ", "snb-1234", "SNB-1234"} {
 		got, err := NormalizeRoomCode(in)
 		if err != nil || got != "1234" {
@@ -37,6 +39,7 @@ func TestNormalizeRoomCode(t *testing.T) {
 }
 
 func TestEncodeDecode(t *testing.T) {
+	t.Parallel()
 	b := MustEncode(SWelcome, Welcome{Token: "t", PlayerID: "p"})
 	env, err := Decode(b)
 	if err != nil || env.Type != SWelcome || len(env.Data) == 0 {
@@ -48,6 +51,7 @@ func TestEncodeDecode(t *testing.T) {
 }
 
 func TestNormalizeNickRejectsProfanity(t *testing.T) {
+	t.Parallel()
 	for _, bad := range []string{"хуй", "ХуЙ", "п1здец", "мудак"} {
 		if _, err := NormalizeNick(bad); err == nil {
 			t.Errorf("ник %q должен быть отклонён", bad)
@@ -61,6 +65,7 @@ func TestNormalizeNickRejectsProfanity(t *testing.T) {
 }
 
 func TestNickKey(t *testing.T) {
+	t.Parallel()
 	// Одно и то же имя: регистр, латиница-двойники, разделители.
 	same := [][2]string{
 		{"Вася", "вася"},

@@ -47,6 +47,7 @@ func pingHub(now *time.Time) *Hub {
 }
 
 func TestPingProbeAndMeasure(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	now := base
 	h := pingHub(&now)
@@ -91,6 +92,7 @@ func TestPingProbeAndMeasure(t *testing.T) {
 }
 
 func TestPingPublishesExactMs(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	now := base
 	h := pingHub(&now)
@@ -127,6 +129,7 @@ func TestPingPublishesExactMs(t *testing.T) {
 }
 
 func TestPingLostAndReset(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	now := base
 	h := pingHub(&now)

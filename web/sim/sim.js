@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.11.0';
+  var SIM_VERSION = '1.12.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -65,6 +65,15 @@
   // Перезарядка выстрела: пауза после броска, пока нельзя начать новый замах.
   // По ролям — Раннер частит, Снайпер бьёт редко.
   var RELOAD_MS = { 'Раннер': 500, 'Танк': 900, 'Снайпер': 1600, 'Бомбер': 1000, 'Фризер': 900, 'Щит': 900 };
+
+  // Боезапас: у бойца три выстрела в запасе, отделения заполняются по одному. Темп взят от
+  // RELOAD_MS, но медленнее прежнего одиночного кулдауна — иначе запас в три снежка был бы
+  // чистым усилением всех ролей. SHOT_GAP_MS не даёт высыпать запас одним залпом в упор:
+  // три выстрела растягиваются на полсекунды, и пузырь Щита с уворотами успевают сработать.
+  var AMMO_MAX = 3;
+  var AMMO_RELOAD_MUL = 1.4;
+  var SHOT_GAP_MS = 250;
+  function ammoMs(role) { return (RELOAD_MS[role] || 900) * AMMO_RELOAD_MUL; }
 
   // Актив на Q. needsDir — направленная (по прицелу), иначе «заряжает» следующий бросок.
   var ABILITIES = {
@@ -268,6 +277,8 @@
       vx: 0, vy: 0, // текущее направление хода — используется только на льду (см. moveCharacter)
       charging: false, chargeStart: 0, aimX: x, aimY: y,
       specialCooldown: 0, pendingSpecialThrow: false, armedSpecial: null, reloadUntil: 0,
+      // Боезапас: ammo — целые заряды, ammoAt — когда дозаполнится текущее отделение (0 — запас полон).
+      ammo: AMMO_MAX, ammoAt: 0,
       // способности: рывок/таран, неуязвимость, замедление, щитовой пузырь Щита
       dashUntil: 0, dashVX: 0, dashVY: 0, dashKind: null, taramHits: null,
       iframeUntil: 0, slowUntil: 0, slowMul: 1, lastDamagedAt: -1e9,
@@ -460,7 +471,7 @@
         p.moveTarget = { x: x, y: y };
         return true;
       case 'chargeStart':
-        if (p.stunTimer > 0 || p.charging || state.time < p.reloadUntil) return false;
+        if (p.stunTimer > 0 || p.charging || state.time < p.reloadUntil || p.ammo < 1) return false;
         p.charging = true; p.chargeStart = state.time; p.aimX = x; p.aimY = y;
         emit(state, { type: 'chargeStart', playerId: p.id });
         return true;
@@ -542,9 +553,19 @@
       explosive: armed === 'explosive', freeze: armed === 'frost', frost: armed === 'frost',
       flat: flat, sniped: armed === 'snipe'
     });
-    var reload = RELOAD_MS[p.role] || 900;
-    p.reloadUntil = state.time + reload;
-    emit(state, { type: 'throw', playerId: p.id, power: power, special: armed, reload: reload });
+    // Выстрел тратит отделение боезапаса; идущее заполнение бросок не сбрасывает — иначе
+    // стрельба в упор бесконечно отодвигала бы возврат зарядов.
+    if (!p.enemyType) {
+      p.ammo = Math.max(0, p.ammo - 1);
+      if (p.ammoAt <= 0) p.ammoAt = state.time + ammoMs(p.role);
+      p.reloadUntil = state.time + SHOT_GAP_MS;
+    } else {
+      // У мобов PvE запаса нет, и короткая пауза между выстрелами им не подходит: для них
+      // reloadUntil — единственный ограничитель темпа, и подмена его на SHOT_GAP_MS втрое
+      // ускорила бы стрельбу волн. Оставляем прежний кулдаун по роли.
+      p.reloadUntil = state.time + (RELOAD_MS[p.role] || 900);
+    }
+    emit(state, { type: 'throw', playerId: p.id, power: power, special: armed, ammo: p.ammo });
   }
 
   // ============================================================
@@ -815,7 +836,7 @@
     var dist = Math.hypot(enemy.x - p.x, enemy.y - p.y);
     var lowHp = p.hp <= cfg.retreatHp;
     var canAbil = p.specialCooldown <= 0 && rng.next() < lvl.useAbility;
-    var canShoot = now >= p.reloadUntil; // перезарядка выстрела
+    var canShoot = now >= p.reloadUntil && p.ammo >= 1; // пауза между выстрелами и запас
 
     // Способности по ситуации: стена при опасности, таран для сближения, снайп издалека.
     if (spec.id === 'wall' && p.hp <= 2 && dist < 260 && p.specialCooldown <= 0) {
@@ -1123,7 +1144,18 @@
     var timeMul = chilled ? 1 - FREEZER_AURA_RELOAD : 1;
     if (p.specialCooldown > 0) p.specialCooldown = Math.max(0, p.specialCooldown - dt * timeMul);
     if (p.reloadUntil > state.time && chilled) p.reloadUntil += dt * 1000 * FREEZER_AURA_RELOAD;
-    if (p.reloadUntil > 0 && state.time >= p.reloadUntil) { p.reloadUntil = 0; emit(state, { type: 'reloadDone', playerId: p.id }); }
+    if (p.reloadUntil > 0 && state.time >= p.reloadUntil) p.reloadUntil = 0;
+    // Боезапас заполняется по одному отделению за раз, в ауре Фризера — медленнее, тем же
+    // растяжением времени, что у кулдауна способности. reloadDone означает «появился заряд».
+    if (p.ammo < AMMO_MAX && alive(p)) {
+      if (p.ammoAt <= 0) p.ammoAt = state.time + ammoMs(p.role);
+      if (chilled) p.ammoAt += dt * 1000 * FREEZER_AURA_RELOAD;
+      if (state.time >= p.ammoAt) {
+        p.ammo++;
+        p.ammoAt = p.ammo < AMMO_MAX ? state.time + ammoMs(p.role) : 0;
+        emit(state, { type: 'reloadDone', playerId: p.id, ammo: p.ammo });
+      }
+    }
     // Щит: пассив «Закалка» — пузырь восстанавливается, если 12 с не получал урона
     if (p.role === 'Щит' && !p.bubble && !p.koed && p.hp > 0 &&
         state.time >= p.bubbleReadyAt && (state.time - p.lastDamagedAt) >= BUBBLE_REGEN_MS) {
@@ -1195,6 +1227,7 @@
       p.hp = 3; p.koed = false; p.stunTimer = 0; p.charging = false; p.lives = PVE_LIVES;
       p.respawnAt = 0; p.dashUntil = 0; p.armedSpecial = null; p.pendingSpecialThrow = false;
       p.reloadUntil = 0; p.iframeUntil = 0; p.bubble = p.role === 'Щит';
+      p.ammo = AMMO_MAX; p.ammoAt = 0;
       p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y };
     }
   }
@@ -1303,6 +1336,9 @@
         var sp = pveSpawnPoint(state, i);
         p.hp = 3; p.koed = false; p.stunTimer = 0; p.respawnAt = 0; p.iframeUntil = state.time + 1200;
         p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y }; p.bubble = p.role === 'Щит';
+        // Запас — как при рестарте уровня: пока боец лежал, дозарядка не шла (она требует alive),
+        // и без этого он вставал с одним зарядом, да ещё и в секунды неуязвимости.
+        p.ammo = AMMO_MAX; p.ammoAt = 0;
         emit(state, { type: 'partyRespawn', id: p.id });
       }
     }
@@ -1601,6 +1637,17 @@
     var left = (readyAt - state.time) / BUBBLE_REGEN_MS;
     return left <= 0 ? 0 : Math.round(Math.min(1, left) * 100) / 100;
   }
+  /** Боезапас для снапшота: целые заряды плюс доля заполнения текущего отделения. */
+  function ammoLeft(state, p) {
+    var full = p.ammo || 0;
+    if (full >= AMMO_MAX || !(p.ammoAt > state.time)) return full;
+    var done = 1 - (p.ammoAt - state.time) / ammoMs(p.role);
+    if (done < 0) done = 0; else if (done > 1) done = 1;
+    // Дробь округляем ВНИЗ: округление вверх отдавало бы am = 1 при пустом запасе за миллисекунды
+    // до заполнения, клиент по такому снапшоту начинал замах, а сервер его отклонял — выстрел
+    // пропадал молча.
+    return full + Math.floor(done * 100) / 100;
+  }
   function snapshot(state) {
     var players = [];
     for (var i = 0; i < state.players.length; i++) {
@@ -1623,10 +1670,12 @@
         // пропущенный ключ сохранил бы прошлое значение (так уже выходит с mhp и lives).
         bb: bubbleLeft(state, p),
         slow: speedMul(state, p) < 0.999,
-        // перезарядка выстрела: доля 0..1 (1 = только бросил, 0 = готов)
-        // В ауре Фризера остаток перезарядки может превысить базовый RELOAD_MS — зажимаем в 1,
-        // иначе клиент рисует дугу больше полного круга.
-        rl: p.reloadUntil > state.time ? Math.min(1, round1((p.reloadUntil - state.time) / (RELOAD_MS[p.role] || 900) * 10) / 10) : 0
+        // Пауза между выстрелами: доля 0..1 (1 = только бросил, 0 = можно снова). Клиент по ней
+        // решает, ставить ли нажатие в очередь. В ауре Фризера остаток может превысить базовую
+        // паузу — зажимаем в 1.
+        rl: p.reloadUntil > state.time ? Math.min(1, round1((p.reloadUntil - state.time) / SHOT_GAP_MS * 10) / 10) : 0,
+        // Боезапас: целая часть — полные отделения, дробная — заполнение текущего (0..AMMO_MAX).
+        am: ammoLeft(state, p)
       };
       // PvE: жизни пати, тип врага, фаза босса
       if (p.lives != null) pe.lives = p.lives;
@@ -1701,7 +1750,7 @@
     SIM_VERSION: SIM_VERSION,
     W: W, H: H, GRAVITY: GRAVITY, CHARGE_FULL_MS: CHARGE_FULL_MS, KO_ANIM_MS: KO_ANIM_MS,
     ARENAS: ARENAS, ROLE_STATS: ROLE_STATS, SPECIALS: SPECIALS, ABILITIES: ABILITIES,
-    RELOAD_MS: RELOAD_MS, MODES: MODES, GAME_MODES: GAME_MODES,
+    RELOAD_MS: RELOAD_MS, AMMO_MAX: AMMO_MAX, SHOT_GAP_MS: SHOT_GAP_MS, MODES: MODES, GAME_MODES: GAME_MODES,
     PVE_LEVEL_COUNT: PVE_LEVELS.length,
     BOT_LEVEL_NAMES: ['Лёгкий', 'Обычный', 'Сложный'],
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,

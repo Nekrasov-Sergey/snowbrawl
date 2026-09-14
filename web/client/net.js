@@ -1,6 +1,12 @@
 /* Сетевой слой: WebSocket с автопереподключением и очередь снапшотов с интерполяцией. */
 window.SBNet = (function () {
   var PROTO = 4;
+  // Причина закрытия, которую шлёт сервер, когда этот же игрок подключился другим соединением
+  // (см. internal/hub/hub.go, «replaced by new connection»). Сессия одна на браузер: токен лежит
+  // в localStorage, поэтому вторая вкладка с игрой — это тот же игрок. Переподключаться на такое
+  // закрытие нельзя: вкладки начнут вышибать друг друга по кругу, и играть станет невозможно
+  // в обеих. Уступаем и ждём решения игрока.
+  var REPLACED = 'replaced by new connection';
 
   function connect(opts) {
     var ws = null, closedByUser = false, attempt = 0, timer = null, state = 'connecting';
@@ -12,7 +18,11 @@ window.SBNet = (function () {
         return true;
       },
       close: function () { closedByUser = true; clearTimeout(timer); if (ws) ws.close(1000, 'bye'); },
-      reconnectNow: function () { clearTimeout(timer); if (ws) { try { ws.close(); } catch (e) { /* игнор */ } } else open(); }
+      /** Забрать сессию себе: применяется, когда игрок решил играть именно в этой вкладке. */
+      takeOver: function () { clearTimeout(timer); attempt = 0; if (!ws) open(); },
+      // Закрываем штатным кодом: иначе onclose увидит 1005 «без статуса» и пожалуется в консоль
+      // на то, что мы сами же и сделали.
+      reconnectNow: function () { clearTimeout(timer); if (ws) { try { ws.close(1000, 'reconnect'); } catch (e) { /* игнор */ } } else open(); }
     };
     function url() {
       var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -34,8 +44,15 @@ window.SBNet = (function () {
         opts.onMessage(msg.t, msg.d);
       };
       ws.onclose = function (ev) {
-        ws = null; state = 'closed'; opts.onState && opts.onState(state, ev.reason);
-        if (!closedByUser) schedule();
+        // Код закрытия раньше никуда не попадал, и отстрел сервером по лимиту сообщений (1008)
+        // выглядел как обычный обрыв связи — искать причину было нечем.
+        if (!closedByUser && ev.code !== 1000 && ev.code !== 1001) {
+          try { console.warn('соединение закрыто: код ' + ev.code + (ev.reason ? ' (' + ev.reason + ')' : '')); } catch (e) { /* игнор */ }
+        }
+        var replaced = ev.reason === REPLACED;
+        ws = null; state = replaced ? 'replaced' : 'closed';
+        opts.onState && opts.onState(state, ev.reason);
+        if (!closedByUser && !replaced) schedule();
       };
       ws.onerror = function () { /* onclose придёт следом */ };
     }

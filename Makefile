@@ -14,7 +14,7 @@ dev: ## Запуск для разработки: статика с диска, 
 	go run ./cmd/snowbrawl-server --web-dir web --log-pretty --log-level debug --admin-token dev
 
 test: ## Тесты
-	go test -race ./...
+	go test -race -timeout 5m ./...
 
 bench: ## Бенчмарк goja: 17 матчей 4×4 при 20 тиках/с
 	go test ./internal/sim/ -run xxx -bench FullLoad -benchtime 5x

@@ -7,7 +7,23 @@ window.SBIntent = (function () {
   var MOVE_LEAD = 90;       // px впереди бойца: цель движения по стику (sim идёт к точке с фиксированной скоростью)
   var STOP_LEAD_S = 0.08;   // с: сколько сервер успеет пройти, пока получит «стоп» — чтобы боец не пятился
   var AIM_LEAD = 200;       // px: точка прицела по стику (дальность задаёт power, а не удалённость точки)
-  var SEND_MS = 66;         // не чаще ~15/с на вид команды; лимит сервера — 30 сообщений/с на всё
+  // Частота отправки. Раньше здесь был один порог 66 мс на вид команды, и движение с прицелом
+  // уходили по таймеру независимо от того, изменилось ли что-нибудь: 15 + 15 сообщений/с,
+  // то есть весь лимит сервера ещё до выстрелов — активный бой отстреливался по rate limit.
+  // Теперь шлём по изменению: поворот доезжает сразу, а повтор нужен только как страховка.
+  // Цель движения — точка впереди бойца, её надо обновлять (см. tick). Срок считаем по самому
+  // быстрому случаю: Раннер 195 px/с, пассив «Второе дыхание» ×1.20 и лёд «Реки» ×1.35 дают
+  // 316 px/с, то есть MOVE_LEAD в 90 px съедается за 285 мс. Плюс точка берётся из снапшота,
+  // который уже старше на полкруга сети. 120 мс оставляют запас даже на один потерянный пакет.
+  var MOVE_KEEPALIVE_MS = 120;
+  // Нижний порог для движения оставлен прежним (66 мс): поворот доезжает до сервера не медленнее,
+  // чем раньше, а вот бессмысленные повторы одного и того же направления исчезают. Упереться в
+  // него может только стик, который крутят быстрее 15 раз в секунду.
+  var MOVE_MIN_MS = 66;
+  var MOVE_PX = 6;             // смещение точки движения мышью, меньше которого отправка не нужна
+  var AIM_MIN_MS = 80;         // не чаще этого шлём прицел
+  var AIM_PX = 10;             // смещение точки прицела, меньше которого отправка не нужна
+  var TURN_COS = 0.99;         // ~8°: поворот меньше этого не повод для отправки
 
   function norm(x, y) { var d = Math.hypot(x, y); return d > 1e-6 ? { x: x / d, y: y / d } : null; }
 
@@ -28,6 +44,8 @@ window.SBIntent = (function () {
   function create(o) {
     var local = { charging: false, start: 0, aimX: 0, aimY: 0, power: 0, pending: false };
     var moveDir = null, lastMoveSend = 0, lastAimSend = 0;
+    var sentMoveDir = null;          // направление, которое сервер уже знает (для порога поворота)
+    var sentMovePt = null, sentAimPt = null; // последние отправленные точки (для порога смещения)
     var pending = null; // {x, y, dir} — нажатие, отложенное до конца перезарядки
     var lastAimDir = { x: 1, y: 0 };
     var lastMoveVec = null; // куда боец бежал последний раз: направление тапа по кнопке скилла
@@ -42,6 +60,7 @@ window.SBIntent = (function () {
     function aimPoint(dir, p) { return { x: p.x + dir.x * AIM_LEAD, y: p.y + dir.y * AIM_LEAD }; }
     function beginCharge(x, y) {
       local.charging = true; local.start = now(); local.aimX = x; local.aimY = y; local.power = 0;
+      sentAimPt = { x: x, y: y }; lastAimSend = now(); // chargeStart уже сообщил прицел
       send('chargeStart', x, y);
       if (o.onChargeStart) o.onChargeStart();
     }
@@ -53,6 +72,18 @@ window.SBIntent = (function () {
       var p = me();
       return !!p && !blocked() && o.canAct(p) && !(p.cd > 0) && !!Sim.SPECIALS[p.role];
     }
+    // Можно ли начать замах: не идёт пауза между выстрелами и в запасе есть хотя бы одно
+    // отделение. Поле am появилось в sim 1.12.0 — на старом снапшоте гварда вырождается в паузу.
+    //
+    // Третье условие — своя пауза по последнему выстрелу. Снапшот приходит с задержкой сети и
+    // тика, поэтому сразу после броска он ещё показывает до-выстрельные rl и am. Без этой
+    // проверки очередь из трёх снежков давала фантомный замах: клиент начинал его локально,
+    // сервер отклонял, и бросок пропадал целиком вместе с анимацией.
+    var SHOT_GAP_MS = (Sim && Sim.SHOT_GAP_MS) || 250;
+    var firedAt = -1e9;
+    function canShootNow(p) {
+      return !(p.rl > 0) && (p.am == null || p.am >= 1) && now() - firedAt >= SHOT_GAP_MS;
+    }
     function clearPending() { pending = null; local.pending = false; }
 
     var api = {
@@ -61,13 +92,20 @@ window.SBIntent = (function () {
       // ---- абсолютные точки арены (мышь) ----
       moveTo: function (x, y, force) {
         var t = now();
-        if (!force && t - lastMoveSend < SEND_MS) return;
-        lastMoveSend = t; send('move', x, y);
+        if (!force) {
+          if (t - lastMoveSend < MOVE_MIN_MS) return;
+          // Точка абсолютная: пока курсор стоит, серверу нечего сообщать. Страховочный повтор
+          // всё равно оставляем — на случай потерянного пакета.
+          var still = sentMovePt && Math.hypot(x - sentMovePt.x, y - sentMovePt.y) < MOVE_PX;
+          if (still && t - lastMoveSend < MOVE_KEEPALIVE_MS) return;
+        }
+        lastMoveSend = t; sentMovePt = { x: x, y: y }; sentMoveDir = null;
+        send('move', x, y);
       },
       chargeStartAt: function (x, y) {
         var p = me();
         if (!p || !o.canAct(p) || local.charging || pending || blocked()) return false;
-        if (p.rl > 0) { // идёт перезарядка: запоминаем нажатие, замах начнётся сам по готовности
+        if (!canShootNow(p)) { // запас пуст или идёт пауза: замах начнётся сам по готовности
           pending = { x: x, y: y, dir: false };
           local.pending = true;
           return true;
@@ -80,14 +118,20 @@ window.SBIntent = (function () {
         if (!local.charging) return;
         local.aimX = x; local.aimY = y;
         var t = now();
-        if (t - lastAimSend < SEND_MS) return;
-        lastAimSend = t; send('aim', x, y);
+        if (t - lastAimSend < AIM_MIN_MS) return;
+        // Прицел абсолютный, сервер держит последний — страховочный повтор не нужен. На точность
+        // броска порог не влияет: throw несёт свои x/y и сам выставляет прицел в симуляции,
+        // промежуточные aim нужны лишь для того, чтобы ДРУГИЕ видели, куда целится боец.
+        if (sentAimPt && Math.hypot(x - sentAimPt.x, y - sentAimPt.y) < AIM_PX) return;
+        lastAimSend = t; sentAimPt = { x: x, y: y };
+        send('aim', x, y);
       },
       throwAt: function (x, y) {
         if (pending) { clearPending(); return; } // отпустил раньше, чем закончилась перезарядка
         if (!local.charging) return;
         var pw = chargePower();
         endCharge();
+        firedAt = now();
         send('throw', x, y, pw);
         if (o.onThrow) o.onThrow(pw);
       },
@@ -113,6 +157,7 @@ window.SBIntent = (function () {
             send('move', p.x + moveDir.x * lead, p.y + moveDir.y * lead);
           }
           moveDir = null;
+          sentMoveDir = null; // серверу отправлена точка остановки, а не направление
           return;
         }
         var wasIdle = !moveDir;
@@ -169,7 +214,7 @@ window.SBIntent = (function () {
         if (pending) {
           if (!p || !o.canAct(p) || blocked()) clearPending();
           else if (o.holding && !o.holding()) clearPending(); // кнопку уже отпустили — замаха не будет
-          else if (!(p.rl > 0)) { // перезарядка закончилась — начинаем отложенный замах
+          else if (canShootNow(p)) { // заряд появился — начинаем отложенный замах
             var pt = pending.dir ? aimPoint(lastAimDir, p) : { x: pending.x, y: pending.y };
             clearPending();
             beginCharge(pt.x, pt.y);
@@ -181,15 +226,29 @@ window.SBIntent = (function () {
         }
         if (moveDir && p) {
           var t = now();
-          if (t - lastMoveSend >= SEND_MS) {
+          // Повернули — шлём сразу; иначе раз в MOVE_KEEPALIVE_MS. Повтор здесь обязателен, а не
+          // косметика: цель — точка в MOVE_LEAD (90 px) впереди бойца, и если её не обновлять,
+          // боец до неё дойдёт и встанет. 90 px на максимальной скорости 195 px/с — это 460 мс,
+          // так что 200 мс дают запас больше двух раз даже при потерянном пакете.
+          var turned = !sentMoveDir ||
+            sentMoveDir.x * moveDir.x + sentMoveDir.y * moveDir.y < TURN_COS;
+          var due = t - lastMoveSend >= MOVE_KEEPALIVE_MS;
+          if ((turned || due) && t - lastMoveSend >= MOVE_MIN_MS) {
             lastMoveSend = t;
+            sentMoveDir = moveDir; sentMovePt = null;
             send('move', p.x + moveDir.x * MOVE_LEAD, p.y + moveDir.y * MOVE_LEAD);
           }
         }
       },
       /** Есть ли активное намерение движения (для переотправки после возврата вкладки). */
       isMoving: function () { return !!moveDir; },
-      reset: function () { if (local.charging) endCharge(); clearPending(); moveDir = null; }
+      reset: function () {
+        if (local.charging) endCharge();
+        clearPending();
+        moveDir = null;
+        sentMoveDir = null; sentMovePt = null; sentAimPt = null;
+        firedAt = -1e9;
+      }
     };
     return api;
   }
