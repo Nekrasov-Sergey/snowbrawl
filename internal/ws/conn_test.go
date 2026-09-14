@@ -5,6 +5,7 @@ package ws_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,12 +24,28 @@ type recorder struct {
 	mu       sync.Mutex
 	messages int
 	closed   int
+	kinds    map[string]int // вид ввода → сколько таких дошло до обработчика
 }
 
-func (r *recorder) OnMessage(_ *ws.Conn, _ protocol.Envelope) {
+func (r *recorder) OnMessage(_ *ws.Conn, env protocol.Envelope) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.messages++
+	if env.Type == protocol.CInput {
+		var in protocol.Input
+		if err := json.Unmarshal(env.Data, &in); err == nil {
+			if r.kinds == nil {
+				r.kinds = map[string]int{}
+			}
+			r.kinds[in.Kind]++
+		}
+	}
+}
+
+func (r *recorder) kindCount(kind string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.kinds[kind]
 }
 
 func (r *recorder) OnClose(_ *ws.Conn) {
@@ -57,6 +74,7 @@ func newWSServer(t *testing.T, opts ws.Options) (*httptest.Server, *ws.Server, *
 
 // Клиент, который читает сокет (то есть отвечает на ping), живёт сколько угодно.
 func TestHeartbeatKeepsLiveConnection(t *testing.T) {
+	t.Parallel()
 	httpSrv, srv, rec := newWSServer(t, ws.Options{PingPeriod: 100 * time.Millisecond, PongTimeout: time.Second})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -97,6 +115,7 @@ func TestHeartbeatKeepsLiveConnection(t *testing.T) {
 
 // Клиент, который перестал читать сокет, не отвечает на ping — сервер закрывает соединение.
 func TestHeartbeatDropsSilentConnection(t *testing.T) {
+	t.Parallel()
 	httpSrv, srv, rec := newWSServer(t, ws.Options{PingPeriod: 100 * time.Millisecond, PongTimeout: 200 * time.Millisecond})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

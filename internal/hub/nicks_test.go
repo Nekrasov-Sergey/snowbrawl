@@ -22,6 +22,7 @@ func newNickHub() *Hub {
 }
 
 func TestNickHoldRules(t *testing.T) {
+	t.Parallel()
 	h := newNickHub()
 	now := time.Now()
 	h.holdNick("Вася", "10.0.0.1", "p1", now)
@@ -55,6 +56,7 @@ func TestNickHoldRules(t *testing.T) {
 }
 
 func TestNickReleaseOnlyOwn(t *testing.T) {
+	t.Parallel()
 	h := newNickHub()
 	now := time.Now()
 	h.holdNick("Вася", "10.0.0.1", "p1", now)
@@ -70,6 +72,7 @@ func TestNickReleaseOnlyOwn(t *testing.T) {
 }
 
 func TestReleaseNicksOfIP(t *testing.T) {
+	t.Parallel()
 	h := newNickHub()
 	now := time.Now()
 	h.holdNick("Вася", "10.0.0.1", "p1", now)
@@ -86,6 +89,7 @@ func TestReleaseNicksOfIP(t *testing.T) {
 }
 
 func TestEvictNickHoldsKeepsLiveSessions(t *testing.T) {
+	t.Parallel()
 	h := newNickHub()
 	now := time.Now()
 	// Живая сессия с самой старой бронью — её вытеснять нельзя.

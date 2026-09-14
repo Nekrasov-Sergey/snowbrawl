@@ -30,7 +30,9 @@ type Info struct {
 // mod может быть nil — тогда ручки ролей и банов отвечают ошибкой, а игра работает как раньше.
 // trustProxy определяет, верить ли X-Forwarded-For при проверке роли по адресу (см. вход по роли
 // «Админ» ниже) — то же правило, что у игрового WebSocket.
-func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token string, started time.Time, trustProxy bool) func() {
+// streamEvery — период SSE-потока состояния; ноль означает боевую секунду, ненулевое значение
+// ставят тесты, чтобы не ждать реального времени (см. config.Config.AdminStreamEvery).
+func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token string, started time.Time, trustProxy bool, streamEvery time.Duration) func() {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "build": info.Build, "uptime": time.Since(started).Round(time.Second).String()})
 	})
@@ -116,7 +118,10 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 
 	// Поток состояния: страница не опрашивает сервер, а получает сводку сразу при изменении.
 	st := newStreamer(h)
-	go st.run(time.Second)
+	if streamEvery <= 0 {
+		streamEvery = time.Second
+	}
+	go st.run(streamEvery)
 	g.GET("/stream", func(c *gin.Context) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-store")

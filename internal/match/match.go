@@ -7,6 +7,7 @@
 package match
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -56,6 +57,10 @@ type Options struct {
 	// Seed — зерно симуляции матча. nil — из crypto/rand, то есть каждый матч свой.
 	// Задаётся только из конфигурации с ненулевым Seed (тесты), см. config.Config.Seed.
 	Seed *uint32
+	// TimeScale — во сколько раз модельное время матча идёт быстрее реального. Ноль и единица —
+	// как в бою. Шаг симуляции (dt) от него не зависит, меняется только частота тиков: правила
+	// и физика те же, матч просто проигрывается быстрее. Нужен тестам, см. config.Config.
+	TimeScale float64
 }
 
 type human struct {
@@ -90,6 +95,9 @@ type Match struct {
 	result  Result
 	stopCh  chan struct{}
 	stopped sync.Once
+	// finished закрывается, когда match.end уже разослан и onEnd отработал: по нему ждёт Wait,
+	// чтобы остановка сервера не угадывала задержку сном.
+	finished chan struct{}
 }
 
 // New создаёт матч (без запуска цикла).
@@ -128,7 +136,8 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 		ID: "m" + randomHex(4), RoomCode: roomCode, Mode: mode, Arena: arena, GameMode: opts.GameMode,
 		Players: players, Created: now,
 		StartsAt: now.Add(opts.Countdown),
-		opts:     opts, onEnd: onEnd, sim: s, humans: map[string]*human{}, stopCh: make(chan struct{}),
+		opts:     opts, onEnd: onEnd, sim: s, humans: map[string]*human{},
+		stopCh: make(chan struct{}), finished: make(chan struct{}),
 	}
 	for _, p := range players {
 		if !p.Bot {
@@ -454,8 +463,18 @@ func (m *Match) setBot(h *human, bot bool) {
 }
 
 func (m *Match) loop() {
-	interval := time.Second / time.Duration(m.opts.TickRate)
+	// dt считается от TickRate, а интервал тика — ещё и от TimeScale: симуляция получает те же
+	// шаги, только чаще. Пока они были выведены из одного TickRate, модельное время матча было
+	// жёстко равно реальному, и ускорить матч в тестах было нечем.
 	dt := 1.0 / float64(m.opts.TickRate)
+	scale := m.opts.TimeScale
+	if scale <= 0 {
+		scale = 1
+	}
+	interval := time.Duration(float64(time.Second) / (float64(m.opts.TickRate) * scale))
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -584,6 +603,18 @@ func (m *Match) finish() {
 	m.opts.Log.Info().Str("match", m.ID).Str("winner", res.Winner).Str("reason", res.Reason).Int("ticks", m.tick).Msg("match finished")
 	if m.onEnd != nil {
 		m.onEnd(m, res)
+	}
+	close(m.finished)
+}
+
+// Wait ждёт, пока матч закончится и match.end уйдёт в сокеты, но не дольше ctx. Возвращает
+// true, если дождались. Этим пользуется Hub.Shutdown вместо фиксированной паузы.
+func (m *Match) Wait(ctx context.Context) bool {
+	select {
+	case <-m.finished:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

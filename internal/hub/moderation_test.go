@@ -15,6 +15,10 @@ import (
 
 // dialRaw подключается без харнесса: забаненный получает ошибку вместо welcome, а expect
 // в харнессе на ошибке падает.
+//
+// Чтение заканчивается на первой ошибке протокола, а не по таймауту контекста: забаненному
+// сервер сразу рвёт соединение, а вот при матерном нике оно остаётся живым — и раньше хелпер
+// висел в Read все пять секунд, хотя нужный кадр уже пришёл.
 func dialRaw(t *testing.T, s *testServer, nick string) []protocol.Envelope {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -33,11 +37,15 @@ func dialRaw(t *testing.T, s *testServer, nick string) []protocol.Envelope {
 		}
 		env, _ := protocol.Decode(data)
 		out = append(out, env)
+		if env.Type == protocol.SError {
+			break
+		}
 	}
 	return out
 }
 
 func TestBannedIPRejectedOnHello(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	a := s.connect(t, "Аня", "")
 	if err := s.mod.Ban("127.0.0.1", "Аня", "флуд", time.Now()); err != nil {
@@ -84,6 +92,7 @@ func TestBannedIPRejectedOnHello(t *testing.T) {
 }
 
 func TestBanKicksPlayerFromMatch(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
@@ -114,6 +123,7 @@ func TestBanKicksPlayerFromMatch(t *testing.T) {
 }
 
 func TestRankPushedAndSeenInChatAndLobby(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = time.Hour })
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
@@ -154,6 +164,7 @@ func TestRankPushedAndSeenInChatAndLobby(t *testing.T) {
 }
 
 func TestChatDeleteRights(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 0 })
 	a := s.connect(t, "Аня", "")  // станет админом
 	b := s.connect(t, "Боря", "") // обычный игрок
@@ -220,6 +231,7 @@ func TestChatDeleteRights(t *testing.T) {
 }
 
 func TestChatClearWipesHistoryForAll(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 0 })
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
@@ -246,6 +258,7 @@ func TestChatClearWipesHistoryForAll(t *testing.T) {
 }
 
 func TestChatCensored(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 0 })
 	a := s.connect(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
@@ -261,6 +274,7 @@ func TestChatCensored(t *testing.T) {
 }
 
 func TestProfaneNickRejected(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	msgs := dialRaw(t, s, "мудак")
 	for _, env := range msgs {
@@ -285,6 +299,7 @@ func TestProfaneNickRejected(t *testing.T) {
 }
 
 func TestJoinWrongSectionRejected(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	a := s.connect(t, "Аня", "")
 	a.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, GameMode: "survival"})
@@ -321,6 +336,7 @@ func TestJoinWrongSectionRejected(t *testing.T) {
 }
 
 func TestStatsSortsSessionsByJoinTime(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	// Ники в обратном алфавитном порядке: сортировка должна быть по времени входа.
 	first := s.connect(t, "Яна", "")
@@ -347,6 +363,7 @@ func TestStatsSortsSessionsByJoinTime(t *testing.T) {
 // TestStatsIsStableBetweenCalls — предусловие SSE-потока админки: при неизменном состоянии
 // сводка должна быть побайтово той же. Ловит и «мс назад» в полях, и несортированные map.
 func TestStatsIsStableBetweenCalls(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	a := s.connect(t, "Аня", "")
 	a.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})

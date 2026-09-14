@@ -30,6 +30,16 @@ const (
 	defaultPongTimeout = 10 * time.Second // столько ждём pong, иначе считаем соединение мёртвым
 )
 
+// Лимит частоты сообщений. Порог выбран с запасом к боевому трафику клиента (движение и прицел
+// уходят по изменению, в бою это 10-15 сообщений/с). Сверх лимита отбрасывается только поточное
+// и идемпотентное (protocol.Droppable), всё остальное обрабатывается всегда. Закрытие остаётся
+// для устойчивого превышения втрое — это бот или атака, а не игрок.
+const (
+	defaultMsgRate = 60
+	abuseRateMul   = 3  // rate второго бакета = MsgRate × это
+	abuseBurstMul  = 10 // burst второго бакета = MsgRate × это
+)
+
 // Options — параметры сервера соединений.
 type Options struct {
 	MaxConns    int
@@ -52,7 +62,7 @@ type Server struct {
 // NewServer создаёт сервер соединений.
 func NewServer(opts Options, h Handler) *Server {
 	if opts.MsgRate <= 0 {
-		opts.MsgRate = 30
+		opts.MsgRate = defaultMsgRate
 	}
 	if opts.PingPeriod <= 0 {
 		opts.PingPeriod = defaultPingPeriod
@@ -93,6 +103,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out:    make(chan []byte, 256),
 		closed: make(chan struct{}),
 		rate:   newBucket(s.opts.MsgRate, s.opts.MsgRate*2),
+		abuse:  newBucket(s.opts.MsgRate*abuseRateMul, s.opts.MsgRate*abuseBurstMul),
 	}
 	s.conns.Add(1)
 	s.wg.Add(1)
@@ -105,11 +116,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Conn — одно клиентское соединение.
 type Conn struct {
-	ID   int64
-	ip   string
-	ws   *websocket.Conn
-	out  chan []byte
-	rate *bucket
+	ID  int64
+	ip  string
+	ws  *websocket.Conn
+	out chan []byte
+	// rate решает, обрабатывать ли сообщение, abuse — жить ли соединению. Болтливый, но честный
+	// клиент теряет лишние сообщения; закрываем только того, кто превышает лимит кратно и долго.
+	rate  *bucket
+	abuse *bucket
+	// dropped пишет только горутина чтения, а читает run — после <-readDone, то есть уже за
+	// барьером закрытия канала. Мьютекс поэтому не нужен.
+	dropped int
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -235,13 +252,27 @@ func (c *Conn) run(h Handler, log zerolog.Logger, pingPeriod, pongTimeout time.D
 				c.Close(websocket.StatusNormalClosure, "")
 				return
 			}
-			if !c.rate.take() {
+			// Второй бакет считает ВЕСЬ поток, а не только его излишек: иначе порог закрытия
+			// оказывался не 3×MsgRate, а 4× (излишек = поток минус MsgRate), и ровный флуд
+			// чуть ниже этой черты не закрывался никогда. Проверка стоит до разбора — флуд
+			// не должен оплачиваться разбором JSON.
+			if !c.abuse.take() {
 				c.Close(websocket.StatusPolicyViolation, "rate limit")
 				return
 			}
 			env, err := protocol.Decode(data)
 			if err != nil {
 				c.Send(protocol.MustEncode(protocol.SError, protocol.Error{Code: protocol.ErrBadMessage, Message: err.Error()}))
+				continue
+			}
+			// Сверх лимита отбрасываем только поточное и идемпотентное (см. protocol.Droppable).
+			// Бросок, способность и прочие переходы состояния проходят всегда: потерянный throw
+			// оставил бы бойца в вечном замахе.
+			if !c.rate.take() && protocol.Droppable(env) {
+				c.dropped++
+				if c.dropped == 1 {
+					log.Warn().Int64("conn", c.ID).Str("ip", c.ip).Msg("ws rate limit: сообщения отбрасываются")
+				}
 				continue
 			}
 			h.OnMessage(c, env)
@@ -262,7 +293,13 @@ func (c *Conn) run(h Handler, log zerolog.Logger, pingPeriod, pongTimeout time.D
 	cancel()
 	<-readDone
 	h.OnClose(c)
-	log.Debug().Int64("conn", c.ID).Str("ip", c.ip).Str("reason", text).Msg("ws closed")
+	ev := log.Debug()
+	if c.dropped > 0 {
+		// На боевом уровне логирования Debug не виден, а отброс — единственный след того, что
+		// клиент упёрся в лимит. Однажды это уже стоило долгого поиска «пропадающего соединения».
+		ev = log.Warn().Int("dropped", c.dropped)
+	}
+	ev.Int64("conn", c.ID).Str("ip", c.ip).Str("reason", text).Msg("ws closed")
 }
 
 // ClientIP — адрес клиента запроса. Отдельная функция, а не gin-овский c.ClientIP(): тот по

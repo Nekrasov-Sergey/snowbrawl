@@ -7,6 +7,7 @@ import (
 )
 
 func TestRootsAreNormalized(t *testing.T) {
+	t.Parallel()
 	for _, r := range roots {
 		if got := normalize([]rune(r)); got != r {
 			t.Errorf("корень %q не в нормализованном виде (стал %q)", r, got)
@@ -20,6 +21,7 @@ func TestRootsAreNormalized(t *testing.T) {
 }
 
 func TestMaskCatchesObfuscation(t *testing.T) {
+	t.Parallel()
 	cases := []string{
 		"хуй", "ХуЙ", "х.у.й", "хуууй", "xyй", "х у й", "х-у-й",
 		"пиздец", "иди на хуй", "ебать", "ёбнул", "заебал", "п1здец",
@@ -37,6 +39,7 @@ func TestMaskCatchesObfuscation(t *testing.T) {
 }
 
 func TestMaskKeepsInnocentWords(t *testing.T) {
+	t.Parallel()
 	cases := []string{
 		"команда", "мандарин", "мандат", "мандолина", "мандраж", "скипидар",
 		"требовать", "употреблять", "лебеда", "хлеб", "себе", "тебе", "тебя", "себя",
@@ -56,6 +59,7 @@ func TestMaskKeepsInnocentWords(t *testing.T) {
 }
 
 func TestMaskPreservesRestOfMessage(t *testing.T) {
+	t.Parallel()
 	in := "ну ты и мудак конечно"
 	out := Mask(in)
 	if out == in {
@@ -73,6 +77,7 @@ func TestMaskPreservesRestOfMessage(t *testing.T) {
 }
 
 func TestMaskEmptyAndPlain(t *testing.T) {
+	t.Parallel()
 	if Bad("") || Mask("") != "" {
 		t.Fatal("пустая строка")
 	}

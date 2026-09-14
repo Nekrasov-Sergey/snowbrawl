@@ -2,6 +2,7 @@ package sim_test
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
@@ -22,6 +23,8 @@ type fighter struct {
 	BB     float64 `json:"bb"`
 	CD     float64 `json:"cd"`
 	RL     float64 `json:"rl"`
+	Am     float64 `json:"am"`
+	ET     string  `json:"et"`
 	Slow   bool    `json:"slow"`
 }
 
@@ -106,6 +109,7 @@ func fireAt(t *testing.T, m *sim.Match, x, y, power float64) {
 // bb показывает остаток восстановления, и реген требует ОБОИХ условий сразу — 12 с с момента
 // хлопка и 12 с без реального урона. На этом стоит дуга вокруг бойца и подсказка шага.
 func TestBubbleRechargeSnapshot(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	m := shooterAt(t, p, "Снайпер", 7)
 	eid, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Щит", X: 560, Y: 150, Bot: false})
@@ -151,6 +155,7 @@ func TestBubbleRechargeSnapshot(t *testing.T) {
 // переиспользует объекты бойцов при интерполяции, и пропущенный ключ сохранил бы прошлое
 // значение — дуга висела бы на чужой роли.
 func TestBubbleFieldAlwaysPresent(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	m, err := p.NewMatch(botsConfig(3, p.Roles()), 4)
 	if err != nil {
@@ -186,6 +191,7 @@ func TestBubbleFieldAlwaysPresent(t *testing.T) {
 // кулдауном у соперника Танк уровня 2 таранит каждые 2 секунды, и шаги «дайте сопернику попасть»
 // превращаются в непрерывное оглушение.
 func TestTutorialCooldownScope(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: true,
 		Players: []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Щит"}}}
@@ -216,6 +222,7 @@ func TestTutorialCooldownScope(t *testing.T) {
 // TestSapperBreaksCrate — пассив «Сапёр»: ящик «Классики» держит 4 HP, взрыв снимает 3, значит
 // на снос нужно ровно два попадания. На этом стоит шаг обучения Бомбера.
 func TestSapperBreaksCrate(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	// Боец стоит на чистой линии y=150: у спавна колонна, и подойти к ящику «в лоб» нельзя —
 	// столкновение выдавливает бойца влево, а бомба взрывается о колонну.
@@ -273,16 +280,19 @@ func TestSapperBreaksCrate(t *testing.T) {
 }
 
 // TestFreezerAuraSlowsTimers — пассив «Стужа» замедляет не только шаг: в ауре вражеского Фризера
-// у бойца медленнее течёт перезарядка броска и кулдаун способности. Вне радиуса — обычная
-// скорость: это растяжение времени, а не штраф в момент броска.
+// у бойца медленнее заполняется боезапас и медленнее течёт кулдаун способности. Вне радиуса —
+// обычная скорость: это растяжение времени, а не штраф в момент броска.
+// Сравниваем по доле заполнения отделения (am), а не по rl: rl — это пауза в 250 мс между
+// выстрелами, после округления до десятых разницу от ауры в ней не видно.
 func TestFreezerAuraSlowsTimers(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	// Ученик — Щит: у него самый длинный кулдаун, разницу видно без долгих прогонов.
 	m := shooterAt(t, p, "Щит", 21)
 
 	// Замеряем, как убывает кулдаун без ауры и в ней. Соперника ставим вплотную, чтобы тест не
 	// зависел от конкретного радиуса — границу проверяет TestFreezerAuraBoundary.
-	measure := func(withAura bool) (cd, rl float64) {
+	measure := func(withAura bool) (cd, ammoFrac float64) {
 		if withAura {
 			me := fighterByID(t, m, "me")
 			if _, err := m.TutorialSpawn(sim.TutorialSpawnOpts{Role: "Фризер", X: me.X, Y: me.Y + 20, Bot: false}); err != nil {
@@ -295,12 +305,12 @@ func TestFreezerAuraSlowsTimers(t *testing.T) {
 		}
 		fireAt(t, m, 700, 150, 0.5)
 		me := fighterByID(t, m, "me")
-		return me.CD, me.RL
+		return me.CD, me.Am - math.Floor(me.Am)
 	}
 
-	freeCD, freeRL := measure(false)
-	if freeCD <= 0 || freeRL <= 0 {
-		t.Fatalf("без ауры нечего сравнивать: cd=%.2f rl=%.2f", freeCD, freeRL)
+	freeCD, freeAmmo := measure(false)
+	if freeCD <= 0 || freeAmmo <= 0 {
+		t.Fatalf("без ауры нечего сравнивать: cd=%.2f доля отделения=%.2f", freeCD, freeAmmo)
 	}
 
 	// Ждём полного восстановления и повторяем то же самое рядом с Фризером.
@@ -308,21 +318,22 @@ func TestFreezerAuraSlowsTimers(t *testing.T) {
 		steps(t, m, 1)
 	}
 	steps(t, m, 5)
-	auraCD, auraRL := measure(true)
+	auraCD, auraAmmo := measure(true)
 
 	if auraCD <= freeCD {
 		t.Fatalf("в ауре кулдаун %.2f, без неё %.2f — замедления нет", auraCD, freeCD)
 	}
-	if auraRL <= freeRL {
-		t.Fatalf("в ауре перезарядка %.2f, без неё %.2f — замедления нет", auraRL, freeRL)
+	if auraAmmo >= freeAmmo {
+		t.Fatalf("в ауре отделение заполнено на %.2f, без неё на %.2f — замедления нет", auraAmmo, freeAmmo)
 	}
-	if auraRL > 1 {
-		t.Fatalf("rl=%.2f: поле обязано быть зажато в 1, иначе клиент рисует дугу больше круга", auraRL)
+	if me := fighterByID(t, m, "me"); me.Am > 3 {
+		t.Fatalf("am=%.2f: боезапас не может превышать AMMO_MAX", me.Am)
 	}
 }
 
 // TestFreezerAuraOnlyEnemies — своя аура союзников не тормозит.
 func TestFreezerAuraOnlyEnemies(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	cfg := sim.MatchConfig{Mode: 2, ArenaIndex: 0, Players: []sim.PlayerConfig{
 		{ID: "a0", Team: "A", Role: "Щит"},
@@ -334,7 +345,7 @@ func TestFreezerAuraOnlyEnemies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Ставим союзников рядом и бросаем: перезарядка обязана идти обычным темпом.
+	// Ставим союзников рядом и бросаем: боезапас обязан заполняться обычным темпом.
 	if ok, _ := m.ApplyInput("a0", json.RawMessage(`{"kind":"chargeStart","x":700,"y":280}`)); !ok {
 		t.Fatal("замах отклонён")
 	}
@@ -343,11 +354,11 @@ func TestFreezerAuraOnlyEnemies(t *testing.T) {
 	if ok, _ := m.ApplyInput("a0", body); !ok {
 		t.Fatal("бросок отклонён")
 	}
-	start := fighterByID(t, m, "a0").RL
+	start := fighterByID(t, m, "a0").Am
 	steps(t, m, 4)
-	after := fighterByID(t, m, "a0").RL
-	if !(after < start) {
-		t.Fatalf("перезарядка не убывает рядом со своим Фризером: %.2f → %.2f", start, after)
+	after := fighterByID(t, m, "a0").Am
+	if !(after > start) {
+		t.Fatalf("боезапас не заполняется рядом со своим Фризером: %.2f → %.2f", start, after)
 	}
 }
 
@@ -355,6 +366,7 @@ func TestFreezerAuraOnlyEnemies(t *testing.T) {
 // Единственный тест, который поймает изменение FREEZER_AURA_R: остальные ставят Фризера вплотную
 // и переживут любой радиус, поэтому опечатка в константе прошла бы незамеченной.
 func TestFreezerAuraBoundary(t *testing.T) {
+	t.Parallel()
 	p := loadProgram(t)
 	radius := auraRadius(t)
 

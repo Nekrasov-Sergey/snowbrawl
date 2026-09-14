@@ -26,7 +26,7 @@ type Config struct {
 	Countdown    time.Duration // отсчёт перед стартом матча
 	RoomTTL      time.Duration // пустая комната живёт столько
 	RoomsPerIP   int           // живых комнат на один IP
-	MsgRate      int           // сообщений в секунду на соединение
+	MsgRate      int           // сообщений в секунду на соединение (сверх — отбрасываются)
 	DrainTimeout time.Duration // сколько дренаж ждёт окончания матчей
 	TrustProxy   bool          // брать IP клиента из X-Forwarded-For (за Caddy/nginx)
 	ChatTTL      time.Duration // сколько живёт сообщение общего чата
@@ -42,6 +42,20 @@ type Config struct {
 	// Нужен тестам: без него бой каждый раз разный и тест на KO превращается в лотерею.
 	// Ни флага, ни переменной окружения у поля нет — в прод оно не выставляется.
 	Seed uint64
+	// Поля ниже, как и Seed, существуют ради тестов: ноль означает «как в бою», флагов и
+	// переменных окружения у них нет. Тесты ими сжимают ожидания реального времени — без этого
+	// прогон пакета упирается в тикеры и таймауты, а не в проверки.
+	//
+	// TimeScale — во сколько раз быстрее реального идёт модельное время матча. Шаг симуляции
+	// (dt) не меняется, меняется только частота тиков, поэтому правила и физика те же.
+	TimeScale float64
+	// HubTick — период фонового цикла hub'а (TTL сессий и комнат, рассылка списка, выборка
+	// ряда онлайна). Ноль — 500 мс.
+	HubTick time.Duration
+	// PingProbeEvery — как часто уходит зонд задержки. Ноль — 2 с (см. internal/hub/ping.go).
+	PingProbeEvery time.Duration
+	// AdminStreamEvery — период SSE-потока админки. Ноль — 1 с.
+	AdminStreamEvery time.Duration
 }
 
 // Defaults возвращает конфигурацию по умолчанию.
@@ -57,7 +71,7 @@ func Defaults() Config {
 		Countdown:    3 * time.Second,
 		RoomTTL:      10 * time.Minute,
 		RoomsPerIP:   3,
-		MsgRate:      30,
+		MsgRate:      60,
 		DrainTimeout: 3 * time.Minute,
 		ChatTTL:      time.Hour,
 		ChatCooldown: 1500 * time.Millisecond,

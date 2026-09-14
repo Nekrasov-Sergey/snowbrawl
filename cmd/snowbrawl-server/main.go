@@ -77,7 +77,7 @@ func run() error {
 	r := gin.New()
 	r.Use(gin.Recovery(), requestLogger(log))
 	r.GET("/ws", gin.WrapH(wsServer))
-	stopAdmin := admin.Register(r, h, mod, admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version}, cfg.AdminToken, started, cfg.TrustProxy)
+	stopAdmin := admin.Register(r, h, mod, admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version}, cfg.AdminToken, started, cfg.TrustProxy, cfg.AdminStreamEvery)
 	web.Register(r, fsys, cfg.WebDir != "", cfg.BuildVersion)
 
 	srv := &http.Server{Addr: cfg.Addr, Handler: r, ReadHeaderTimeout: 10 * time.Second}

@@ -15,6 +15,7 @@ import (
 // Права на удаление сообщений проверяем внутри пакета: роли выдаются по IP, а в
 // интеграционных тестах все клиенты приходят с 127.0.0.1 и роль у них общая.
 func TestCanDeleteChatRules(t *testing.T) {
+	t.Parallel()
 	mod, err := moderation.Open("", zerolog.New(io.Discard))
 	if err != nil {
 		t.Fatal(err)

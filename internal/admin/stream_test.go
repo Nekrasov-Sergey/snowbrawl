@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,13 @@ func newAdmin(t *testing.T) (*httptest.Server, *hub.Hub, func()) {
 	return srv, h, stop
 }
 
+// gin.SetMode — глобальная настройка; при параллельных тестах её нельзя дёргать из каждого
+// хелпера, поэтому она здесь, один раз на пакет.
+func TestMain(m *testing.M) {
+	gin.SetMode(gin.TestMode)
+	os.Exit(m.Run())
+}
+
 func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.Store, func()) {
 	t.Helper()
 	src, err := snowbrawl.Web.ReadFile(snowbrawl.SimPath)
@@ -44,16 +52,19 @@ func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.St
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
+	// Ноль у этих полей означает боевое значение; тесты их сжимают, чтобы не пережидать
+	// секундный период потока и полусекундный фоновый цикл (см. config.Config).
+	cfg.HubTick = 20 * time.Millisecond
+	cfg.AdminStreamEvery = 20 * time.Millisecond
 	series, err := onlinestat.Open("", log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := hub.New(cfg, prog, log, mod, series)
 	h.Run()
-	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	// trustProxy=false: адрес берётся только из RemoteAddr, заголовкам не верим.
-	stop := Register(r, h, mod, Info{Build: "test", SimVersion: prog.Version(), Proto: 3}, testToken, time.Now(), false)
+	stop := Register(r, h, mod, Info{Build: "test", SimVersion: prog.Version(), Proto: 3}, testToken, time.Now(), false, cfg.AdminStreamEvery)
 	srv := httptest.NewServer(r)
 	t.Cleanup(func() { stop(); h.Shutdown(); srv.Close() })
 	return srv, h, mod, stop
@@ -61,6 +72,7 @@ func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.St
 
 // Вход в админку по роли «Админ»: токен ему не выдаётся, пускаем по адресу запроса.
 func TestCreatorEntersWithoutToken(t *testing.T) {
+	t.Parallel()
 	srv, _, mod, _ := newAdminWithStore(t)
 
 	res, err := http.Get(srv.URL + "/admin/state")
@@ -115,6 +127,7 @@ func TestCreatorEntersWithoutToken(t *testing.T) {
 }
 
 func TestStreamNeedsToken(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/stream")
 	if err != nil {
@@ -159,6 +172,7 @@ func readFrame(t *testing.T, br *bufio.Reader, wait time.Duration) string {
 }
 
 func TestStreamSendsFirstStateImmediately(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/stream?token=" + testToken)
 	if err != nil {
@@ -174,13 +188,15 @@ func TestStreamSendsFirstStateImmediately(t *testing.T) {
 	if !strings.Contains(first, `"proto":4`) {
 		t.Fatalf("первый кадр: %q", first)
 	}
-	// Состояние не менялось — второго кадра быть не должно.
-	if next := readFrame(t, br, 2500*time.Millisecond); next != "" {
+	// Состояние не менялось — второго кадра быть не должно. Окно короткое, но с запасом
+	// к периоду потока (20 мс): будь диффинг сломан, кадр пришёл бы сразу.
+	if next := readFrame(t, br, 300*time.Millisecond); next != "" {
 		t.Fatalf("лишний кадр при неизменном состоянии: %q", next)
 	}
 }
 
 func TestStreamSendsOnChange(t *testing.T) {
+	t.Parallel()
 	srv, h, _ := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/stream?token=" + testToken)
 	if err != nil {
@@ -199,6 +215,7 @@ func TestStreamSendsOnChange(t *testing.T) {
 }
 
 func TestStreamStopsOnShutdown(t *testing.T) {
+	t.Parallel()
 	srv, _, stop := newAdmin(t)
 	res, err := http.Get(srv.URL + "/admin/stream?token=" + testToken)
 	if err != nil {

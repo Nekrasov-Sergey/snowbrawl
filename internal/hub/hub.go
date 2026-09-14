@@ -4,6 +4,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +105,11 @@ func (h *Hub) Run() {
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
-		t := time.NewTicker(500 * time.Millisecond)
+		every := h.cfg.HubTick
+		if every <= 0 {
+			every = 500 * time.Millisecond
+		}
+		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			select {
@@ -136,7 +141,18 @@ func (h *Hub) Shutdown() {
 	for _, m := range matches {
 		m.Stop(match.ReasonShutdown)
 	}
-	time.Sleep(200 * time.Millisecond) // дать match.end уйти в сокеты
+	// Ждём, пока матчи разошлют match.end, и только потом рвём сокеты. Раньше здесь стояла
+	// безусловная пауза 200 мс: она платилась даже когда матчей не было вовсе, а когда они были —
+	// не гарантировала ничего. Потолок ожидания тот же.
+	if len(matches) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		for _, m := range matches {
+			if !m.Wait(ctx) {
+				h.log.Warn().Str("match", m.ID).Msg("match.end не успел уйти до закрытия сокетов")
+			}
+		}
+		cancel()
+	}
 	for _, c := range conns {
 		c.Close(websocket.StatusGoingAway, "server restart")
 	}
@@ -302,6 +318,9 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		}
 		if old, ok := p.Conn.(*ws.Conn); ok && old != c {
 			old.Session = nil
+			// Текст причины — часть контракта с клиентом: по нему web/client/net.js понимает,
+			// что сессию забрала другая вкладка, и НЕ переподключается. Без этого две вкладки
+			// вышибали друг друга по кругу раз в секунду, и игра ломалась в обеих.
 			old.Close(websocket.StatusPolicyViolation, "replaced by new connection")
 		}
 		p.IP = c.IP()
@@ -694,7 +713,8 @@ func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, cam
 	players := h.fillTeams(mode, gameMode, difficulty, humans)
 	opts := match.Options{
 		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Countdown: h.cfg.Countdown, Log: h.log, Now: h.now,
-		GameMode: gameMode, Campaign: campaign, Difficulty: difficulty,
+		TimeScale: h.cfg.TimeScale,
+		GameMode:  gameMode, Campaign: campaign, Difficulty: difficulty,
 	}
 	if h.cfg.Seed != 0 {
 		// Зерно матча — производная от h.rng, а не от cfg.Seed напрямую: иначе все матчи одного

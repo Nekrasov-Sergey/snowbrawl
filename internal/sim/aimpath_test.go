@@ -7,20 +7,14 @@ import (
 	"testing"
 
 	"github.com/dop251/goja"
-
-	snowbrawl "github.com/Nekrasov-Sergey/snowbrawl"
 )
 
 // aimPath — чистая функция для клиентского луча прицела, серверный sim.Program её наружу не
 // пробрасывает. Дублировать проброс ради теста незачем, поэтому здесь свой goja-рантайм.
 func aimVM(t testing.TB) *goja.Runtime {
 	t.Helper()
-	src, err := snowbrawl.Web.ReadFile(snowbrawl.SimPath)
-	if err != nil {
-		t.Fatalf("read sim.js: %v", err)
-	}
 	vm := goja.New()
-	if _, err := vm.RunString(string(src)); err != nil {
+	if _, err := vm.RunProgram(sharedAimJS); err != nil {
 		t.Fatalf("run sim.js: %v", err)
 	}
 	// Хелперы: препятствия арены (как их собирает клиент) и вызов aimPath.
@@ -81,6 +75,7 @@ func aimCall(t testing.TB, vm *goja.Runtime, expr string) aimResult {
 }
 
 func TestAimPathGeometry(t *testing.T) {
+	t.Parallel()
 	vm := aimVM(t)
 	// Чистое поле «Классики»: сверху слева препятствий нет.
 	p := aimCall(t, vm, `aim('Танк', null, 100, 100, 700, 100, 1)`)
@@ -108,6 +103,7 @@ func TestAimPathGeometry(t *testing.T) {
 }
 
 func TestAimPathBlocked(t *testing.T) {
+	t.Parallel()
 	vm := aimVM(t)
 	// Колонна «Классики»: x 168..192, y 205..295, высота 20.
 	p := aimCall(t, vm, `aim('Танк', null, 100, 250, 400, 250, 0.15)`)
@@ -132,6 +128,7 @@ func TestAimPathBlocked(t *testing.T) {
 }
 
 func TestAimPathOverCover(t *testing.T) {
+	t.Parallel()
 	vm := aimVM(t)
 	// Низкое укрытие (415,448,w70,h22) высотой 16: навес его перелетает.
 	p := aimCall(t, vm, `aim('Снайпер', null, 150, 448, 700, 448, 1)`)
@@ -155,6 +152,7 @@ func TestAimPathOverCover(t *testing.T) {
 }
 
 func TestAimPathRoleAndSnipe(t *testing.T) {
+	t.Parallel()
 	vm := aimVM(t)
 	tank := aimCall(t, vm, `aim('Танк', null, 100, 100, 700, 100, 1)`)
 	sniper := aimCall(t, vm, `aim('Снайпер', null, 100, 100, 700, 100, 1)`)
@@ -181,6 +179,7 @@ func TestAimPathRoleAndSnipe(t *testing.T) {
 // TestAimPathMatchesFlight — главный тест: предсказание луча сверяется с настоящим полётом
 // снежка в матче обучения. Ловит любое расхождение прицела с симуляцией.
 func TestAimPathMatchesFlight(t *testing.T) {
+	t.Parallel()
 	vm := aimVM(t)
 	const scenario = `
 function flight(role, armed, tx, ty, power) {

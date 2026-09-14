@@ -1081,35 +1081,46 @@ window.SBRender = (function () {
         ctx.beginPath(); ctx.arc(vx, vy, r + 3.5, 0, Math.PI * 2);
         ctx.strokeStyle = ac; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.85; ctx.stroke(); ctx.globalAlpha = 1;
       }
-      // Перезарядка выстрела: убывающая дуга вокруг своего бойца (полная сразу после броска).
-      // Зелёная — выстрел уже поставлен в очередь: замах начнётся сам, как только дуга исчезнет.
-      if (isMe && p.rl > 0) {
-        var rr = r + 10;
-        ctx.beginPath(); ctx.arc(vx, vy, rr, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3; ctx.stroke();
-        ctx.beginPath(); ctx.arc(vx, vy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p.rl);
-        ctx.strokeStyle = local && local.pending ? '#7CFFB2' : '#ffcf5b';
-        ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
-        ctx.lineCap = 'butt';
-      }
-
       var lb = labelOf(p, isMe, myTeam);
       // Подпись встаёт НАД макушкой, а не над центром бойца: модели разной высоты (риг втрое
       // выше прежнего кружка, Йети и босс ещё выше), и от центра ник с полоской ложились на лицо.
       var above = golemKind === 'boss' ? r * 4.6 : golemKind === 'tank' ? r * 2.5
                 : golemKind === 'roller' ? r * 1.2
                 : (useRig && Rig.topOf ? Rig.topOf(r, p.role, RIG_SCALE) - r * 0.9 : r + 4);
-      ctx.drawImage(lb.canvas, Math.round(p.x - lb.w / 2),
-        Math.max(2, Math.round(p.y - above - 4 - lb.h)), lb.w, lb.h);
+      // Свой боезапас идёт третьей строкой стека, поэтому весь стек поднимается на её высоту:
+      // так полоска встаёт под полоской HP и всё равно не задевает макушку модели.
+      var showAmmo = isMe && alive && typeof p.am === 'number';
+      var lx = Math.round(p.x - lb.w / 2);
+      var ly = Math.max(2, Math.round(p.y - above - 4 - lb.h - (showAmmo ? AMMO_GAP + AMMO_H : 0)));
+      ctx.drawImage(lb.canvas, lx, ly, lb.w, lb.h);
       ctx.restore();
 
-      if (charging) {
-        if (isMe) drawAim(snap, p, aimX, aimY, power);
-        var bw = 40;
-        ctx.fillStyle = '#0b1622'; ctx.fillRect(p.x - bw / 2, p.y - r - 20, bw, 6);
-        ctx.fillStyle = p.special ? '#b478ff' : (power > 0.7 ? '#ff5b5b' : '#ffd166');
-        ctx.fillRect(p.x - bw / 2, p.y - r - 20, bw * power, 6);
+      // Полоска боезапаса рисуется здесь, а не внутри спрайта подписи: am меняется каждый кадр,
+      // и кеш labels[] пересобирался бы на каждом. Габариты повторяют полоску HP из labelOf,
+      // чтобы длина совпадала ровно.
+      if (showAmmo) drawAmmoBar(p, lx + 4, ly + lb.h + AMMO_GAP, lb.w - 8, !!(local && local.pending));
+
+      if (charging && isMe) drawAim(snap, p, aimX, aimY, power);
+    }
+
+    var AMMO_H = 5, AMMO_GAP = 2, AMMO_CELL_GAP = 2, AMMO_FILL = '#ff9f2e', AMMO_PENDING = '#7CFFB2';
+    /** pending — нажатие ждёт заряда: подсвечиваем то отделение, которого игрок дожидается.
+        Без этого нажатие с пустым запасом не давало вообще никакой обратной связи: прежняя
+        зелёная дуга убрана, а обучение по-прежнему обещает, что бросок встанет в очередь. */
+    function drawAmmoBar(p, x, y, w, pending) {
+      var n = Sim.AMMO_MAX || 3, cw = (w - AMMO_CELL_GAP * (n - 1)) / n;
+      var full = Math.floor(p.am + 1e-6), frac = p.am - full;
+      for (var i = 0; i < n; i++) {
+        var cx = x + i * (cw + AMMO_CELL_GAP);
+        ctx.fillStyle = 'rgba(11,22,34,0.62)'; ctx.fillRect(cx, y, cw, AMMO_H);
+        var fw = i < full ? cw : (i === full ? cw * frac : 0);
+        if (fw > 0) { ctx.fillStyle = AMMO_FILL; ctx.fillRect(cx, y, fw, AMMO_H); }
+        var waited = pending && i === full;
+        ctx.strokeStyle = waited ? AMMO_PENDING : 'rgba(11,22,34,0.85)';
+        ctx.lineWidth = waited ? 1.5 : 1;
+        ctx.strokeRect(cx + 0.5, y + 0.5, cw - 1, AMMO_H - 1);
       }
+      ctx.lineWidth = 1;
     }
     // Единый y-sorted проход: «высокие» объекты (укрытия, ёлки, разрушаемые, стены, бойцы,
     // мобы) рисуются в порядке нижней кромки — кто ниже по экрану, тот ближе и рисуется поверх.
@@ -1272,7 +1283,6 @@ window.SBRender = (function () {
         o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
         o.anim = pa.anim + (pb.anim - pa.anim) * t;
         o.power = pa.power + (pb.power - pa.power) * t;
-        if (typeof pa.rl === 'number' && typeof pb.rl === 'number') o.rl = pa.rl + (pb.rl - pa.rl) * t;
       }
     }
     var balls = o2.balls; balls.length = b.balls.length;

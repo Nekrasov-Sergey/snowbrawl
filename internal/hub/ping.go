@@ -28,6 +28,14 @@ const (
 	pingLost       = 15 * time.Second // зонд без ответа: задержка снова неизвестна
 )
 
+// probeEvery — период зонда: из конфигурации, если она его задаёт (тесты), иначе боевой.
+func (h *Hub) probeEvery() time.Duration {
+	if h.cfg.PingProbeEvery > 0 {
+		return h.cfg.PingProbeEvery
+	}
+	return pingProbeEvery
+}
+
 // probePing отправляет зонд, если пора. Живость соединения этим не проверяется — за неё отвечает
 // heartbeat самого WebSocket (internal/ws/conn.go), и смешивать их нельзя.
 func (h *Hub) probePing(p *session.Player, now time.Time) {
@@ -40,7 +48,7 @@ func (h *Hub) probePing(p *session.Player, now time.Time) {
 		}
 		return // зонд в полёте: второй не шлём, иначе seq перестанет что-то значить
 	}
-	if !p.RTTAt.IsZero() && now.Sub(p.RTTAt) < pingProbeEvery {
+	if !p.RTTAt.IsZero() && now.Sub(p.RTTAt) < h.probeEvery() {
 		return
 	}
 	p.PingSeq++

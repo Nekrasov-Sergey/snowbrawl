@@ -51,13 +51,13 @@ window.SBTutorial = (function () {
       text: 'Зажмите ЛКМ (на телефоне — правый стик) и держите до полного замаха, потом отпустите. Чем длиннее замах, тем дальше летит снежок.',
       check: function (c) { return c.flags.fullThrow || (c.flags.chargedFull && c.flags.throws > 0); },
       hint: function (c) {
-        return c.flags.throws > 0 && !c.flags.fullThrow ? ' Замах был короткий: держите, пока полоска над бойцом не заполнится.' : '';
+        return c.flags.throws > 0 && !c.flags.fullThrow ? ' Замах был короткий: держите дольше — кружок прицела уходит дальше.' : '';
       }
     },
     {
-      text: 'Бросьте ещё два раза. После броска боец перезаряжается — вокруг него идёт жёлтая дуга, и новый замах не начнётся, пока она не погаснет.',
+      text: 'Бросьте ещё два раза. Под полоской здоровья три оранжевых отделения — это запас снежков: каждый выстрел тратит одно, и они заполняются сами.',
       check: function (c) { return c.flags.throws >= 2; },
-      hint: function (c) { return c.inStep > 9000 ? ' Нажать можно и во время перезарядки: бросок встанет в очередь, дуга станет зелёной.' : ''; }
+      hint: function (c) { return c.inStep > 9000 ? ' Нажать можно и с пустым запасом: бросок встанет в очередь и уйдёт, как только отделение заполнится.' : ''; }
     },
     {
       text: 'Попадите снежком в деревянный ящик. Укрытия ловят снежки — обычным броском ящик не пробить.',
@@ -101,8 +101,6 @@ window.SBTutorial = (function () {
   // Последний шаг у всех героев одинаков по смыслу — настоящий бой с добиванием. Соперник
   // подобран так, чтобы способность в нём решала: Бомберу — Щит (бот ставит стену при низком
   // HP, а взрыв сносит её целиком), Фризеру — Раннер (замедление отбирает его главное).
-  function reloadSec(role) { return ((Sim.RELOAD_MS[role] || 900) / 1000).toFixed(1); }
-
   // Метки шага, где нужно попасть в манекена: сначала место для игрока, потом сам манекен.
   // Без метки игрок бросает от спавна и не понимает, почему снежок исчезает в колонне.
   function laneMarks(c) { return c.enemy ? [WALK_MARK, markAt(c.enemy)] : [WALK_MARK]; }
@@ -111,9 +109,9 @@ window.SBTutorial = (function () {
       ? ' Встаньте на метку: от спавна бросок упирается в колонну.' : '';
   }
 
-  function fightStep(role, enemyRole) {
+  function fightStep(enemyRole) {
     return {
-      text: 'Настоящий бой: примените способность и добейте соперника. Три попадания — и он выведен из строя, а каждый промах стоит ' + reloadSec(role) + ' с перезарядки.',
+      text: 'Настоящий бой: примените способность и добейте соперника. Три попадания — и он выведен из строя, а каждый промах стоит снежка из запаса.',
       enemy: { role: enemyRole, x: FIGHT.x, y: FIGHT.y, awake: true, level: 1, lock: false },
       marks: function (c) { return c.enemy ? [markAt(c.enemy)] : []; },
       // Оба флага липкие, поэтому порядок «сначала добил, потом применил» тоже считается.
@@ -156,7 +154,7 @@ window.SBTutorial = (function () {
         return ' Теперь просто бегите — отсчёт идёт, пока вы двигаетесь.';
       }
     },
-    fightStep('Раннер', 'Танк')
+    fightStep('Танк')
   ];
 
   var TANK = [
@@ -178,7 +176,7 @@ window.SBTutorial = (function () {
       check: function (c) { return c.event('hit', function (ev) { return ev.targetId === c.meId; }); },
       hint: function (c) { return c.inStep > 15000 ? ' Стойте на открытом месте: из-за ящика соперник не бросит.' : ''; }
     },
-    fightStep('Танк', 'Снайпер')
+    fightStep('Снайпер')
   ];
 
   var SNIPER = [
@@ -207,7 +205,7 @@ window.SBTutorial = (function () {
         return c.flags.snipeBall ? ' Заряженный выстрел здесь не годится — он настильный и вязнет в укрытии. Бросайте обычным.' : '';
       }
     },
-    fightStep('Снайпер', 'Танк')
+    fightStep('Танк')
   ];
 
   var BOMBER = [
@@ -239,7 +237,7 @@ window.SBTutorial = (function () {
         return c.inStep > 20000 ? ' Взрыв должен накрыть ящик, попадать точно в него не обязательно.' : '';
       }
     },
-    fightStep('Бомбер', 'Щит')
+    fightStep('Щит')
   ];
 
   var FREEZER = [
@@ -281,7 +279,7 @@ window.SBTutorial = (function () {
         return c.inStep > 15000 ? ' Ведите его внутрь кольца и подержите там пару мгновений.' : '';
       }
     },
-    fightStep('Фризер', 'Раннер')
+    fightStep('Раннер')
   ];
 
   var SHIELD = [
@@ -338,7 +336,7 @@ window.SBTutorial = (function () {
         return '';
       }
     },
-    fightStep('Щит', 'Снайпер')
+    fightStep('Снайпер')
   ];
 
   var SCENARIOS = [

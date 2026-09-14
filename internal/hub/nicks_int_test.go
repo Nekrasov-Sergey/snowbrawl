@@ -13,6 +13,7 @@ import (
 // TestNickTakenFromAnotherIP — ник, взятый одним игроком, недоступен другому адресу до
 // перезапуска сервера, а свой адрес получает его обратно.
 func TestNickTakenFromAnotherIP(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.TrustProxy = true })
 	first := s.connectFrom(t, "Мороз", "", "10.1.1.1")
 	if first.ID == "" {
@@ -43,17 +44,35 @@ func TestNickTakenFromAnotherIP(t *testing.T) {
 // TestRoomPingPushedOnlyOnChange — задержки лобби едут отдельным сообщением и только при
 // изменении: иначе состав рассылался бы заново каждые несколько секунд из-за одной цифры.
 func TestRoomPingPushedOnlyOnChange(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	cl := s.connect(t, "Хост", "")
 	cl.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 0})
 	var st protocol.RoomState
 	cl.expect(protocol.SRoomState, &st)
 
-	// Отвечаем на зонды сервера сами: первый уходит сразу, дальше раз в pingProbeEvery.
-	collect := func(d time.Duration) []protocol.RoomPing {
+	// Отвечаем на зонды сервера сами: первый уходит сразу, дальше раз в период зонда.
+	probe := s.cfg.PingProbeEvery
+	mine := func(rp protocol.RoomPing) bool {
+		for _, pp := range rp.Pings {
+			if pp.ID == cl.ID && pp.Ping > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	// Собираем кадры до выполнения условия, а срок — только страховка: раньше здесь стояли два
+	// фиксированных окна на 8 и 6 секунд, и пакет просто пережидал их. Считать кадры по срокам
+	// нельзя в обе стороны: кадр приходит лишь при изменении набора задержек (на стабильной
+	// петле их может быть всего один), а самый первый кадр уходит ещё до первого pong и потому
+	// пустой.
+	collect := func(d time.Duration, done func([]protocol.RoomPing) bool) []protocol.RoomPing {
 		var out []protocol.RoomPing
 		deadline := time.After(d)
 		for {
+			if done(out) {
+				return out
+			}
 			select {
 			case env, ok := <-cl.inbox:
 				if !ok {
@@ -77,7 +96,7 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 		}
 	}
 
-	got := collect(8 * time.Second)
+	got := collect(40*probe, func(out []protocol.RoomPing) bool { return len(out) > 0 && mine(out[len(out)-1]) })
 	if len(got) == 0 {
 		t.Fatal("задержки лобби не приехали")
 	}
@@ -85,22 +104,26 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 	if last.Code != st.Code {
 		t.Fatalf("код комнаты %q, ожидался %q", last.Code, st.Code)
 	}
-	found := false
-	for _, pp := range last.Pings {
-		if pp.ID == cl.ID && pp.Ping > 0 {
-			found = true
-		}
-	}
-	if !found {
+	if !mine(last) {
 		t.Fatalf("своей задержки нет в %+v", last.Pings)
 	}
 
 	// Рассылка идёт только при изменении: два кадра подряд с одинаковым набором задержек —
-	// это сломанный диффинг. Проверять «на loopback вообще не меняется» больше нельзя:
-	// задержка публикуется с точностью до миллисекунды и на петле гуляет между 1 и 2 мс.
-	all := make([]protocol.RoomPing, 0, len(got))
+	// это сломанный диффинг. Изменение провоцируем сами, заводя в комнату второго игрока:
+	// набор задержек меняется составом, а не дрожанием петли. Ждать изменения «само собой»
+	// нельзя — на loopback задержка может не меняться вовсе, и проверка сравнивала бы
+	// единственный кадр сам с собой, то есть не проверяла бы ничего.
+	second := s.connect(t, "Гость", "")
+	second.send(protocol.CRoomJoin, protocol.RoomJoin{Code: st.Code})
+	second.expect(protocol.SRoomState, nil)
+	all := make([]protocol.RoomPing, 0, len(got)+2)
 	all = append(all, got...)
-	all = append(all, collect(6*time.Second)...)
+	all = append(all, collect(40*probe, func(out []protocol.RoomPing) bool {
+		return len(out) > 0 && len(out[len(out)-1].Pings) > 1 // в кадре уже двое
+	})...)
+	if len(all) < 2 {
+		t.Fatalf("после входа второго игрока новых кадров не пришло: %+v", all)
+	}
 	for i := 1; i < len(all); i++ {
 		if fmt.Sprint(all[i].Pings) == fmt.Sprint(all[i-1].Pings) {
 			t.Fatalf("задержки разосланы повторно без изменений: %+v", all[i])
@@ -111,6 +134,7 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 // TestOnlineSeriesSampled — тик hub кладёт точку в ряд онлайна. Бакетизацию и файл проверяет
 // internal/onlinestat; здесь важна только проводка.
 func TestOnlineSeriesSampled(t *testing.T) {
+	t.Parallel()
 	s := newServer(t, nil)
 	cl := s.connect(t, "Наблюдатель", "")
 	if cl.ID == "" {
