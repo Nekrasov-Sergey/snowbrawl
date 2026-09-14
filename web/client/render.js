@@ -228,7 +228,7 @@ window.SBRender = (function () {
     var rigCache = {};
     var HIT_MS = 200, THROW_MS = 300, ABIL_MS = 420;
     function rigC(id) {
-      return rigCache[id] || (rigCache[id] = { flip: 1, throwAt: -1e9, abilAt: -1e9, prevX: null, ph: (parseInt(id, 36) || 0) % 997 });
+      return rigCache[id] || (rigCache[id] = { flip: 1, throwAt: -1e9, abilAt: -1e9, popAt: -1e9, readyAt: -1e9, prevX: null, ph: (parseInt(id, 36) || 0) % 997 });
     }
     function rigStateFor(snap, p, isMe, local) {
       var rc = rigC(p.id);
@@ -340,6 +340,70 @@ window.SBRender = (function () {
       return snap.ice ? 'ice' : null;
     }
 
+    // Облегающий эллипс модели Щита: якорь рига (p.y + r*0.9) — середина тела, макушка выше на
+    // Rig.topOf, подошвы ниже на Rig.bottomOf. Сам эллипс не рисуется — по нему стартуют осколки
+    // лопнувшего пузыря (bubblePop), чтобы разлетались с границы силуэта, а не из одной точки.
+    function bubbleGeom(p, r, useRig) {
+      var anchor = p.y + r * 0.9, top, foot;
+      if (useRig && Rig.topOf && Rig.bottomOf) {
+        top = anchor - Rig.topOf(r, p.role, RIG_SCALE); foot = anchor + Rig.bottomOf(r, p.role, RIG_SCALE);
+      } else { top = p.y - r - 4; foot = p.y + r + 4; }
+      return { cx: p.x, cy: (foot + top) / 2, rx: r * 1.45, ry: (foot - top) / 2 + 3, foot: foot, top: top };
+    }
+
+    // Аура Щита (пассив «Закалка»): свечение по контуру самой модели. Риг рисуется во
+    // вспомогательный буфер, красится в один цвет через source-in и штампуется под моделью со
+    // сдвигами по кругу — двумя кольцами, плотнее у края. Модель поверх закрывает середину, и
+    // остаётся ореол, повторяющий любую позу рига. Штампы вместо shadowBlur: размытие на канвасе
+    // дорого на телефоне, а 20 drawImage маленького буфера — нет. Буфер один на модуль и растёт
+    // только при необходимости (как arenaCache).
+    var HALO = 4, HALO_PAD = 10, AURA_COLOR = '#8ee6b4';
+    var auraBuf = null, auraCtx = null;
+    function drawAuraRig(p, r, rs, color, A, R) {
+      var top = Rig.topOf(r, p.role, RIG_SCALE), bottom = Rig.bottomOf(r, p.role, RIG_SCALE);
+      var bw = r * 3.2 + HALO_PAD * 2, bh = top + bottom + HALO_PAD * 2; // единицы арены
+      var pw = Math.ceil(bw * RS), ph = Math.ceil(bh * RS);
+      if (!auraBuf) { auraBuf = document.createElement('canvas'); auraCtx = auraBuf.getContext('2d'); }
+      if (auraBuf.width < pw || auraBuf.height < ph) {
+        auraBuf.width = Math.max(auraBuf.width, pw); auraBuf.height = Math.max(auraBuf.height, ph);
+      }
+      var ax = p.x, ay = p.y + r * 0.9;   // якорь модели на арене
+      var ox = bw / 2, oy = HALO_PAD + top; // и он же в буфере
+      var o = auraCtx;
+      o.setTransform(1, 0, 0, 1, 0, 0); o.globalCompositeOperation = 'source-over';
+      o.clearRect(0, 0, auraBuf.width, auraBuf.height);
+      o.setTransform(RS, 0, 0, RS, (ox - ax) * RS, (oy - ay) * RS);
+      Rig.drawFighter(o, ax, ay, r, rs);
+      o.setTransform(1, 0, 0, 1, 0, 0); o.globalCompositeOperation = 'source-in';
+      o.fillStyle = color; o.fillRect(0, 0, pw, ph);
+      var dx0 = ax - ox, dy0 = ay - oy, dw = pw / RS, dh = ph / RS;
+      ctx.globalAlpha = Math.min(1, A * 0.2);
+      for (var i = 0; i < 12; i++) {
+        var a = i * Math.PI / 6;
+        ctx.drawImage(auraBuf, 0, 0, pw, ph, dx0 + Math.cos(a) * R, dy0 + Math.sin(a) * R, dw, dh);
+      }
+      ctx.globalAlpha = Math.min(1, A * 0.34);
+      for (var j = 0; j < 8; j++) {
+        var b = j * Math.PI / 4;
+        ctx.drawImage(auraBuf, 0, 0, pw, ph, dx0 + Math.cos(b) * R * 0.5, dy0 + Math.sin(b) * R * 0.5, dw, dh);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Осколки лопнувшего пузыря: стартуют на облегающем эллипсе и летят наружу по его нормали.
+    function spawnShards(g, color, n) {
+      for (var i = 0; i < n; i++) {
+        var a = (i / n) * Math.PI * 2 + Math.random() * 0.3;
+        var nx = Math.cos(a) / g.rx, ny = Math.sin(a) / g.ry, nl = Math.hypot(nx, ny) || 1;
+        var spd = 60 + Math.random() * 90;
+        particles.push({ x: g.cx + Math.cos(a) * g.rx, y: g.cy + Math.sin(a) * g.ry, vx: nx / nl * spd, vy: ny / nl * spd - 40,
+          life: 0.45 + Math.random() * 0.2, maxLife: 0.55, color: color, size: 1.5 + Math.random() * 1.5 });
+      }
+    }
+    function findPlayer(snap, id) {
+      if (!snap) return null;
+      for (var i = 0; i < snap.players.length; i++) if (snap.players[i].id === id) return snap.players[i];
+      return null;
+    }
     function triggerShake(mag, durationMs) { shake.mag = mag; shake.until = performance.now() + durationMs; shake.total = durationMs; }
     function spawnParticles(x, y, color, n, spd0, spd1, size0, size1, life) {
       for (var i = 0; i < n; i++) {
@@ -379,8 +443,15 @@ window.SBRender = (function () {
             audio.wallThud(); triggerShake(6, 160);
             spawnParticles(e.x, e.y, '#dfeaff', 8, 50, 130, 2, 4, 0.4); break;
           case 'bubblePop':
-            audio.shieldThud(); spawnParticles(e.x, e.y, '#bff0d0', 10, 40, 120, 2, 4, 0.4); break;
-          case 'bubbleReady': audio.freezeChime(); break;
+            audio.shieldThud();
+            rigC(e.targetId).popAt = performance.now();
+            // Осколки — с границы силуэта, а не из точки попадания: лопается весь пузырь.
+            // Геометрия — по бойцу из последнего кадра; если его там нет, прежний фонтан частиц.
+            var popped = findPlayer(lastSnap, e.targetId);
+            if (popped) spawnShards(bubbleGeom(popped, radiusOf(popped), !!(Rig && Rig.GEAR[popped.role])), '#bff0d0', 20);
+            else spawnParticles(e.x, e.y, '#bff0d0', 10, 40, 120, 2, 4, 0.4);
+            break;
+          case 'bubbleReady': audio.freezeChime(); rigC(e.playerId).readyAt = performance.now(); break;
           case 'frost':
             audio.freezeChime(); spawnParticles(e.x, e.y, '#c8f0ff', 10, 20, 90, 2, 4, 0.5); break;
           case 'obstacleHit':
@@ -893,6 +964,36 @@ window.SBRender = (function () {
       var shA = (p.koed && (p.et || p.lives != null)) ? 0.15 * Math.max(0, 1 - (snap.time - (p.koAt || snap.time)) / 4000) : 0.15;
       ctx.fillStyle = 'rgba(0,0,0,' + shA + ')'; ctx.fill();
 
+      // Щит, пассив «Закалка»: свечение по контуру модели (drawAuraRig), рисуется под ригом.
+      // Виден всем: знание о чужом Щите — часть тактики. Пока пузыря нет, аура проявляется
+      // равномерно по всему контуру от прозрачной до полной за 12 с (p.bb), без пульса — чтобы
+      // откат не путался с готовностью. Возврат — вспышка ярче и шире на 300 мс, хлопок — белая
+      // вспышка на 140 мс (осколки — в handleEvents).
+      var rs = useRig ? rigStateFor(snap, p, isMe, local) : null; // один раз: функция двигает rc.flip
+      var rcB = rigC(p.id), nowB = performance.now();
+      var popAge = nowB - rcB.popAt, readyAge = nowB - rcB.readyAt;
+      var auraA = 0, auraR = HALO, auraColor = AURA_COLOR;
+      if (alive && p.role === 'Щит') {
+        // Между хлопком и следующим снапшотом bubble ещё true — целую ауру не показываем.
+        if (p.bubble && popAge > 60) {
+          auraA = 0.8 + 0.2 * Math.sin(snap.time / 300);
+          if (readyAge < 300) { var rt = readyAge / 300; auraA += 0.5 * (1 - rt); auraR *= 1 + 0.6 * (1 - rt); }
+        } else if (p.bb > 0) {
+          auraA = (1 - p.bb) * 0.85;
+        }
+        if (popAge < 140) { auraColor = '#ffffff'; auraA = Math.max(auraA, 1 - popAge / 140); auraR = HALO * (1 + 0.5 * popAge / 140); }
+      }
+      if (auraA > 0.01) {
+        if (rs) {
+          try { drawAuraRig(p, r, rs, auraColor, auraA, auraR); }
+          catch (e) { Rig = null; useRig = false; rs = null; }
+        }
+        if (!rs) { // без рига силуэта нет — простое кольцо той же яркости
+          ctx.beginPath(); ctx.arc(vx, vy, r + 3, 0, Math.PI * 2);
+          ctx.strokeStyle = auraColor; ctx.lineWidth = 2.5; ctx.globalAlpha = Math.min(1, auraA * 0.8); ctx.stroke(); ctx.globalAlpha = 1;
+        }
+      }
+
       var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
 
       // Рывок/таран: призрачный след и приподнятая прозрачность корпуса.
@@ -920,7 +1021,7 @@ window.SBRender = (function () {
         }
         if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.35)'; ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill(); }
       } else if (useRig) {
-        try { Rig.drawFighter(ctx, p.x, p.y + r * 0.9, r, rigStateFor(snap, p, isMe, local)); }
+        try { Rig.drawFighter(ctx, p.x, p.y + r * 0.9, r, rs); }
         catch (e) { Rig = null; drawRoleModel(ctx, p.role, vx, vy, r, faceAng); }
         if (p.slow) {
           ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.42)' : 'rgba(150,216,255,0.30)';
@@ -980,35 +1081,6 @@ window.SBRender = (function () {
         ctx.beginPath(); ctx.arc(vx, vy, r + 3.5, 0, Math.PI * 2);
         ctx.strokeStyle = ac; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.85; ctx.stroke(); ctx.globalAlpha = 1;
       }
-      // Щит, пассив «Закалка»: полное кольцо — пузырь готов, гасит следующее попадание целиком.
-      // После хлопка кольцо заполняется по кругу за 12 с — так видно, когда защита вернётся, и
-      // своя, и чужая (знание о чужом Щите — часть тактики). Радиус r+4 отличает его от дуги
-      // перезарядки (r+10) и от ореола заряженной способности (r+3.5).
-      if (p.bubble) {
-        var pulse = 0.75 + 0.25 * Math.sin(snap.time / 300);
-        ctx.beginPath(); ctx.arc(vx, vy, r + 4, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(150,240,190,0.9)'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.globalAlpha = pulse * 0.5;
-        ctx.beginPath(); ctx.arc(vx, vy, r + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(150,240,190,0.8)'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.globalAlpha = 1;
-        ctx.beginPath(); ctx.arc(vx, vy, r + 4, -0.6, 0.5);
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; ctx.stroke();
-      } else if (p.role === 'Щит' && p.bb > 0 && alive) {
-        // Дугу отката рисуем тёмной дорожкой и почти белой заливкой, а не зелёным: тело Щита
-        // само светло-зелёное (#b8f0c8), и зелёная дуга на нём не читалась бы.
-        ctx.beginPath(); ctx.arc(vx, vy, r + 4, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(11,22,34,0.35)'; ctx.lineWidth = 2.5; ctx.stroke();
-        var done = 1 - p.bb;
-        if (done > 0) {
-          ctx.beginPath(); ctx.arc(vx, vy, r + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * done);
-          ctx.strokeStyle = 'rgba(245,255,250,0.95)'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
-          ctx.stroke(); ctx.lineCap = 'butt';
-        }
-      }
-
-      if (isMe) { ctx.beginPath(); ctx.arc(vx, vy, r + 6.5, 0, Math.PI * 2); ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 2; ctx.stroke(); }
-
       // Перезарядка выстрела: убывающая дуга вокруг своего бойца (полная сразу после броска).
       // Зелёная — выстрел уже поставлен в очередь: замах начнётся сам, как только дуга исчезнет.
       if (isMe && p.rl > 0) {
@@ -1110,7 +1182,9 @@ window.SBRender = (function () {
      * snap — снапшот sim.js (возможно интерполированный), meId — свой боец,
      * local — локальное состояние замаха {charging, power, aimX, aimY} для мгновенного отклика.
      */
+    var lastSnap = null; // кадр, по которому handleEvents находит бойца для эффектов
     function frame(snap, meId, local, nameMap, rankMap) {
+      lastSnap = snap;
       names = nameMap || null;
       ranks = rankMap || null;
       var now = performance.now();
