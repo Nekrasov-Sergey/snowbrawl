@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.12.0';
+  var SIM_VERSION = '1.13.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -45,6 +45,12 @@
   var CONTACT_DAMAGE_CD = 0.8;           // с, пауза контактного урона одного врага (умолч.)
   var CONTACT_KNOCK = 34;
   var ICE_STEER = 2.6;                   // 1/с — как быстро скорость на льду доворачивает к цели
+
+  // --- Подбираемая «жизнь» (+1 HP), общая для PvP и PvE ---
+  var PICKUP_RADIUS = 14;
+  var PICKUP_LIFETIME_MIN = 30000, PICKUP_LIFETIME_MAX = 40000;   // сколько лежит, если не взяли
+  var PICKUP_RESPAWN_MIN = 15000, PICKUP_RESPAWN_MAX = 30000;     // пауза перед следующим появлением
+  var PICKUP_SEEK_R = 240;               // радиус, в котором раненый бот/моб идёт к жизни специально
 
   // --- Способности (пассив + актив у каждой роли), константы игрового баланса ---
   var DASH_DIST = 118, DASH_MS = 170, DASH_IFRAME_MS = 250, DASH_CD = 6;        // Раннер: Рывок
@@ -138,13 +144,18 @@
     ]}
   ];
 
+  // Радиус — с 1.13.0 буквально одинаковый у всех 6 ролей: раньше Танк (14) и Щит (13) были
+  // крупнее остальных (11) без игровой причины — простое совпадение геометрии никогда не
+  // трогали при унификации модели в rig.js (там выровняли только пропорции тела, GEAR.big/w,
+  // а не сам radius, от которого зависит масштаб рига). Взяли наименьшее прежнее значение —
+  // и хитбокс не увеличился ни у одной роли.
   var ROLE_STATS = {
-    'Раннер':  { speed: 195, radius: 15, color: '#7fd4ff' },
-    'Танк':    { speed: 135, radius: 18, color: '#8aa0c0' },
-    'Снайпер': { speed: 160, radius: 15, color: '#c9a6ff' },
-    'Бомбер':  { speed: 150, radius: 16, color: '#ffb347' },
-    'Фризер':  { speed: 165, radius: 15, color: '#9fe8ff' },
-    'Щит':     { speed: 150, radius: 17, color: '#b8f0c8' }
+    'Раннер':  { speed: 195, radius: 11, color: '#7fd4ff' },
+    'Танк':    { speed: 135, radius: 11, color: '#8aa0c0' },
+    'Снайпер': { speed: 160, radius: 11, color: '#c9a6ff' },
+    'Бомбер':  { speed: 150, radius: 11, color: '#ffb347' },
+    'Фризер':  { speed: 165, radius: 11, color: '#9fe8ff' },
+    'Щит':     { speed: 150, radius: 11, color: '#b8f0c8' }
   };
 
   var ROLE_AI = {
@@ -191,12 +202,13 @@
   // «Раннер» исключён: у него перезарядка выстрела 500 мс, и рядовой враг-раннер
   // расстреливал пати очередями — в PvE обычные снежколёты не должны частить так.
   var ENEMY_CORE_ROLES = ['Снайпер', 'Бомбер', 'Фризер'];
+  // Радиусы — ×0.75, как и у ролей игроков, кроме swarm («рой»): он и так маленький.
   var ENEMY_STATS = {
-    core:   { role: '*',       speed: 150, radius: 15, hp: 3, contact: 0, knockResist: 0 },
+    core:   { role: '*',       speed: 150, radius: 11, hp: 3, contact: 0, knockResist: 0 },
     swarm:  { role: 'Раннер',  speed: 150, radius: 12, hp: 1, contact: 1, knockResist: 0, contactCd: 1.4 },
-    tank:   { role: 'Танк',    speed: 118, radius: 24, hp: 5, contact: 0, knockResist: 0.8 },
-    roller: { role: 'Танк',    speed: 300, radius: 20, hp: 3, contact: 1, knockResist: 1, scripted: true },
-    boss:   { role: 'Танк',    speed: 120, radius: 34, hp: 12, contact: 0, knockResist: 1 }
+    tank:   { role: 'Танк',    speed: 118, radius: 18, hp: 5, contact: 0, knockResist: 0.8 },
+    roller: { role: 'Танк',    speed: 300, radius: 15, hp: 3, contact: 1, knockResist: 1, scripted: true },
+    boss:   { role: 'Танк',    speed: 120, radius: 26, hp: 12, contact: 0, knockResist: 1 }
   };
   var BOSS_HP = { golem: 10, blizzard: 12, yeti: 16 };
 
@@ -338,6 +350,10 @@
       pve: null,
       tutorial: false,       // обучение: матч не кончается, человек не выбывает
       tutorialLockEnemy: false, // обучение: соперник не опускается ниже 1 HP (последний шаг)
+      // Подбираемая «жизнь»: не больше одной на карте одновременно (см. updatePickups).
+      // В обучении не заводим — сценарий там фиксированный и управляется клиентом.
+      pickup: null,
+      nextPickupAt: PICKUP_RESPAWN_MIN + rng.next() * (PICKUP_RESPAWN_MAX - PICKUP_RESPAWN_MIN),
       events: []
     };
   }
@@ -740,6 +756,46 @@
   }
 
   // ============================================================
+  // ПОДБИРАЕМАЯ «ЖИЗНЬ»
+  // ============================================================
+  /** Случайная точка на арене не внутри препятствия; после нескольких неудачных попыток
+      берёт последнюю — предмет важнее идеальной точки, матч не блокируем. */
+  function pickPickupSpot(state, obs) {
+    var rng = state.rng, margin = 40, x, y;
+    for (var i = 0; i < 20; i++) {
+      x = margin + rng.next() * (W - margin * 2);
+      y = margin + rng.next() * (H - margin * 2);
+      if (!wallBlocks(obs, x, y, 0)) break;
+    }
+    return { x: x, y: y };
+  }
+  function updatePickups(state) {
+    if (state.tutorial) return;
+    if (state.pickup && state.time >= state.pickup.expiresAt) {
+      state.pickup = null;
+      state.nextPickupAt = state.time + PICKUP_RESPAWN_MIN + state.rng.next() * (PICKUP_RESPAWN_MAX - PICKUP_RESPAWN_MIN);
+    }
+    if (state.pickup) {
+      for (var i = 0; i < state.players.length; i++) {
+        var p = state.players[i];
+        if (!alive(p) || p.hp >= p.maxHp) continue;
+        if (Math.hypot(p.x - state.pickup.x, p.y - state.pickup.y) <= p.radius + PICKUP_RADIUS) {
+          p.hp = Math.min(p.maxHp, p.hp + 1);
+          emit(state, { type: 'heal', id: p.id, x: state.pickup.x, y: state.pickup.y });
+          state.pickup = null;
+          state.nextPickupAt = state.time + PICKUP_RESPAWN_MIN + state.rng.next() * (PICKUP_RESPAWN_MAX - PICKUP_RESPAWN_MIN);
+          break;
+        }
+      }
+    }
+    if (!state.pickup && state.time >= state.nextPickupAt) {
+      var spot = pickPickupSpot(state, getAllObstacles(state));
+      state.pickup = { x: spot.x, y: spot.y, expiresAt: state.time + PICKUP_LIFETIME_MIN + state.rng.next() * (PICKUP_LIFETIME_MAX - PICKUP_LIFETIME_MIN) };
+      emit(state, { type: 'pickupSpawn', x: spot.x, y: spot.y });
+    }
+  }
+
+  // ============================================================
   // ИИ БОТОВ
   // ============================================================
   function snowmanTarget(sm) {
@@ -899,6 +955,14 @@
       return false;
     }
 
+    // Раненые идут за жизнью, если она недалеко — но продолжают отстреливаться (tryShoot(true)),
+    // как и при обычном отходе в укрытие ниже, а не бросают бой ради лечения.
+    if (p.hp < p.maxHp && state.pickup && Math.hypot(state.pickup.x - p.x, state.pickup.y - p.y) <= PICKUP_SEEK_R) {
+      p.moveTarget = clampToArena(state.pickup.x, state.pickup.y, p.radius);
+      p.ai.nextDecisionAt = now + 500;
+      tryShoot(true);
+      return;
+    }
     if (lowHp) {
       var ob = nearestObstacle(obs, p.x, p.y);
       if (ob) {
@@ -1024,19 +1088,33 @@
     }
     resolveObstacleCollisions(obs, p);
   }
-  // Модель бойца рисуется в полный рост — голова заметно выше игровой точки (x,y), ноги заметно
-  // ниже, — а не кругом ровно по radius, как было раньше. Проверка попадания расширена под силуэт:
-  // область смещена вниз (там больше рисунка) и вытянута по вертикали сильнее, чем по горизонтали,
-  // иначе выстрел в ноги проходил мимо старого маленького кружка. Множители — из размеров модели
-  // в web/client/rig.js (drawModel), не точная геометрия, а разумный охват силуэта.
-  var HIT_BOX_DOWN = 0.8;    // смещение центра проверки вниз, в долях radius
-  var HIT_BOX_HALF_W = 1.15; // половина ширины охвата, в долях radius
-  var HIT_BOX_HALF_H = 1.7;  // половина высоты охвата, в долях radius
+  // Проверка попадания повторяет силуэт модели тремя кругами (голова/корпус/ноги), а не одним
+  // прямоугольником, как было с 1.11.0: прямоугольник накрывал и пустое место по бокам головы и
+  // над ногами, из-за чего попадание засчитывалось там, где на экране никого не видно. Смещения
+  // и радиусы — из реальной геометрии рига (web/client/rig.js: drawModel, BW/BH/HR/шаг ног, поза
+  // idle) и RIG_SCALE=1.32 (web/client/render.js), переведённые в доли radius; sim.js не может
+  // импортировать rig.js (там DOM/Canvas, здесь исполняется и в goja), поэтому числа посчитаны
+  // руками один раз и не будут точны кадр-в-кадр во время бега/замаха — только разумный охват
+  // силуэта в нейтральной позе, как и было сказано в предыдущей версии этого комментария.
+  // Круги подобраны с запасом на пересечение (голова-корпус, корпус-ноги), чтобы между ними не
+  // было мёртвой полосы, куда снежок пролетал бы насквозь, не задев ни один из трёх кругов.
+  var HIT_HEAD_DY = -0.25, HIT_HEAD_R = 0.92;    // голова (с головным убором)
+  var HIT_TORSO_DY = 0.9, HIT_TORSO_R = 0.92;    // корпус и руки у тела
+  var HIT_LEGS_DY = 2.1, HIT_LEGS_R = 0.63;      // ноги и ботинки
+  // Голем PvE (tank/roller/boss) рисуется отдельной процедурной моделью без рига (drawGolem в
+  // render.js) — у него остаётся старый прямоугольник, три круга рига тут не подходят.
+  var HIT_GOLEM_TYPES = { tank: true, roller: true, boss: true };
+  var HIT_BOX_DOWN = 0.8, HIT_BOX_HALF_W = 1.15, HIT_BOX_HALF_H = 1.7; // прямоугольник для голема
   function hitTest(p, x, y, extraR) {
-    var hw = p.radius * HIT_BOX_HALF_W + (extraR || 0);
-    var hh = p.radius * HIT_BOX_HALF_H + (extraR || 0);
-    var hcy = p.y + p.radius * HIT_BOX_DOWN;
-    return Math.abs(x - p.x) <= hw && Math.abs(y - hcy) <= hh;
+    var ex = extraR || 0;
+    if (p.enemyType && HIT_GOLEM_TYPES[p.enemyType]) {
+      var hw = p.radius * HIT_BOX_HALF_W + ex, hh = p.radius * HIT_BOX_HALF_H + ex;
+      var hcy = p.y + p.radius * HIT_BOX_DOWN;
+      return Math.abs(x - p.x) <= hw && Math.abs(y - hcy) <= hh;
+    }
+    return Math.hypot(x - p.x, y - (p.y + p.radius * HIT_HEAD_DY)) <= p.radius * HIT_HEAD_R + ex
+        || Math.hypot(x - p.x, y - (p.y + p.radius * HIT_TORSO_DY)) <= p.radius * HIT_TORSO_R + ex
+        || Math.hypot(x - p.x, y - (p.y + p.radius * HIT_LEGS_DY)) <= p.radius * HIT_LEGS_R + ex;
   }
   /** killerId — чей снаряд или взрыв; контактный урон мобов приходит без него и фрага не даёт. */
   function applyHit(state, target, freezeBonus, x, y, killerId) {
@@ -1446,9 +1524,13 @@
     if (!t) return;
     var dist = Math.hypot(t.x - p.x, t.y - p.y);
 
-    // движение: держим среднюю дистанцию
+    // движение: держим среднюю дистанцию (или идём за жизнью, если ранены и она недалеко —
+    // атаки по таймеру ниже это не прерывает)
     if (now >= p.ai.nextDecisionAt && now >= p.dashUntil) {
-      if (dist > 320) {
+      var pkDist = (p.hp < p.maxHp && state.pickup) ? Math.hypot(state.pickup.x - p.x, state.pickup.y - p.y) : Infinity;
+      if (pkDist <= PICKUP_SEEK_R) {
+        p.moveTarget = clampToArena(state.pickup.x, state.pickup.y, p.radius);
+      } else if (dist > 320) {
         var tw = Math.atan2(t.y - p.y, t.x - p.x);
         p.moveTarget = clampToArena(p.x + Math.cos(tw) * 120, p.y + Math.sin(tw) * 120, p.radius);
       } else if (dist < 150) {
@@ -1619,6 +1701,7 @@
         moveCharacter(state, obs, p, sdt);
       }
       updateSnowballs(state, obs, sdt);
+      updatePickups(state);
       if (state.pve) { updateContactDamage(state); updatePve(state); }
       checkWin(state);
     }
@@ -1717,6 +1800,7 @@
       reason: state.endReason || null,
       players: players, balls: balls, walls: walls, destr: destr, fx: fx
     };
+    if (state.pickup) snap.pickup = { x: state.pickup.x, y: state.pickup.y, r: PICKUP_RADIUS };
     if (state.pve) snap.pve = pveSnapshot(state);
     return snap;
   }
@@ -1760,6 +1844,7 @@
     FREEZER_AURA_R: FREEZER_AURA_R, FREEZER_AURA_SLOW: FREEZER_AURA_SLOW,
     FREEZER_AURA_RELOAD: FREEZER_AURA_RELOAD,
     FROST_R: FROST_R, FROST_SLOW: FROST_SLOW,
+    PICKUP_RADIUS: PICKUP_RADIUS,
     EXPLOSION_RADIUS: EXPLOSION_RADIUS, BUBBLE_REGEN_MS: BUBBLE_REGEN_MS,
     WALL_LIFETIME_MS: WALL_LIFETIME_MS,
     HIT_Z: HIT_Z,
