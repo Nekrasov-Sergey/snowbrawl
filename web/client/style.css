@@ -229,20 +229,36 @@ html.touch .setVol input[type=range] { width: 150px; height: 32px; }
 #topGameBar #connState { font-size: 12px; }
 #gameWrap { width: 100%; display: flex; flex-direction: column; align-items: center; position: relative; }
 #stage { position: relative; max-width: 100%; aspect-ratio: 900 / 560; }
-/* ПК в бою: арену делаем крупнее обычного, но так, чтобы верхняя панель, подсказки и нижний
-   HUD целиком помещались без прокрутки (у телефона свой набор правил ниже). Ведём по ВЫСОТЕ:
-   height ограничен и свободным местом экрана, и шириной через пропорцию 900/560 — тогда
-   width (auto по aspect-ratio) никогда не упирается в max-width и картинка не искажается. */
-html.ingame:not(.touch) #app { max-width: 96vw; }
+/* ПК в бою: арену делаем настолько крупной, насколько возможно без прокрутки. Первая попытка
+   отдавала #stage через flex:1 всё место, что осталось от соседей (topGameBar/hint/bottomRow) —
+   но тогда размер арены зависел от их ФАКТИЧЕСКОЙ высоты: состав побольше (3×3/4×4) или строка
+   «перезарядка» под кнопкой способности отъедали место у соседей — и арена на глазах прыгала
+   при каждой перезарядке, а в командных режимах была меньше, чем в тестах на 1×1. Возврат к
+   формуле высоты через calc/min: #stage считает себя от вьюпорта, а не от соседей, и больше
+   никогда не меняется от того, что происходит в HUD. Резерв под «всё остальное» — 230px, а не
+   330 как раньше: заголовок теперь скрыт в бою (ниже), отступы уже притянуты. #app всё равно
+   зажат по высоте и не скроллится (тот же приём, что у тач-режима ниже) — это подстраховка на
+   случай, если где-то вылезет больше 230px (обучение, баннер о перезапуске), а не основной
+   механизм размера. */
+html.ingame:not(.touch) h1.title,
+html.ingame:not(.touch) #topRightBar,
+html.ingame:not(.touch) #topLeftBar { display: none; }
+html.ingame:not(.touch) #app { max-width: 96vw; height: 100vh; height: 100dvh; overflow: hidden; }
 html.ingame:not(.touch) #stage {
   width: auto;
-  height: min(calc(100vh - 330px), calc(88vw * 560 / 900), 780px);
-  max-width: 90vw;
+  height: min(calc(100vh - 230px), calc(94vw * 560 / 900), 1000px);
+  max-width: 94vw;
 }
 html.ingame:not(.touch) #topGameBar,
 html.ingame:not(.touch) #bottomRow,
 html.ingame:not(.touch) #hint,
-html.ingame:not(.touch) #abilityHint { max-width: 90vw; }
+html.ingame:not(.touch) #abilityHint { max-width: 94vw; }
+/* Чуть плотнее верх/низ — не в ущерб читаемости, а в пользу резерва 230px у #stage выше:
+   меньше отступов здесь — меньше нужно резервировать, и арена может быть крупнее. */
+html.ingame:not(.touch) #topGameBar { margin-bottom: 4px; }
+html.ingame:not(.touch) #hint { margin-bottom: 2px; }
+html.ingame:not(.touch) #abilityHint { margin-bottom: 4px; min-height: 0; }
+html.ingame:not(.touch) #bottomRow { margin-top: 4px; }
 canvas {
   background: linear-gradient(180deg,#dfeeff 0%, #c3ddf7 100%);
   border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); cursor: crosshair; display: block; max-width: 100%; height: 100%; width: 100%;

@@ -202,6 +202,51 @@ window.SBRender = (function () {
       ctx.globalAlpha = 1;
     }
 
+    // Подбираемая «жизнь» (+1 HP): красное сердечко, медленно крутится по горизонтали —
+    // масштаб по X через cos(время) — классический fake-3D flip, дешевле настоящего 3D.
+    var HEART_PERIOD = 2000; // мс на полный оборот
+    function drawHeartPickup(h) {
+      var r = h.r || (Sim.PICKUP_RADIUS || 14);
+      ctx.save();
+      ctx.beginPath(); ctx.ellipse(h.x, h.y + r * 0.7, r * 0.9, r * 0.32, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fill();
+      var flip = Math.cos(h.time / HEART_PERIOD * Math.PI * 2);
+      ctx.translate(h.x, h.y); ctx.scale(Math.max(0.12, Math.abs(flip)), 1);
+      ctx.beginPath();
+      ctx.moveTo(0, r * 0.55);
+      ctx.bezierCurveTo(r * 1.15, -r * 0.15, r * 0.55, -r * 1.05, 0, -r * 0.35);
+      ctx.bezierCurveTo(-r * 0.55, -r * 1.05, -r * 1.15, -r * 0.15, 0, r * 0.55);
+      ctx.fillStyle = '#ff5b6a'; ctx.fill();
+      ctx.lineWidth = 1.4; ctx.strokeStyle = '#c23a48'; ctx.stroke();
+      ctx.beginPath(); ctx.arc(-r * 0.3, -r * 0.5, r * 0.22, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fill();
+      ctx.restore();
+    }
+
+    // Снежинка-«астерикс» для ауры Фризера: 3 луча + боковые засечки + яркое ядро в центре —
+    // контуром и покрупнее, а не мелкой сплошной точкой, иначе на глаз не отличить от фоновых
+    // снежинок погоды (см. выше, snowflakes) — те специально мелкие и бледные (падающий снег
+    // фоном, ему нельзя быть заметнее самой игры), а эта — часть индикатора способности.
+    function drawFrostFleck(ctx2, x, y, r, color, rot) {
+      ctx2.save();
+      ctx2.translate(x, y); ctx2.rotate(rot);
+      ctx2.strokeStyle = color; ctx2.lineWidth = 1.8; ctx2.lineCap = 'round';
+      for (var fi = 0; fi < 3; fi++) {
+        var a = fi * Math.PI / 3, dx = Math.cos(a) * r, dy = Math.sin(a) * r;
+        ctx2.beginPath(); ctx2.moveTo(-dx, -dy); ctx2.lineTo(dx, dy); ctx2.stroke();
+        var pa = a + Math.PI / 2, blen = r * 0.4, bx = dx * 0.6, by = dy * 0.6;
+        ctx2.beginPath();
+        ctx2.moveTo(bx - Math.cos(pa) * blen, by - Math.sin(pa) * blen);
+        ctx2.lineTo(bx + Math.cos(pa) * blen, by + Math.sin(pa) * blen);
+        ctx2.moveTo(-bx - Math.cos(pa) * blen, -by - Math.sin(pa) * blen);
+        ctx2.lineTo(-bx + Math.cos(pa) * blen, -by + Math.sin(pa) * blen);
+        ctx2.stroke();
+      }
+      ctx2.fillStyle = color;
+      ctx2.beginPath(); ctx2.arc(0, 0, r * 0.22, 0, Math.PI * 2); ctx2.fill();
+      ctx2.restore();
+    }
+
     // Подписи бойцов (ник, под ним полоска HP с числом) — спрайт на бойца, fillText со сменой
     // шрифта каждый кадр на телефонах заметно дорог (особенно эмодзи бота). Спрайт пересобирается
     // при смене HP: состояний мало даже у босса.
@@ -308,7 +353,10 @@ window.SBRender = (function () {
       if (bar) {
         // Полоска цельная: длина заливки — доля здоровья, цвет постоянный (по принадлежности),
         // по центру число оставшихся HP. Одинаково у бойцов (3 HP) и у мобов PvE (до 12).
-        var bw = w - 8, bx = 4, by = NICK_H + GAP;
+        // Ширина полоски — фиксированная (как у ника из 1-2 букв, минимальный случай), не от
+        // длины ника: иначе у длинных имён/эмодзи бота полоска растягивалась заметно длиннее,
+        // хотя HP у всех бойцов одного порядка.
+        var bw = 30, bx = (w - bw) / 2, by = NICK_H + GAP;
         c.fillStyle = 'rgba(11,22,34,0.62)';
         c.fillRect(bx, by, bw, BAR_H);
         c.fillStyle = col;
@@ -452,6 +500,8 @@ window.SBRender = (function () {
             else spawnParticles(e.x, e.y, '#bff0d0', 10, 40, 120, 2, 4, 0.4);
             break;
           case 'bubbleReady': audio.freezeChime(); rigC(e.playerId).readyAt = performance.now(); break;
+          case 'heal':
+            audio.healChime(); spawnParticles(e.x, e.y, '#ffb3bd', 14, 30, 110, 2, 4, 0.45); break;
           case 'frost':
             audio.freezeChime(); spawnParticles(e.x, e.y, '#c8f0ff', 10, 20, 90, 2, 4, 0.5); break;
           case 'obstacleHit':
@@ -510,28 +560,38 @@ window.SBRender = (function () {
         for (var sp = 0; sp < 6; sp++) { var a = sp * Math.PI / 3; ctx.beginPath(); ctx.moveTo(fx.x, fx.y); ctx.lineTo(fx.x + Math.cos(a) * fx.r * 0.8, fx.y + Math.sin(a) * fx.r * 0.8); ctx.stroke(); }
         ctx.globalAlpha = 1;
       }
-      // Пассив Фризера «Стужа»: враги в этом радиусе медленнее и дольше перезаряжаются. Граница
-      // зоны — медленно вращающийся пунктир. Пунктир тут уже был и не читался на снегу; чтобы
-      // это не повторилось, держим два условия: цвет без globalAlpha (раньше он гасил линию
-      // вдвое) и тёмная подложка под ней — фон местами светлее самой линии (снег #c3ddf7,
-      // наледь #eaffff, лёд «Реки» #d9f2fb). Заливки нет: на радиусе 110 она накрыла бы
-      // четверть арены, а в PvE-волне несколько вражеских Фризеров залили бы поле целиком.
-      var dash = 20; // период штриха; при длине окружности ~690 px это около 35 штрихов
+      // Пассив Фризера «Стужа»: враги в этом радиусе медленнее и дольше перезаряжаются. Было два
+      // подхода до этого — пунктир (не читался на снегу) и светящийся контур (по отзыву — сам
+      // круг всё равно смотрелся некрасиво). Сейчас границы вообще нет: мягкая морозная дымка —
+      // радиальный градиент от игрока к краю зоны, гаснущий до полной прозрачности к радиусу, то
+      // есть без единой чёткой линии. Кружащие по границе снежинки остаются — без них дымка на
+      // глаз не отличима от случайного пятна, а так видно, что это именно зона способности.
       for (var fz = 0; fz < snap.players.length; fz++) {
         var fp = snap.players[fz];
         if (fp.role !== 'Фризер' || fp.koed || fp.hp <= 0) continue;
         var mine = !!myTeam && fp.team === myTeam;
         var R = Sim.FREEZER_AURA_R;
+        // «Свой» тон специально не пастельно-голубой (как арена #c3ddf7/#dfeeff) — на таком фоне
+        // блёкло-голубая дымка не отличима от снега. Взяли насыщенный сине-зелёный, чужой — тёплый
+        // красный: оба хорошо видны на холодном светлом фоне арены.
+        var rgb = mine ? '40,190,190' : '255,120,120';
+        var pulse = 0.85 + 0.15 * Math.sin(snap.time / 900); // лёгкое дыхание, чтобы не было статикой
         ctx.save();
-        ctx.setLineDash([dash / 2, dash / 2]);
-        // Вращение от времени матча, а не от performance.now: в записи и при паузе кадров
-        // кольцо не должно дёргаться. ~29 px/с — полный оборот примерно за 24 секунды.
-        ctx.lineDashOffset = -(snap.time / 35) % dash;
-        ctx.beginPath(); ctx.arc(fp.x, fp.y, R, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(20,45,70,0.30)'; ctx.lineWidth = 2.5; ctx.stroke();
-        ctx.beginPath(); ctx.arc(fp.x, fp.y, R, 0, Math.PI * 2);
-        ctx.strokeStyle = mine ? 'rgba(120,200,255,0.95)' : 'rgba(255,120,120,0.95)';
-        ctx.lineWidth = 1.2; ctx.stroke();
+        var rg = ctx.createRadialGradient(fp.x, fp.y, 0, fp.x, fp.y, R);
+        rg.addColorStop(0, 'rgba(' + rgb + ',' + (0.22 * pulse) + ')');
+        rg.addColorStop(0.65, 'rgba(' + rgb + ',' + (0.13 * pulse) + ')');
+        rg.addColorStop(1, 'rgba(' + rgb + ',0)');
+        ctx.fillStyle = rg;
+        ctx.beginPath(); ctx.arc(fp.x, fp.y, R, 0, Math.PI * 2); ctx.fill();
+        // Кружащие по границе снежинки-«астериски» (не круглые точки — те неотличимы от снега,
+        // падающего фоном по всей арене), крутятся заметно быстрее самой орбиты, чтобы не
+        // сливаться визуально с обычным снегопадом.
+        var flN = 6, flRot = snap.time / 1100;
+        var flColor = mine ? 'rgba(224,247,255,0.95)' : 'rgba(255,224,224,0.95)';
+        for (var fk = 0; fk < flN; fk++) {
+          var fAng = flRot + fk * Math.PI * 2 / flN;
+          drawFrostFleck(ctx, fp.x + Math.cos(fAng) * R, fp.y + Math.sin(fAng) * R, 6.5, flColor, snap.time / 260 + fk);
+        }
         ctx.restore();
       }
       // Разрушаемые укрытия и стены Щита теперь рисует y-sorted слой в frame().
@@ -1137,6 +1197,10 @@ window.SBRender = (function () {
         if (dd.hp > 0) items.push({ y: dd.y + (dd.h ? dd.h / 2 : dd.r), f: drawDestructible, a: dd });
       }
       for (var w = 0; w < snap.walls.length; w++) items.push({ y: snap.walls[w].y + snap.walls[w].h / 2, f: drawWall, a: snap.walls[w] });
+      if (snap.pickup) {
+        var pk = snap.pickup;
+        items.push({ y: pk.y + pk.r * 0.9, f: drawHeartPickup, a: { x: pk.x, y: pk.y, r: pk.r, time: snap.time } });
+      }
       for (var p = 0; p < snap.players.length; p++) {
         var pl = snap.players[p];
         items.push({ y: pl.y + radiusOf(pl) * 0.9, pl: pl, isMe: pl.id === meId });
