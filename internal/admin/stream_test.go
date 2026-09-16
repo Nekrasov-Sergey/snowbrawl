@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -184,8 +185,9 @@ func TestStreamSendsFirstStateImmediately(t *testing.T) {
 	}
 	br := bufio.NewReader(res.Body)
 	first := readFrame(t, br, 3*time.Second)
-	// build в сводке — из конфига hub, а не из admin.Info: проверяем поле протокола.
-	if !strings.Contains(first, `"proto":4`) {
+	// build в сводке — из конфига hub, а не из admin.Info: проверяем поле протокола. Номер
+	// берём из константы: бамп версии не должен ронять тест про диффинг потока.
+	if !strings.Contains(first, fmt.Sprintf(`"proto":%d`, protocol.Version)) {
 		t.Fatalf("первый кадр: %q", first)
 	}
 	// Состояние не менялось — второго кадра быть не должно. Окно короткое, но с запасом

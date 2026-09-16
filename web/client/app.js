@@ -20,7 +20,7 @@
     rank: '',                 // роль модерации: '' | 'moderator' | 'admin' (цвет ника, права в чате)
     net: null,
     connected: false,
-    ping: { rtt: 0, jitter: 0 },  // задержка: её мерит сервер и присылает в зонде, см. onMessage 'ping'
+    ping: { rtt: 0, jitter: 0 },  // задержка: её мерит сервер и присылает в self.ping, см. onMessage
     draining: false,
     section: 'pvp',           // pvp | pve — раздел, в котором игрок сейчас ходит
     create: { mode: 3, arena: 0, visibility: 'open', botLevel: 1 },
@@ -224,8 +224,8 @@
   function setOnline(n) { onlineCount = n; renderOnline(); }
 
   // Задержка до сервера рядом с точкой соединения — на всех экранах, а не только в бою.
-  // Число меряет сервер и присылает в зонде: то же самое видно в лобби у соседей и в админке,
-  // своего замера клиент не делает. При обрыве число убираем.
+  // Число меряет сервер и присылает в self.ping: то же самое видно в лобби у соседей и в
+  // админке, своего замера клиент не делает. При обрыве число убираем.
   function renderConn() {
     var el = $('connPing');
     if (!el) return;
@@ -282,6 +282,8 @@
         app.connected = (state === 'open');
         if (state !== 'open') { app.ping.rtt = 0; app.ping.jitter = 0; }
         renderOnline(); renderConn();
+        // Своя задержка ушла в ноль — стереть её и в составе лобби, он берёт то же поле.
+        if (state !== 'open' && app.screen === 'lobby') renderLobby();
         var el = $('connState');
         el.className = state === 'open' ? 'on' : (state === 'connecting' ? '' : 'off');
         el.title = state === 'open' ? 'Соединение установлено' : 'Нет соединения с сервером';
@@ -383,11 +385,18 @@
         if (app.game && !app.game.offline) app.game.onSnapshot(d);
         break;
       case 'ping':
-        // Зонд сервера: отвечаем тем же номером, а в теле зонда он прислал прошлое измерение.
-        // Пока не измерил, ms нет — в углу пусто, а не «0 мс».
+        // Зонд сервера: отвечаем тем же номером. Самого числа зонд не несёт — оно приходит
+        // отдельным self.ping, иначе в углу стояло бы измерение на цикл зонда старше, чем
+        // в лобби.
         app.net.send('pong', { seq: (d && d.seq) || 0 });
+        break;
+      case 'self.ping':
+        // Единственное место, где меняется своя задержка: и угол, и своя строка в составе
+        // лобби рисуются из неё, поэтому разойтись они не могут. Ноль — «неизвестна»:
+        // в углу пусто, а не «0 мс».
         app.ping.rtt = (d && d.ms) || 0;
         renderConn();
+        if (app.screen === 'lobby') renderLobby();
         break;
       case 'room.ping':
         onRoomPing(d);
@@ -834,9 +843,13 @@
 
   // Задержка участника лобби: её мерит сервер и присылает отдельным room.ping. Поля может не
   // быть (бот, только что зашёл, нет связи) — тогда не рисуем ничего, а не «0 мс».
+  // Своя задержка берётся из app.ping.rtt — того же поля, что и индикатор в углу: в лобби
+  // они видны рядом, и два источника давали два разных числа.
   function pingHtml(p) {
-    if (!p || !p.connected || !(p.ping > 0)) return '';
-    return ' <span class="slotPing' + (p.ping > 200 ? ' bad' : '') + '">' + p.ping + ' мс</span>';
+    if (!p || !p.connected) return '';
+    var ms = p.id === app.me ? Math.round(app.ping.rtt) : p.ping;
+    if (!(ms > 0)) return '';
+    return ' <span class="slotPing' + (ms > 200 ? ' bad' : '') + '">' + ms + ' мс</span>';
   }
   // room.ping приходит чаще room.state: вливаем задержки в уже нарисованный состав.
   function onRoomPing(d) {
@@ -846,6 +859,7 @@
     var players = app.room.players || [];
     var changed = false;
     for (var j = 0; j < players.length; j++) {
+      if (players[j].id === app.me) continue; // своё число живёт в app.ping.rtt, см. pingHtml
       var next = by[players[j].id] || 0;
       if (players[j].ping !== next) { players[j].ping = next; changed = true; }
     }

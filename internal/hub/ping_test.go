@@ -38,6 +38,24 @@ func lastPing(t *testing.T, c *sentConn) (last protocol.Ping, count int) {
 	return last, count
 }
 
+// lastSelfPing возвращает задержку из последнего self.ping и сколько их всего было.
+func lastSelfPing(t *testing.T, c *sentConn) (last int, count int) {
+	t.Helper()
+	for _, raw := range c.msgs {
+		env, err := protocol.Decode(raw)
+		if err != nil || env.Type != protocol.SSelfPing {
+			continue
+		}
+		var self protocol.SelfPing
+		if err := json.Unmarshal(env.Data, &self); err != nil {
+			t.Fatal(err)
+		}
+		last = self.Ms
+		count++
+	}
+	return last, count
+}
+
 func pingHub(now *time.Time) *Hub {
 	return &Hub{
 		log:  zerolog.New(io.Discard),
@@ -61,9 +79,6 @@ func TestPingProbeAndMeasure(t *testing.T) {
 	if n != 1 || first.Seq != 1 {
 		t.Fatalf("зондов %d, seq %d; ожидались 1 и 1", n, first.Seq)
 	}
-	if first.Ms != 0 {
-		t.Fatalf("в первом зонде ms=%d, задержка ещё не измерена", first.Ms)
-	}
 	// Пока зонд в полёте, второй не уходит — иначе номер перестал бы что-то значить.
 	now = now.Add(pingProbeEvery)
 	h.probePing(p, now)
@@ -82,12 +97,50 @@ func TestPingProbeAndMeasure(t *testing.T) {
 		t.Fatalf("ping=%d, ожидалось 40", p.PingMs)
 	}
 
-	// Измеренное значение уезжает клиенту в следующем зонде: отдельного сообщения нет.
-	now = now.Add(pingProbeEvery)
-	h.probePing(p, now)
-	next, _ := lastPing(t, conn)
-	if next.Ms != 40 {
-		t.Fatalf("в зонде ms=%d, ожидалось 40", next.Ms)
+	// Измеренное значение уезжает отдельным self.ping, а не в теле зонда.
+	h.pushSelfPing(p)
+	if ms, n := lastSelfPing(t, conn); n != 1 || ms != 40 {
+		t.Fatalf("self.ping: ms=%d кадров %d; ожидались 40 и 1", ms, n)
+	}
+}
+
+// Своя задержка доезжает до угла экрана тем же тиком, что и room.ping до лобби: иначе угол
+// отстаёт от состава на целый цикл зонда — ровно то расхождение, из-за которого кадр завели.
+func TestSelfPingPushedOnChange(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	now := base
+	h := pingHub(&now)
+	conn := &sentConn{}
+	p := &session.Player{ID: "p1", CreatedAt: base, Conn: conn, PingSent: -1}
+
+	// Пока задержка неизвестна, ноль уходит один раз: клиенту надо знать, что числа нет.
+	h.pushSelfPing(p)
+	h.pushSelfPing(p)
+	if ms, n := lastSelfPing(t, conn); n != 1 || ms != 0 {
+		t.Fatalf("self.ping: ms=%d кадров %d; ожидались 0 и 1", ms, n)
+	}
+
+	// Изменилось — уходит; не изменилось — молчим, иначе кадр на каждом тике хаба.
+	p.PingMs = 40
+	h.pushSelfPing(p)
+	h.pushSelfPing(p)
+	if ms, n := lastSelfPing(t, conn); n != 2 || ms != 40 {
+		t.Fatalf("self.ping: ms=%d кадров %d; ожидались 40 и 2", ms, n)
+	}
+
+	// Потеря зондов гасит число: без явного нуля в углу висела бы задержка мёртвого канала.
+	p.PingMs = 0
+	h.pushSelfPing(p)
+	if ms, n := lastSelfPing(t, conn); n != 3 || ms != 0 {
+		t.Fatalf("self.ping: ms=%d кадров %d; ожидались 0 и 3", ms, n)
+	}
+
+	// После реконнекта клиент про свою задержку ничего не знает, поэтому ноль шлём заново.
+	resetPing(p)
+	h.pushSelfPing(p)
+	if _, n := lastSelfPing(t, conn); n != 4 {
+		t.Fatalf("после resetPing кадров %d, ожидались 4", n)
 	}
 }
 
@@ -161,7 +214,7 @@ func TestPingLostAndReset(t *testing.T) {
 	// Реконнект и обрыв забывают задержку целиком.
 	p.PingMs, p.RTT = 70, 70*time.Millisecond
 	resetPing(p)
-	if p.PingMs != 0 || p.RTT != 0 || p.PingSeq != 0 {
+	if p.PingMs != 0 || p.RTT != 0 || p.PingSeq != 0 || p.PingSent != -1 {
 		t.Fatalf("resetPing не очистил состояние: %+v", p)
 	}
 }
