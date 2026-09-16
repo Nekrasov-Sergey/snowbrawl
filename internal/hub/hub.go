@@ -919,6 +919,7 @@ func (h *Hub) tick() {
 	for _, p := range h.byID {
 		if p.Connected() {
 			h.probePing(p, now)
+			h.pushSelfPing(p)
 			continue
 		}
 		if now.Sub(p.DisconnectedAt) < h.cfg.ReconnectTTL {
