@@ -18,6 +18,9 @@ window.SBRender = (function () {
     // арене на ПК рисование в 900×560 и апскейл браузером мылит спрайты и текст. RS — множитель
     // бэкстора; вся отрисовка остаётся в логических координатах 900×560 через setTransform(RS).
     var RS = 1;
+    // Ширина полоски HP над бойцом; ею же меряется полоска боезапаса под ней, чтобы обе строки
+    // стека были одной длины.
+    var BAR_W = 30;
     function computeRS() {
       var dpr = window.devicePixelRatio || 1;
       var cssW = canvas.clientWidth || (canvas.getBoundingClientRect && canvas.getBoundingClientRect().width) || W;
@@ -356,7 +359,7 @@ window.SBRender = (function () {
         // Ширина полоски — фиксированная (как у ника из 1-2 букв, минимальный случай), не от
         // длины ника: иначе у длинных имён/эмодзи бота полоска растягивалась заметно длиннее,
         // хотя HP у всех бойцов одного порядка.
-        var bw = 30, bx = (w - bw) / 2, by = NICK_H + GAP;
+        var bw = BAR_W, bx = (w - bw) / 2, by = NICK_H + GAP;
         c.fillStyle = 'rgba(11,22,34,0.62)';
         c.fillRect(bx, by, bw, BAR_H);
         c.fillStyle = col;
@@ -1135,12 +1138,6 @@ window.SBRender = (function () {
         ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
         ctx.restore();
       }
-      // Заряженная способность: цветной ореол вокруг бойца.
-      if (p.armed) {
-        var ac = p.armed === 'explosive' ? '#ffb347' : (p.armed === 'frost' ? '#9fe8ff' : '#c9a6ff');
-        ctx.beginPath(); ctx.arc(vx, vy, r + 3.5, 0, Math.PI * 2);
-        ctx.strokeStyle = ac; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.85; ctx.stroke(); ctx.globalAlpha = 1;
-      }
       var lb = labelOf(p, isMe, myTeam);
       // Подпись встаёт НАД макушкой, а не над центром бойца: модели разной высоты (риг втрое
       // выше прежнего кружка, Йети и босс ещё выше), и от центра ник с полоской ложились на лицо.
@@ -1156,9 +1153,12 @@ window.SBRender = (function () {
       ctx.restore();
 
       // Полоска боезапаса рисуется здесь, а не внутри спрайта подписи: am меняется каждый кадр,
-      // и кеш labels[] пересобирался бы на каждом. Габариты повторяют полоску HP из labelOf,
-      // чтобы длина совпадала ровно.
-      if (showAmmo) drawAmmoBar(p, lx + 4, ly + lb.h + AMMO_GAP, lb.w - 8, !!(local && local.pending));
+      // и кеш labels[] пересобирался бы на каждом. Ширина берётся из той же константы BAR_W, что и
+      // у полоски HP, и центрируется по спрайту подписи — обе строки стека совпадают ровно.
+      if (showAmmo) {
+        drawAmmoBar(p, lx + Math.round((lb.w - BAR_W) / 2), ly + lb.h + AMMO_GAP, BAR_W,
+          !!(local && local.pending));
+      }
 
       if (charging && isMe) drawAim(snap, p, aimX, aimY, power);
     }
@@ -1168,10 +1168,14 @@ window.SBRender = (function () {
         Без этого нажатие с пустым запасом не давало вообще никакой обратной связи: прежняя
         зелёная дуга убрана, а обучение по-прежнему обещает, что бросок встанет в очередь. */
     function drawAmmoBar(p, x, y, w, pending) {
-      var n = Sim.AMMO_MAX || 3, cw = (w - AMMO_CELL_GAP * (n - 1)) / n;
+      var n = Sim.AMMO_MAX || 3;
       var full = Math.floor(p.am + 1e-6), frac = p.am - full;
       for (var i = 0; i < n; i++) {
-        var cx = x + i * (cw + AMMO_CELL_GAP);
+        // Границы отделений считаем округлением от общей ширины, а не дробным шагом: остаток от
+        // деления уходит в последнее отделение, кромки остаются на целых пикселях, а суммарная
+        // ширина — ровно w, то есть в точности длина полоски HP.
+        var cx = x + Math.round(i * (w + AMMO_CELL_GAP) / n);
+        var cw = x + Math.round((i + 1) * (w + AMMO_CELL_GAP) / n) - AMMO_CELL_GAP - cx;
         ctx.fillStyle = 'rgba(11,22,34,0.62)'; ctx.fillRect(cx, y, cw, AMMO_H);
         var fw = i < full ? cw : (i === full ? cw * frac : 0);
         if (fw > 0) { ctx.fillStyle = AMMO_FILL; ctx.fillRect(cx, y, fw, AMMO_H); }

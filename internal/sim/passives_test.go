@@ -404,3 +404,45 @@ func auraRadius(t *testing.T) float64 {
 	}
 	return r
 }
+
+// TestAbilityStartsOnCooldown — в начале матча способность не готова, а только начинает
+// заряжаться: иначе первый же тик позволял бы применить актив. В обучении она по-прежнему
+// доступна сразу — шаг «примени способность» ловит применение по фронту роста cd.
+func TestAbilityStartsOnCooldown(t *testing.T) {
+	t.Parallel()
+	p := loadProgram(t)
+	cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Players: []sim.PlayerConfig{
+		{ID: "me", Team: "A", Role: "Щит"},
+		{ID: "b0", Team: "B", Role: "Раннер", Bot: true},
+	}}
+	m, err := p.NewMatch(cfg, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fighterByID(t, m, "me").CD; math.Abs(got-13.5) > 0.2 {
+		t.Fatalf("у Щита стартовый кулдаун %.1f с, ожидалось 13.5", got)
+	}
+	if got := fighterByID(t, m, "b0").CD; math.Abs(got-6) > 0.2 {
+		t.Fatalf("у Раннера стартовый кулдаун %.1f с, ожидалось 6", got)
+	}
+	if ok, _ := m.ApplyInput("me", json.RawMessage(`{"kind":"special","x":300,"y":280}`)); ok {
+		t.Fatal("способность применилась, хотя кулдаун ещё идёт")
+	}
+	// Кулдаун реально течёт и доходит до нуля.
+	for i := 0; i < 400 && fighterByID(t, m, "me").CD > 0; i++ {
+		steps(t, m, 1)
+	}
+	if got := fighterByID(t, m, "me").CD; got > 0 {
+		t.Fatalf("через 20 с кулдаун всё ещё %.1f с", got)
+	}
+	steps(t, m, 3) // cd в снапшоте округлён до десятых: даём запас на остаток
+	if ok, _ := m.ApplyInput("me", json.RawMessage(`{"kind":"special","x":300,"y":280}`)); !ok {
+		t.Fatal("способность не применилась после кулдауна")
+	}
+
+	// Обучение: способность готова с первого кадра.
+	tut := shooterAt(t, p, "Щит", 5)
+	if got := fighterByID(t, tut, "me").CD; got != 0 {
+		t.Fatalf("в обучении стартовый кулдаун %.1f с, ожидался ноль", got)
+	}
+}

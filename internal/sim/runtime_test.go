@@ -598,32 +598,49 @@ func TestTutorialShortCooldown(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		cdOf := func() float64 {
+			var snap struct {
+				Players []struct {
+					ID string  `json:"id"`
+					CD float64 `json:"cd"`
+				} `json:"players"`
+			}
+			raw, err := m.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &snap); err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range snap.Players {
+				if q.ID == "me" {
+					return q.CD
+				}
+			}
+			t.Fatal("бойца нет в снапшоте")
+			return 0
+		}
+		// Обычный матч стартует с полным кулдауном (см. TestAbilityStartsOnCooldown) — ждём
+		// готовности, иначе способность не применится и мерить будет нечего.
+		// cd в снапшоте округлён до десятых, поэтому после нуля добавляем запас на остаток.
+		step := func() {
+			if _, err := m.Step(1.0 / 20); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for i := 0; i < 400 && cdOf() > 0; i++ {
+			step()
+		}
+		step()
+		step()
+		step()
 		if ok, _ := m.ApplyInput("me", json.RawMessage(`{"kind":"special","x":400,"y":280}`)); !ok {
 			t.Fatal("способность не применилась")
 		}
 		if _, err := m.Step(1.0 / 20); err != nil {
 			t.Fatal(err)
 		}
-		var snap struct {
-			Players []struct {
-				ID string  `json:"id"`
-				CD float64 `json:"cd"`
-			} `json:"players"`
-		}
-		raw, err := m.Snapshot()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(raw, &snap); err != nil {
-			t.Fatal(err)
-		}
-		for _, q := range snap.Players {
-			if q.ID == "me" {
-				return q.CD
-			}
-		}
-		t.Fatal("бойца нет в снапшоте")
-		return 0
+		return cdOf()
 	}
 	if got := cd(true); got > 2 {
 		t.Fatalf("в обучении кулдаун %.1f с, ожидалось не больше 2", got)

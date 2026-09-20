@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.13.0';
+  var SIM_VERSION = '1.14.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -90,6 +90,13 @@
     'Фризер':  { active: { id: 'frost',     cooldown: FREEZER_CD, needsDir: false }, passive: 'chill' },
     'Щит':     { active: { id: 'wall',      cooldown: WALL_CD,    needsDir: true  }, passive: 'bubble' }
   };
+
+  // Старт матча: способность не готова, а только начинает заряжаться — иначе первый же тик
+  // позволял бы применить актив. Мобов волн и обучение это не касается.
+  function startCooldown(role) {
+    var ab = ABILITIES[role];
+    return ab ? ab.active.cooldown : 0;
+  }
 
   // mat: 'stone' | 'wood' | 'tree' | 'ice' — материал для текстур клиента (рендер).
   // hp — разрушаемое укрытие (снимается взрывом Бомбера); без hp неразрушимо.
@@ -405,7 +412,12 @@
         players.push(makeChar(String(pc.id), 'B', pc.role, 740, ysB[countB++], pc.bot, pc.nick, pc.botLevel));
       } else throw new Error('sim: bad team ' + pc.team);
     }
-    for (var k = 0; k < players.length; k++) players[k].ai.nextDecisionAt = 500 + rng.next() * 600;
+    for (var k = 0; k < players.length; k++) {
+      players[k].ai.nextDecisionAt = 500 + rng.next() * 600;
+      // В обучении способность готова сразу: шаг «примени способность» ловит применение по
+      // фронту роста cd, и ненулевой старт зачёлся бы ложно на первом кадре.
+      if (!tutorial) players[k].specialCooldown = startCooldown(players[k].role);
+    }
     return state;
   }
 
@@ -427,6 +439,7 @@
       var ch = makeChar(String(pc.id), 'A', pc.role, spawnX, ys[i], pc.bot, pc.nick,
         pc.bot ? difficulty : (pc.botLevel == null ? difficulty : pc.botLevel));
       ch.lives = PVE_LIVES;
+      ch.specialCooldown = startCooldown(pc.role);
       ch.ai.nextDecisionAt = 500 + rng.next() * 600;
       state.players.push(ch);
     }
