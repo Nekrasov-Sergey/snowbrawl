@@ -265,7 +265,9 @@ function render(s) {
         '<div class="act"><button class="unbanBtn" data-ip="' + esc(b.ip) + '">Разбанить</button></div>'],
     })), 'Банов нет.');
 
-  document.getElementById('chatSize').textContent = 'сообщений в чате: ' + (s.chatSize || 0);
+  // «Очистить чат» стирает только общий: чаты комнат живут не дольше своих комнат.
+  document.getElementById('chatSize').textContent =
+    'сообщений в общем чате: ' + (s.chatSize || 0) + ', в чатах комнат: ' + (s.roomChat || 0);
 
   // Обработчики навешиваем после каждого кадра: строки могли пересобраться целиком, а при
   // точечном обновлении — отдельные ячейки. Назначение onclick идемпотентно, дублей не будет.

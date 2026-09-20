@@ -41,7 +41,7 @@ const (
 	CMatchLeave = "match.leave"
 	CInput      = "input"
 	CTraining   = "training"
-	CChatSend   = "chat.send" // сообщение в общий чат главного меню
+	CChatSend   = "chat.send" // сообщение в чат: общий чат меню или чат комнаты (поле scope)
 	CChatDel    = "chat.del"  // удалить сообщение чата (своё или по праву роли)
 	CPong       = "pong"      // ответ на зонд задержки от сервера (см. Ping)
 )
@@ -386,24 +386,34 @@ type Input struct {
 	Power *float64 `json:"power,omitempty"`
 }
 
-// ChatSend — сообщение игрока в общий чат.
+// Области чата: общий чат меню и чат комнаты. Пустая строка — общий: поле необязательное,
+// и старые сообщения без него остаются сообщениями общего чата.
+const (
+	ChatScopeGlobal = ""
+	ChatScopeRoom   = "room"
+)
+
+// ChatSend — сообщение игрока в чат.
 type ChatSend struct {
-	Text string `json:"text"`
+	Text  string `json:"text"`
+	Scope string `json:"scope,omitempty"` // "" — общий чат, "room" — чат комнаты
 }
 
 // ChatMessage — одно сообщение чата.
 type ChatMessage struct {
-	ID   uint64 `json:"id"`
-	PID  string `json:"pid,omitempty"` // id автора: по нему клиент показывает мусорку на своём сообщении
-	Nick string `json:"nick"`
-	Rank string `json:"rank,omitempty"` // роль автора на момент отправки сообщения клиенту
-	Text string `json:"text"`
-	TS   int64  `json:"ts"` // unix-время в мс
+	ID    uint64 `json:"id"`
+	PID   string `json:"pid,omitempty"` // id автора: по нему клиент показывает мусорку на своём сообщении
+	Nick  string `json:"nick"`
+	Rank  string `json:"rank,omitempty"` // роль автора на момент отправки сообщения клиенту
+	Text  string `json:"text"`
+	TS    int64  `json:"ts"`              // unix-время в мс
+	Scope string `json:"scope,omitempty"` // область чата: "" — общий, "room" — комната
 }
 
 // ChatDel — удалить сообщение (C→S) и «сообщение удалено» (S→C).
 type ChatDel struct {
-	ID uint64 `json:"id"`
+	ID    uint64 `json:"id"`
+	Scope string `json:"scope,omitempty"` // область чата: "" — общий, "room" — комната
 }
 
 // RankUpdate — новая роль модерации у этого игрока.
@@ -414,6 +424,7 @@ type RankUpdate struct {
 // ChatHistory — пачка последних сообщений (после welcome).
 type ChatHistory struct {
 	Messages []ChatMessage `json:"messages"`
+	Scope    string        `json:"scope,omitempty"` // область чата: "" — общий, "room" — комната
 }
 
 // MaxChatRunes — предел длины сообщения чата.

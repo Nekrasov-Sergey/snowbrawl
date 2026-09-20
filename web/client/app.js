@@ -27,7 +27,14 @@
     // Список комнат: страница приходит пушем от сервера.
     rooms: { page: 0, data: null },
     roomMatch: null,          // последнее room.match — состояние идущего матча для лобби
-    chat: { msgs: [], unread: 0, open: false }, // общий чат меню
+    // Два чата в одной панели: общий чат меню и чат комнаты. Вкладка по умолчанию — общий;
+    // «Комната» появляется, только пока игрок в комнате, и вместе с ней исчезает.
+    chat: {
+      open: false,
+      tab: 'global',
+      global: { msgs: [], unread: 0 },
+      room: { msgs: [], unread: 0, code: null }
+    },
     offline: { mode: 1, role: 'Раннер', arena: 0, botLevel: 0, gameMode: 'pvp', campaign: true },
     room: null,               // последнее room.state
     game: null                // активный матч (см. startNetMatch / startOfflineMatch)
@@ -189,7 +196,7 @@
     if (name !== 'game') {
       // Чат виден на всех экранах вне боя, а сообщения приходят и пока смотришь список комнат:
       // при переходе лог надо дорисовать, иначе он остаётся на том, что было видно раньше.
-      if (app.chat.open) { app.chat.unread = 0; chatBadge(); chatRender(); }
+      if (app.chat.open) { chatMarkRead(chatFeed(app.chat.tab)); chatBadge(); chatRender(); }
       // Индикатор связи мог переехать в игровую панель — возвращаем в шапку.
       var conn = $('connState');
       if (conn.parentNode !== $('topLeftBar')) $('topLeftBar').insertBefore(conn, $('fsTopBtn'));
@@ -366,6 +373,7 @@
       case 'room.state':
         clearCode(); // код принят (или мы вошли из списка): форма ожидания больше не нужна
         app.room = d;
+        chatSetRoom(d.code);
         if (!d.inMatch) app.roomMatch = null;
         // Во время матча и пока показано табло результата лобби не переключаем:
         // игрок сам нажмёт «В лобби» (или оно откроется по кнопке выхода).
@@ -375,6 +383,7 @@
         break;
       case 'room.left':
         app.room = null;
+        chatSetRoom(null);
         if (d && d.code === 'kicked') toast(ERR_TEXT.kicked);
         if (app.screen === 'lobby' || app.screen === 'game') goto('menu');
         break;
@@ -405,13 +414,14 @@
         if (app.game && !app.game.offline) app.game.onEnd(d);
         break;
       case 'chat.history':
-        chatSetHistory(d.messages || []);
+        chatSetHistory(d.messages || [], d.scope);
         break;
       case 'chat.del':
-        chatRemove(d.id);
+        chatRemove(d.id, d.scope);
         break;
       case 'chat.clear':
-        app.chat.msgs = []; app.chat.unread = 0; chatBadge();
+        // Админка чистит только общий чат: чаты комнат живут не дольше своих комнат.
+        app.chat.global.msgs = []; chatMarkRead(app.chat.global); chatBadge();
         if (app.chat.open && chatVisible()) chatRender();
         break;
       case 'rank':
@@ -1646,10 +1656,19 @@
   // Общий чат главного меню
   // ------------------------------------------------------------
   var CHAT_KEEP = 200;
+  // Подписи вкладок: у каждой свой плейсхолдер поля и своя приписка под ним — иначе легко
+  // отправить в общий чат то, что предназначалось команде.
+  var CHAT_TABS = {
+    global: { placeholder: 'Сообщение в общий чат…', note: 'Сообщения видны всем и хранятся час.' },
+    room: { placeholder: 'Сообщение в чат комнаты…', note: 'Видно только участникам комнаты.' }
+  };
   function chatTime(ts) {
     var d = new Date(ts || Date.now());
     return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
   }
+  /** Лента вкладки. Область в сообщениях сервера: '' — общий чат, 'room' — чат комнаты. */
+  function chatFeed(tab) { return tab === 'room' ? app.chat.room : app.chat.global; }
+  function chatTabOf(scope) { return scope === 'room' ? 'room' : 'global'; }
   // Права на клиенте — только чтобы показать мусорку; решает всё равно сервер.
   function canDeleteChat(m) {
     if (m.pid && m.pid === app.me) return true;             // своё сообщение
@@ -1668,38 +1687,91 @@
   }
   function chatRender() {
     var log = $('chatLog'); if (!log) return;
-    log.innerHTML = app.chat.msgs.map(chatRowHtml).join('');
+    var tab = app.chat.tab;
+    log.innerHTML = chatFeed(tab).msgs.map(chatRowHtml).join('');
     var btns = log.querySelectorAll('.chatDel');
     for (var i = 0; i < btns.length; i++) {
-      btns[i].onclick = function () { send('chat.del', { id: Number(this.dataset.id) }); };
+      btns[i].onclick = function () { send('chat.del', { id: Number(this.dataset.id), scope: chatScope(tab) }); };
     }
     log.scrollTop = log.scrollHeight;
   }
-  /** Убрать одно сообщение (пуш chat.del). Неизвестный id просто игнорируем. */
-  function chatRemove(id) {
-    for (var i = 0; i < app.chat.msgs.length; i++) {
-      if (app.chat.msgs[i].id === id) { app.chat.msgs.splice(i, 1); break; }
-    }
-    if (app.chat.open && chatVisible()) chatRender();
+  /** Область для сервера: общий чат ходит без поля scope, как и раньше. */
+  function chatScope(tab) { return tab === 'room' ? 'room' : undefined; }
+  /** Лента открыта прямо сейчас: панель видна, раскрыта и показывает именно её. */
+  function chatLive(tab) { return app.chat.open && chatVisible() && app.chat.tab === tab; }
+  /** Лента прочитана: счётчик в ноль и пометки с сообщений. */
+  function chatMarkRead(feed) {
+    feed.unread = 0;
+    for (var i = 0; i < feed.msgs.length; i++) feed.msgs[i].unread = false;
   }
-  function chatSetHistory(list) {
-    app.chat.msgs = list.slice(-CHAT_KEEP);
-    if (app.chat.open) { app.chat.unread = 0; chatRender(); }
-    else app.chat.unread = 0; // история — не «непрочитанное»
+  /** Убрать одно сообщение (пуш chat.del). Неизвестный id просто игнорируем. */
+  function chatRemove(id, scope) {
+    var tab = chatTabOf(scope), feed = chatFeed(tab), msgs = feed.msgs;
+    for (var i = 0; i < msgs.length; i++) {
+      if (msgs[i].id !== id) continue;
+      // Удалённое сообщение перестаёт быть непрочитанным сразу: иначе счётчик звал бы
+      // в чат, где читать уже нечего, и не сходился до перезагрузки страницы.
+      if (msgs[i].unread && feed.unread > 0) feed.unread--;
+      msgs.splice(i, 1);
+      break;
+    }
+    if (chatLive(tab)) chatRender();
+    chatBadge();
+  }
+  function chatSetHistory(list, scope) {
+    var tab = chatTabOf(scope), feed = chatFeed(tab);
+    feed.msgs = list.slice(-CHAT_KEEP);
+    chatMarkRead(feed); // история — не «непрочитанное»
+    if (chatLive(tab)) chatRender();
     chatBadge();
   }
   function chatAdd(m) {
     if (!m || !m.text) return;
-    app.chat.msgs.push(m);
-    if (app.chat.msgs.length > CHAT_KEEP) app.chat.msgs.splice(0, app.chat.msgs.length - CHAT_KEEP);
-    if (app.chat.open && chatVisible()) { chatRender(); }
-    else if (!(m.pid && m.pid === app.me)) { app.chat.unread++; }
+    var tab = chatTabOf(m.scope), feed = chatFeed(tab);
+    feed.msgs.push(m);
+    if (feed.msgs.length > CHAT_KEEP) {
+      // Выпавшее из ленты сообщение читать уже негде — снимаем его и со счётчика.
+      var drop = feed.msgs.splice(0, feed.msgs.length - CHAT_KEEP);
+      for (var i = 0; i < drop.length; i++) if (drop[i].unread && feed.unread > 0) feed.unread--;
+    }
+    if (chatLive(tab)) chatRender();
+    else if (!(m.pid && m.pid === app.me)) { m.unread = true; feed.unread++; }
     chatBadge();
   }
+  /** Значок на свёрнутой панели — сумма по вкладкам, точки у вкладок — их собственное. */
   function chatBadge() {
-    var b = $('chatUnread'); if (!b) return;
-    b.hidden = !(app.chat.unread > 0);
-    b.textContent = app.chat.unread > 99 ? '99+' : String(app.chat.unread);
+    var b = $('chatUnread');
+    var total = app.chat.global.unread + app.chat.room.unread;
+    if (b) {
+      b.hidden = !(total > 0);
+      b.textContent = total > 99 ? '99+' : String(total);
+    }
+    var g = $('chatDotGlobal'); if (g) g.hidden = !(app.chat.global.unread > 0);
+    var r = $('chatDotRoom'); if (r) r.hidden = !(app.chat.room.unread > 0);
+  }
+  /** Переключение вкладки: непрочитанное этой ленты гаснет сразу. */
+  function chatSetTab(tab) {
+    if (tab === 'room' && !app.chat.room.code) tab = 'global';
+    app.chat.tab = tab;
+    chatMarkRead(chatFeed(tab));
+    $('chatTabGlobal').classList.toggle('active', tab === 'global');
+    $('chatTabRoom').classList.toggle('active', tab === 'room');
+    $('chatInput').placeholder = CHAT_TABS[tab].placeholder;
+    $('chatNote').textContent = CHAT_TABS[tab].note;
+    chatBadge();
+    chatRender();
+  }
+  /** Комната появилась или сменилась — своя вкладка; вышли из комнаты — вкладки нет. */
+  function chatSetRoom(code) {
+    var cur = app.chat.room;
+    if (cur.code === code) return;
+    cur.code = code || null;
+    cur.msgs = [];              // чат прежней комнаты новому составу не принадлежит
+    cur.unread = 0;
+    $('chatTabRoom').hidden = !cur.code;
+    // Вошёл в комнату — сразу её чат: договариваться нужно с теми, с кем играешь.
+    // Вышел — обратно в общий, другого чата всё равно нет.
+    chatSetTab(cur.code ? 'room' : 'global');
   }
   // Чат виден на всех экранах вне боя: на ПК это столбец справа, на телефоне — блок снизу.
   // Кроме экрана ника: сессии там ещё нет, писать некуда, а поле ввода отвлекало бы от имени.
@@ -1711,7 +1783,7 @@
     $('chatBody').hidden = !open;
     $('chatToggle').classList.toggle('open', open);
     if (open) {
-      app.chat.unread = 0; chatBadge(); chatRender();
+      chatMarkRead(chatFeed(app.chat.tab)); chatBadge(); chatRender();
       if (focus) setTimeout(function () { $('chatInput').focus(); }, 0);
     }
     try { localStorage.setItem('sb.chatOpen', open ? '1' : '0'); } catch (e) { /* игнор */ }
@@ -1720,10 +1792,12 @@
     var el = $('chatInput'), text = (el.value || '').trim();
     if (!text) return;
     if (text.length > 300) text = text.slice(0, 300);
-    send('chat.send', { text: text });
+    send('chat.send', { text: text, scope: chatScope(app.chat.tab) });
     el.value = '';
   }
   $('chatToggle').onclick = function () { Audio_.uiClick(); chatSetOpen(!app.chat.open, true); };
+  $('chatTabGlobal').onclick = function () { Audio_.uiClick(); chatSetTab('global'); };
+  $('chatTabRoom').onclick = function () { Audio_.uiClick(); chatSetTab('room'); };
   $('chatSend').onclick = function () { chatSubmit(); };
   $('chatInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); chatSubmit(); } });
   // По умолчанию чат открыт: закрытым его почти никто не находил. Выбор игрока помним.
