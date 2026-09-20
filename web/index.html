@@ -163,12 +163,16 @@
   <div id="chatPanel">
     <button id="chatToggle" type="button">Чат <span class="badge" id="chatUnread" hidden>0</span><span class="chevron">▾</span></button>
     <div id="chatBody" hidden>
+      <div id="chatTabs">
+        <button class="chatTab" id="chatTabRoom" type="button" hidden>Комната <span class="dot" id="chatDotRoom" hidden></span></button>
+        <button class="chatTab active" id="chatTabGlobal" type="button">Общий <span class="dot" id="chatDotGlobal" hidden></span></button>
+      </div>
       <div id="chatLog"></div>
       <div id="chatInputRow">
         <input type="text" id="chatInput" maxlength="300" placeholder="Сообщение в общий чат…" autocomplete="off">
         <button class="menuBtn primary" id="chatSend" type="button">→</button>
       </div>
-      <div class="chatNote">Сообщения видны всем и хранятся час.</div>
+      <div class="chatNote" id="chatNote">Сообщения видны всем и хранятся час.</div>
     </div>
   </div>
   </div><!-- /#pageBody -->

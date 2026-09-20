@@ -72,6 +72,11 @@ func (h *Hub) ApplyRank(ip string) {
 	}
 	for _, p := range h.byID {
 		h.sendChatHistory(p)
+		// Чат комнаты рисуется теми же строками, значит и его надо перевыслать — иначе
+		// в нём ник останется прежнего цвета до выхода из комнаты.
+		if r := h.rooms[p.RoomCode]; r != nil && r.Member(p.ID) != nil {
+			h.sendRoomChatHistory(p, r)
+		}
 	}
 	for code := range rooms {
 		h.broadcastRoom(h.rooms[code])
@@ -79,7 +84,8 @@ func (h *Hub) ApplyRank(ip string) {
 	h.log.Info().Str("ip", ip).Str("rank", rank).Msg("moderation: rank applied")
 }
 
-// ClearChat стирает историю общего чата у всех. Возвращает, сколько сообщений стёрто.
+// ClearChat стирает историю общего чата у всех. Чаты комнат не трогает: они живут не дольше
+// своей комнаты и никому, кроме её участников, не видны. Возвращает, сколько сообщений стёрто.
 // chatSeq не сбрасываем: новые id столкнулись бы с теми, что клиенты держат в разметке.
 func (h *Hub) ClearChat() int {
 	h.mu.Lock()

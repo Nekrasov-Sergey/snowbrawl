@@ -57,6 +57,9 @@ type Hub struct {
 	// chat — общий чат меню: сообщения в памяти, TTL = cfg.ChatTTL.
 	chat    []chatEntry
 	chatSeq uint64
+	// roomChat — чаты комнат, ключ — код комнаты. Живут не дольше комнаты: буфер удаляет
+	// dropRoom вместе с ней, поэтому удалять комнату мимо dropRoom нельзя.
+	roomChat map[string][]chatEntry
 	// nicks — брони ников до перезапуска сервера, ключ — protocol.NickKey (см. nicks.go).
 	nicks map[string]nickHold
 
@@ -84,6 +87,7 @@ func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderati
 		matchPush: map[string]string{},
 		pingPush:  map[string]string{},
 		nicks:     map[string]nickHold{},
+		roomChat:  map[string][]chatEntry{},
 		rng:       rand.New(rand.NewPCG(seedOf(cfg), 0xDEADBEEF)),
 		stopCh:    make(chan struct{}),
 	}
@@ -344,6 +348,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 	case session.InRoom:
 		if r := h.rooms[p.RoomCode]; r != nil {
 			h.broadcastRoom(r)
+			h.sendRoomChatHistory(p, r)
 		} else {
 			p.ToMenu()
 		}
@@ -351,11 +356,15 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		if m := h.matches[p.MatchID]; m != nil {
 			c.Send(m.StartMessage(p.ID))
 			m.Attach(p.ID, c)
+			if r := h.rooms[p.RoomCode]; r != nil && r.Member(p.ID) != nil {
+				h.sendRoomChatHistory(p, r)
+			}
 		} else {
 			p.ToMenu()
 			if r := h.rooms[p.RoomCode]; r != nil && r.Member(p.ID) != nil {
 				p.Place, p.RoomCode = session.InRoom, r.Code
 				h.broadcastRoom(r)
+				h.sendRoomChatHistory(p, r)
 			}
 		}
 	}
@@ -409,6 +418,7 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 	p.Place, p.RoomCode = session.InRoom, code
 	h.log.Info().Str("room", code).Str("host", p.ID).Int("mode", req.Mode).Str("gameMode", gameMode).Msg("room created")
 	h.broadcastRoom(r)
+	h.sendRoomChatHistory(p, r)
 }
 
 func (h *Hub) handleRoomJoin(p *session.Player, data json.RawMessage) {
@@ -455,7 +465,8 @@ func (h *Hub) handleRoomJoin(p *session.Player, data json.RawMessage) {
 	p.Place, p.RoomCode = session.InRoom, code
 	delete(h.listSubs, p.ID)
 	h.broadcastRoom(r)
-	h.sendRoomMatch(p, r) // вошёл в комнату с идущим матчем — сразу показываем, что там происходит
+	h.sendRoomChatHistory(p, r) // вошедший видит, о чём говорили в комнате до него
+	h.sendRoomMatch(p, r)       // вошёл в комнату с идущим матчем — сразу показываем, что там происходит
 }
 
 func (h *Hub) roomOf(p *session.Player) *room.Room {
@@ -609,10 +620,17 @@ func (h *Hub) leaveRoom(p *session.Player, notify bool) {
 		if r.InMatch {
 			return // удалим, когда матч закончится
 		}
-		delete(h.rooms, r.Code)
+		h.dropRoom(r.Code)
 		return
 	}
 	h.broadcastRoom(r)
+}
+
+// dropRoom удаляет комнату вместе с её чатом: буфер сообщений живёт ровно столько же,
+// сколько комната. Вызывать под h.mu.
+func (h *Hub) dropRoom(code string) {
+	delete(h.rooms, code)
+	delete(h.roomChat, code)
 }
 
 func (h *Hub) handleRoomStart(p *session.Player) {
@@ -692,6 +710,19 @@ func (h *Hub) roomState(r *room.Room) protocol.RoomState {
 		st.Players = append(st.Players, rp)
 	}
 	return st
+}
+
+// sendToRoom отправляет сообщение всем участникам комнаты — и тем, кто в лобби, и тем, кто
+// сейчас в матче: слот в комнате за ними сохраняется, а значит и чат комнаты тоже.
+func (h *Hub) sendToRoom(r *room.Room, msg []byte) {
+	if r == nil {
+		return
+	}
+	for _, m := range r.Members {
+		if p := h.byID[m.ID]; p != nil {
+			p.Send(msg)
+		}
+	}
 }
 
 func (h *Hub) broadcastRoom(r *room.Room) {
@@ -829,7 +860,7 @@ func (h *Hub) onMatchEnd(m *match.Match, res match.Result) {
 			r.LastWinner = "draw"
 		}
 		if r.IsEmpty() {
-			delete(h.rooms, r.Code)
+			h.dropRoom(r.Code)
 		} else {
 			h.broadcastRoom(r)
 		}
@@ -912,7 +943,7 @@ func (h *Hub) tick() {
 
 	for code, r := range h.rooms {
 		if r.IsEmpty() && !r.InMatch && now.Sub(r.EmptySince) > h.cfg.RoomTTL {
-			delete(h.rooms, code)
+			h.dropRoom(code)
 		}
 	}
 
@@ -1002,6 +1033,7 @@ type Stats struct {
 	Ranks     []moderation.Entry `json:"ranks"`
 	Bans      []moderation.Ban   `json:"bans"`
 	ChatSize  int                `json:"chatSize"`
+	RoomChat  int                `json:"roomChat"`            // сообщений во всех чатах комнат
 	ModBroken bool               `json:"modBroken,omitempty"` // файл ролей и банов был битым
 }
 
@@ -1158,6 +1190,9 @@ func (h *Hub) Stats() Stats {
 	st.MatchesLive = len(h.matches)
 	st.Ranks, st.Bans = h.mod.Ranks(), h.mod.Bans()
 	st.ChatSize = len(h.chat)
+	for _, buf := range h.roomChat {
+		st.RoomChat += len(buf)
+	}
 	st.ModBroken = h.mod.Broken()
 	return st
 }

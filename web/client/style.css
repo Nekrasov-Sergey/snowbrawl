@@ -552,6 +552,17 @@ html.ingame #pageBody { display: none; } /* в бою чат недоступе�
   border: 1px solid #3a5a80; border-top: none; border-radius: 0 0 8px 8px;
   background: #0e1a2b; padding: 8px; display: flex; flex-direction: column; gap: 8px;
 }
+/* Вкладки чата: общий и комнаты. Вкладка «Комната» появляется, только пока игрок в комнате.
+   Точка у вкладки — непрочитанное именно в ней; число на свёрнутой панели — сумма по обеим. */
+#chatTabs { display: flex; gap: 6px; }
+.chatTab {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: #0e1a2b; border: 1px solid #3a5a80; color: #8fb3d9; border-radius: 6px;
+  padding: 6px 10px; font: 600 13px 'Segoe UI', Arial, sans-serif; cursor: pointer;
+}
+.chatTab.active { background: #16283f; color: #eaf2ff; border-color: #5b86b8; }
+.chatTab .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff5b5b; }
+html.touch .chatTab { min-height: 36px; }
 #chatLog { height: 200px; overflow-y: auto; font-size: 13px; line-height: 1.5; color: #cfe2fb; word-break: break-word; }
 .chatRow { padding: 1px 0; }
 .chatRow .chatT { color: #4b6a8a; font-size: 11px; }
