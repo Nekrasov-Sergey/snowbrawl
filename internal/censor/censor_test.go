@@ -20,6 +20,68 @@ func TestRootsAreNormalized(t *testing.T) {
 	}
 }
 
+func TestLatinRootsAreNormalized(t *testing.T) {
+	t.Parallel()
+	for _, r := range rootsEn {
+		if got := normalizeLatin([]rune(r)); got != r {
+			t.Errorf("корень %q не в нормализованном виде (стал %q)", r, got)
+		}
+	}
+	for _, e := range exactEn {
+		if got := normalizeLatin([]rune(e)); got != e {
+			t.Errorf("слово %q не в нормализованном виде (стало %q)", e, got)
+		}
+	}
+	for _, a := range allowEn {
+		if got := normalizeLatin([]rune(a)); got != a {
+			t.Errorf("исключение %q не в нормализованном виде (стало %q)", a, got)
+		}
+	}
+}
+
+// Английский мат и обход через цифры, растяжку и разрядку.
+func TestMaskCatchesEnglishProfanity(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"fuck", "FUCK", "f.u.c.k", "fuuuck", "f u c k", "sh1t", "$hit", "bullshit",
+		"bitch", "asshole", "motherfucker", "cunt", "slut", "whore", "faggot", "wanker", "twat",
+		"cock", "dick", "prick", "fag", "tits",
+		// русский мат латиницей — раньше проходил целиком
+		"suka", "blyat", "pizdec", "pidoras", "mudak", "nahui", "govno",
+	}
+	for _, in := range cases {
+		if !Bad(in) {
+			t.Errorf("%q должно считаться матом", in)
+		}
+		if out := Mask(in); !strings.Contains(out, "*") {
+			t.Errorf("Mask(%q) = %q — без звёздочек", in, out)
+		}
+	}
+}
+
+// Английские слова, которые не должны попасть под фильтр, и русские, которые латинская
+// дорожка могла бы испортить: «масса» → «macca», «кот» → «kot», «соска» → «cocka».
+func TestMaskKeepsInnocentEnglishAndCyrillic(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"as", "class", "pass", "mass", "bass", "massive", "assassin", "grass",
+		"cockpit", "peacock", "analysis", "analytics", "cumulative", "document",
+		"night", "Nigeria", "shiitake", "Scunthorpe", "debate", "herbal", "verbal",
+		"shoe", "hoe", "title", "attitude", "classic", "dickens",
+		"good game", "nice shot",
+		"масса", "кот", "соска", "рота", "парк", "мастер", "ракета", "сектор", "тема",
+		"анализ", "команда", "танк", "снайпер", "хорошо сыграли",
+	}
+	for _, in := range cases {
+		if Bad(in) {
+			t.Errorf("%q не мат, но помечено", in)
+		}
+		if out := Mask(in); out != in {
+			t.Errorf("Mask(%q) = %q — текст изменился", in, out)
+		}
+	}
+}
+
 func TestMaskCatchesObfuscation(t *testing.T) {
 	t.Parallel()
 	cases := []string{

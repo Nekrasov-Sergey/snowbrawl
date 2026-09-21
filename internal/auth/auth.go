@@ -167,7 +167,7 @@ func (s *Service) Identify(r *http.Request) string {
 // start уводит игрока на Яндекс.
 func (s *Service) start(c *gin.Context) {
 	if !s.starts.allow(ws.ClientIP(c.Request, s.cfg.TrustProxy), s.now()) {
-		c.String(http.StatusTooManyRequests, "слишком часто, попробуйте через минуту")
+		c.String(http.StatusTooManyRequests, msg(c.Request, "слишком часто, попробуйте через минуту"))
 		return
 	}
 	state := randomHex(16)
@@ -194,7 +194,7 @@ func returnPath(v string) string {
 func (s *Service) callback(c *gin.Context) {
 	ip := ws.ClientIP(c.Request, s.cfg.TrustProxy)
 	if !s.callbacks.allow(ip, s.now()) {
-		c.String(http.StatusTooManyRequests, "слишком часто, попробуйте через минуту")
+		c.String(http.StatusTooManyRequests, msg(c.Request, "слишком часто, попробуйте через минуту"))
 		return
 	}
 	// Куку state гасим в любом исходе: она одноразовая.
@@ -315,9 +315,9 @@ func (s *Service) expiringSoon(value string) bool {
 
 // fail отвечает игроку человеческим текстом, а подробности оставляет в логе: в тексте страницы
 // не должно быть ничего про код, токен и устройство сервера.
-func (s *Service) fail(c *gin.Context, status int, msg string, err error) {
+func (s *Service) fail(c *gin.Context, status int, text string, err error) {
 	if err != nil {
 		s.log.Warn().Err(err).Str("path", c.Request.URL.Path).Msg("auth: вход не удался")
 	}
-	c.String(status, msg)
+	c.String(status, msg(c.Request, text))
 }

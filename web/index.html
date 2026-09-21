@@ -48,6 +48,11 @@
     <!-- Скрыта, если вход на сервере выключен (нет client_id): тогда гостевая кнопка станет главной -->
     <button class="menuBtn primary wide" id="btnYandexLogin" hidden>Войти через Яндекс ID</button>
     <button class="menuBtn ghost wide" id="btnGuest">Играть гостем</button>
+    <!-- Язык выбирают раньше всего остального, поэтому он есть и здесь, и в настройках -->
+    <div class="langRow" id="loginLang">
+      <button type="button" data-lang="ru">Русский</button>
+      <button type="button" data-lang="en">English</button>
+    </div>
   </div>
 
   <!-- Смена ника: открывается из меню кнопкой «сменить» и когда сервер отклонил имя -->
@@ -90,6 +95,8 @@
         <button class="menuBtn ghost" id="btnLogout">Выйти</button></div>
     </div>
     <div class="settingsBox">
+      <label class="setRow"><span>Язык<small>Ники игроков и коды комнат не переводятся.</small></span>
+        <select id="setLang"><option value="ru">Русский</option><option value="en">English</option></select></label>
       <label class="setRow"><span>Громкость<small>Ноль — звука нет. Кнопка 🔊 в углу гасит и возвращает этот уровень.</small></span>
         <span class="setVol"><input type="range" id="setVolume" min="0" max="100" step="5"><b id="setVolumeVal">100%</b></span></label>
       <label class="setRow"><span>Вибрация при попадании<small>Работает на Android; iPhone не поддерживает.</small></span><input type="checkbox" id="setHaptics"></label>
@@ -281,12 +288,16 @@
 <div id="rotateGate"><div><div class="rotIcon">📱↻</div>Поверни телефон<br><small>Бой в SnowBrawl идёт в горизонтальном положении.</small></div></div>
 
 <script src="sim/sim.js?v=__BUILD__"></script>
+<!-- Настройки и язык — раньше всех: i18n переводит статическую разметку сразу при загрузке,
+     до того как остальные модули начнут её читать и дополнять. -->
+<script src="client/settings.js?v=__BUILD__"></script>
+<script src="client/i18n/en.js?v=__BUILD__"></script>
+<script src="client/i18n.js?v=__BUILD__"></script>
 <script src="client/audio.js?v=__BUILD__"></script>
 <script src="client/rig.js?v=__BUILD__"></script>
 <script src="client/render.js?v=__BUILD__"></script>
 <script src="client/net.js?v=__BUILD__"></script>
 <script src="client/offline.js?v=__BUILD__"></script>
-<script src="client/settings.js?v=__BUILD__"></script>
 <script src="client/device.js?v=__BUILD__"></script>
 <script src="client/intent.js?v=__BUILD__"></script>
 <script src="client/touch.js?v=__BUILD__"></script>
