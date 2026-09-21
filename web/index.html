@@ -12,6 +12,8 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <meta name="build" content="__BUILD__">
+<!-- Способы входа, включённые на сервере: подставляет сервер, пусто — вход выключен -->
+<meta name="auth" content="__AUTH__">
 <title>SnowBrawl</title>
 <link rel="stylesheet" href="client/style.css?v=__BUILD__">
 </head>
@@ -39,6 +41,16 @@
        намеренно снаружи — внутри сетки у него ломается растяжение на всю высоту. -->
   <div id="pageBody">
   <div id="screens">
+  <!-- Первый экран: как играть. Имя здесь не спрашиваем — вошедшему его даёт аккаунт,
+       гостю выдаёт сервер, а сменить можно из меню. -->
+  <div id="screen-login" class="panel" hidden>
+    <div class="subtitle">Как будем играть?</div>
+    <!-- Скрыта, если вход на сервере выключен (нет client_id): тогда гостевая кнопка станет главной -->
+    <button class="menuBtn primary wide" id="btnYandexLogin" hidden>Войти через Яндекс ID</button>
+    <button class="menuBtn ghost wide" id="btnGuest">Играть гостем</button>
+  </div>
+
+  <!-- Смена ника: открывается из меню кнопкой «сменить» и когда сервер отклонил имя -->
   <div id="screen-nick" class="panel" hidden>
     <div class="subtitle">Как вас называть в игре?</div>
     <div class="stub-box">
@@ -51,7 +63,8 @@
   <!-- Меню -->
   <div id="screen-menu" class="panel" hidden>
     <div class="subtitle">Зашёл → выбрал комнату → бросай снежки → победи.</div>
-    <div class="who">Вы: <b id="menuNick"></b> <button class="linkBtn" id="changeNick">сменить</button></div>
+    <div class="who">Вы: <b id="menuNick"></b> <button class="linkBtn" id="changeNick">сменить ник</button></div>
+    <button class="menuBtn ghost wide" id="btnYandexMenu" hidden>Войти через Яндекс ID</button>
     <div class="who" id="onlineInfo">Игроков онлайн: —</div>
     <button class="menuBtn primary" id="btnPvp">РЕЖИМ PVP</button>
     <button class="menuBtn" id="btnPve">РЕЖИМ PVE</button>
@@ -70,7 +83,12 @@
 
   <!-- Настройки -->
   <div id="screen-settings" class="panel" hidden>
-    <div class="subtitle">Настройки сохраняются на этом устройстве.</div>
+    <div class="subtitle">Настройки</div>
+    <!-- Виден только вошедшему: гостю выходить неоткуда, а кнопка входа есть в меню -->
+    <div class="settingsBox" id="accountBox" hidden>
+      <div class="setRow"><span>Аккаунт Яндекс ID<small id="accountWho"></small></span>
+        <button class="menuBtn ghost" id="btnLogout">Выйти</button></div>
+    </div>
     <div class="settingsBox">
       <label class="setRow"><span>Громкость<small>Ноль — звука нет. Кнопка 🔊 в углу гасит и возвращает этот уровень.</small></span>
         <span class="setVol"><input type="range" id="setVolume" min="0" max="100" step="5"><b id="setVolumeVal">100%</b></span></label>
@@ -78,6 +96,7 @@
       <label class="setRow"><span>Сенсорное управление<small>Стики вместо мыши. «Авто» — по типу устройства.</small></span>
         <select id="setTouch"><option value="auto">авто</option><option value="on">включено</option><option value="off">выключено</option></select></label>
     </div>
+    <div class="who settingsNote">Настройки выше сохраняются на этом устройстве.</div>
     <div class="navRow"><button class="menuBtn ghost" id="backFromSettings">Назад</button></div>
   </div>
 

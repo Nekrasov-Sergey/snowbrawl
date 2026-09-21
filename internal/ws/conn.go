@@ -48,6 +48,11 @@ type Options struct {
 	PingPeriod  time.Duration // heartbeat: период пинга (0 — значение по умолчанию)
 	PongTimeout time.Duration // сколько ждать pong на пинг (0 — значение по умолчанию)
 	Log         zerolog.Logger
+	// Identify узнаёт аккаунт игрока по HTTP-запросу апгрейда (куке входа). Сокет открывается
+	// на тот же origin, поэтому браузер прикладывает куку сам — и сервер знает, кто пришёл,
+	// ещё до первого сообщения. Пустая строка и nil означают гостя; пакет ws о самих аккаунтах
+	// ничего не знает, за это отвечает internal/auth.
+	Identify func(r *http.Request) string
 }
 
 // Server принимает WebSocket-соединения и раздаёт их Handler-у.
@@ -96,14 +101,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsc.SetReadLimit(protocol.MaxMessageSize)
+	account := ""
+	if s.opts.Identify != nil {
+		account = s.opts.Identify(r)
+	}
 	c := &Conn{
-		ID:     s.nextID.Add(1),
-		ip:     clientIP(r, s.opts.TrustProxy),
-		ws:     wsc,
-		out:    make(chan []byte, 256),
-		closed: make(chan struct{}),
-		rate:   newBucket(s.opts.MsgRate, s.opts.MsgRate*2),
-		abuse:  newBucket(s.opts.MsgRate*abuseRateMul, s.opts.MsgRate*abuseBurstMul),
+		ID:      s.nextID.Add(1),
+		ip:      clientIP(r, s.opts.TrustProxy),
+		account: account,
+		ws:      wsc,
+		out:     make(chan []byte, 256),
+		closed:  make(chan struct{}),
+		rate:    newBucket(s.opts.MsgRate, s.opts.MsgRate*2),
+		abuse:   newBucket(s.opts.MsgRate*abuseRateMul, s.opts.MsgRate*abuseBurstMul),
 	}
 	s.conns.Add(1)
 	s.wg.Add(1)
@@ -116,10 +126,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Conn — одно клиентское соединение.
 type Conn struct {
-	ID  int64
-	ip  string
-	ws  *websocket.Conn
-	out chan []byte
+	ID      int64
+	ip      string
+	account string // "" — гость
+	ws      *websocket.Conn
+	out     chan []byte
 	// rate решает, обрабатывать ли сообщение, abuse — жить ли соединению. Болтливый, но честный
 	// клиент теряет лишние сообщения; закрываем только того, кто превышает лимит кратно и долго.
 	rate  *bucket
@@ -301,6 +312,10 @@ func (c *Conn) run(h Handler, log zerolog.Logger, pingPeriod, pongTimeout time.D
 	}
 	ev.Int64("conn", c.ID).Str("ip", c.ip).Str("reason", text).Msg("ws closed")
 }
+
+// AccountID — аккаунт, опознанный по куке при апгрейде; пусто у гостя. Значение не меняется
+// за жизнь соединения: вошедший или вышедший игрок открывает новый сокет.
+func (c *Conn) AccountID() string { return c.account }
 
 // ClientIP — адрес клиента запроса. Отдельная функция, а не gin-овский c.ClientIP(): тот по
 // умолчанию доверяет X-Forwarded-For от кого угодно, а здесь заголовкам верим только при

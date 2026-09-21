@@ -27,14 +27,46 @@ type nickHold struct {
 // без предела; при переполнении вытесняем брони, за которыми нет живой сессии.
 const nickHoldsCap = 5000
 
-// nickFree — можно ли выдать ник этой сессии. owner пустой у новой сессии (её id ещё нет).
-func (h *Hub) nickFree(nick, ip, owner string) bool {
-	hold, ok := h.nicks[protocol.NickKey(nick)]
+// nickFree — можно ли выдать ник этой сессии. owner пустой у новой сессии (её id ещё нет),
+// accountID пустой у гостя.
+//
+// Броней две, и они разные по сроку. За аккаунтом ник закреплён навсегда (лежит в accounts.json):
+// имя, под которым игрока знают, не должен занять никто, пока сам владелец не переименуется.
+// За гостем — только до перезапуска сервера и только по адресу и сессии, как было раньше.
+func (h *Hub) nickFree(nick, ip, owner, accountID string) bool {
+	key := protocol.NickKey(nick)
+	if acc, ok := h.accs.ByNickKey(key); ok && acc.ID != accountID {
+		return false
+	}
+	hold, ok := h.nicks[key]
 	if !ok {
 		return true
 	}
 	return hold.ip == ip || (owner != "" && hold.owner == owner)
 }
+
+// pickGuestNick подбирает свободное имя гостю, который его не вводил. Сначала случайные пары
+// «прилагательное существительное» (их полторы тысячи, и они читаются как имя), и только если
+// не повезло — «Игрок NNNN» с куда большим пространством. Вызывать под h.mu.
+func (h *Hub) pickGuestNick(ip string) string {
+	for i := 0; i < guestNickTries; i++ {
+		if nick := protocol.RandomNick(); h.nickFree(nick, ip, "", "") {
+			return nick
+		}
+	}
+	for i := 0; i < guestNickTries; i++ {
+		if nick := protocol.FallbackNick(); h.nickFree(nick, ip, "", "") {
+			return nick
+		}
+	}
+	// Всё занято — отдаём как есть: дубль ника хуже отказа во входе, а в матче одинаковые имена
+	// и так разводятся суффиксом « (2)».
+	return protocol.FallbackNick()
+}
+
+// guestNickTries — сколько раз пробуем случайное имя, прежде чем перейти к запасному. Тридцать
+// попыток при полутора тысячах комбинаций промахиваются только на сервере, забитом бронями.
+const guestNickTries = 30
 
 // holdNick забирает ник за сессией. Зовётся только после того, как ник ей действительно выдан.
 func (h *Hub) holdNick(nick, ip, owner string, now time.Time) {

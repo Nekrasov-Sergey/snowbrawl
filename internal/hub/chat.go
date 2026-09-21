@@ -26,14 +26,27 @@ const (
 type chatEntry struct {
 	msg      protocol.ChatMessage
 	authorIP string
+	// authorAccount — аккаунт автора на момент отправки (пусто у гостя). Роль считается по нему
+	// в первую очередь: она про человека, а не про сеть, и переезжает с ним на любое устройство.
+	authorAccount string
 }
 
 // chatOut достраивает сообщение для отправки: роль автора считается здесь и только здесь.
 // Вызывать под h.mu.
 func (h *Hub) chatOut(e chatEntry) protocol.ChatMessage {
 	out := e.msg
-	out.Rank = h.rank(e.authorIP)
+	out.Rank = h.rankOfEntry(e)
 	return out
+}
+
+// rankOfEntry — роль автора сообщения: аккаунт сильнее адреса, как и везде (см. rankOf).
+func (h *Hub) rankOfEntry(e chatEntry) string {
+	if e.authorAccount != "" {
+		if acc, ok := h.accs.Get(e.authorAccount); ok && acc.Rank != "" {
+			return acc.Rank
+		}
+	}
+	return h.mod.Rank(e.authorIP)
 }
 
 // chatRoom разбирает область чата из сообщения клиента. Для общего чата возвращает nil,
@@ -117,7 +130,7 @@ func (h *Hub) handleChatSend(p *session.Player, data json.RawMessage) {
 		scope = protocol.ChatScopeRoom
 	}
 	e := chatEntry{msg: protocol.ChatMessage{ID: h.chatSeq, PID: p.ID, Nick: p.Nick, Text: text,
-		TS: now.UnixMilli(), Scope: scope}, authorIP: p.IP}
+		TS: now.UnixMilli(), Scope: scope}, authorIP: p.IP, authorAccount: p.AccountID}
 	h.setChatBuf(r, append(h.chatBuf(r), e))
 	h.pruneChat(now)
 
@@ -188,7 +201,7 @@ func (h *Hub) handleChatDel(p *session.Player, data json.RawMessage) {
 	scope := buf[idx].msg.Scope
 	h.setChatBuf(r, append(buf[:idx], buf[idx+1:]...))
 	h.chatSend(r, protocol.MustEncode(protocol.SChatDel, protocol.ChatDel{ID: req.ID, Scope: scope}))
-	h.log.Info().Str("player", p.ID).Str("nick", p.Nick).Str("rank", h.rank(p.IP)).
+	h.log.Info().Str("player", p.ID).Str("nick", p.Nick).Str("rank", h.rankOf(p)).
 		Str("scope", scope).Uint64("message", req.ID).Msg("chat message deleted")
 }
 
@@ -197,11 +210,11 @@ func (h *Hub) canDeleteChat(p *session.Player, e chatEntry) bool {
 	if e.msg.PID == p.ID {
 		return true // своё сообщение может удалить любой
 	}
-	switch h.rank(p.IP) {
+	switch h.rankOf(p) {
 	case protocol.RankAdmin:
 		return true
 	case protocol.RankModerator:
-		return h.rank(e.authorIP) == protocol.RankPlayer
+		return h.rankOfEntry(e) == protocol.RankPlayer
 	default:
 		return false
 	}

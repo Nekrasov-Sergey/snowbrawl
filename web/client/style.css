@@ -34,6 +34,9 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .stub-code { font-size: 26px; letter-spacing: 3px; color: #ffd166; margin: 10px 0; font-weight: 700; }
 .stub-code.inline { display: inline; margin: 0; font-size: 22px; }
 .stub-note { font-size: 12px; color: #ff9d9d; margin-top: 10px; min-height: 14px; }
+/* Блок входа под формой ника: пояснение здесь обычное, не про ошибку, поэтому свой цвет. */
+.authBox { margin-top: 14px; text-align: center; }
+.authBox .stub-note { color: #a9c2e0; min-height: 0; margin-bottom: 8px; }
 .stub-box input, #nickInput {
   width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; text-align: center;
   letter-spacing: 2px; border-radius: 6px; border: 1px solid #3a5a80; background: #0e1a2b; color: #eaf2ff; margin: 8px 0;
@@ -172,6 +175,10 @@ html.touch .segBtn { min-height: 44px; }
 .setRow small { display: block; color: #a9c2e0; font-size: 12px; margin-top: 3px; line-height: 1.35; }
 /* Ползунок громкости: единственный range в проекте, поэтому оформление минимальное — родной
    контрол с акцентным цветом, как у чекбокса рядом. */
+/* Два блока настроек подряд (аккаунт и сами настройки) не должны слипаться. */
+.settingsBox + .settingsBox { margin-top: 12px; }
+.settingsNote { margin-top: 10px; font-size: 12px; }
+.setRow .menuBtn { flex: none; margin: 0; padding: 8px 16px; font-size: 14px; }
 .setVol { display: flex; align-items: center; gap: 10px; flex: none; }
 .setVol input[type=range] { width: 130px; accent-color: #4aa8ff; }
 .setVol b { font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 12px; min-width: 38px; text-align: right; }

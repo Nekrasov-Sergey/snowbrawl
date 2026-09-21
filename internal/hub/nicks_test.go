@@ -27,29 +27,29 @@ func TestNickHoldRules(t *testing.T) {
 	now := time.Now()
 	h.holdNick("Вася", "10.0.0.1", "p1", now)
 
-	if h.nickFree("Вася", "10.0.0.2", "") {
+	if h.nickFree("Вася", "10.0.0.2", "", "") {
 		t.Fatal("занятый ник обязан быть недоступен с другого адреса")
 	}
-	if !h.nickFree("Вася", "10.0.0.1", "") {
+	if !h.nickFree("Вася", "10.0.0.1", "", "") {
 		t.Fatal("тот же адрес должен получать свой ник обратно: иначе F5 отнимает имя")
 	}
-	if !h.nickFree("Вася", "10.9.9.9", "p1") {
+	if !h.nickFree("Вася", "10.9.9.9", "p1", "") {
 		t.Fatal("та же сессия должна получать свой ник и с нового адреса (мобильная сеть)")
 	}
-	if !h.nickFree("Петя", "10.0.0.2", "") {
+	if !h.nickFree("Петя", "10.0.0.2", "", "") {
 		t.Fatal("свободный ник отказали")
 	}
 
 	// Регистр, латиница-двойники и разделители — то же имя.
 	for _, same := range []string{"вася", "ВАСЯ", "Ba_cя", "Ва-ся"} {
-		if h.nickFree(same, "10.0.0.2", "") {
+		if h.nickFree(same, "10.0.0.2", "", "") {
 			t.Fatalf("%q должно считаться тем же ником, что «Вася»", same)
 		}
 	}
 	// А цифры и повторы букв — разные имена: иначе игрок получает отказ, на который не может
 	// ничего ответить.
 	for _, other := range []string{"Вася2", "Вася5", "Вааася"} {
-		if !h.nickFree(other, "10.0.0.2", "") {
+		if !h.nickFree(other, "10.0.0.2", "", "") {
 			t.Fatalf("%q не должно совпадать с «Вася»", other)
 		}
 	}
@@ -62,11 +62,11 @@ func TestNickReleaseOnlyOwn(t *testing.T) {
 	h.holdNick("Вася", "10.0.0.1", "p1", now)
 
 	h.releaseNick(protocol.NickKey("Вася"), "p2")
-	if h.nickFree("Вася", "10.0.0.2", "") {
+	if h.nickFree("Вася", "10.0.0.2", "", "") {
 		t.Fatal("чужой releaseNick не должен снимать бронь")
 	}
 	h.releaseNick(protocol.NickKey("Вася"), "p1")
-	if !h.nickFree("Вася", "10.0.0.2", "") {
+	if !h.nickFree("Вася", "10.0.0.2", "", "") {
 		t.Fatal("после переименования ник обязан освободиться")
 	}
 }
@@ -80,10 +80,10 @@ func TestReleaseNicksOfIP(t *testing.T) {
 	h.holdNick("Маша", "10.0.0.2", "p3", now)
 
 	h.releaseNicksOfIP("10.0.0.1")
-	if !h.nickFree("Вася", "10.0.0.9", "") || !h.nickFree("Петя", "10.0.0.9", "") {
+	if !h.nickFree("Вася", "10.0.0.9", "", "") || !h.nickFree("Петя", "10.0.0.9", "", "") {
 		t.Fatal("бан обязан отпускать ники адреса")
 	}
-	if h.nickFree("Маша", "10.0.0.9", "") {
+	if h.nickFree("Маша", "10.0.0.9", "", "") {
 		t.Fatal("ники других адресов бан не трогает")
 	}
 }
@@ -101,7 +101,7 @@ func TestEvictNickHoldsKeepsLiveSessions(t *testing.T) {
 	if len(h.nicks) > nickHoldsCap {
 		t.Fatalf("реестр вырос до %d при потолке %d", len(h.nicks), nickHoldsCap)
 	}
-	if h.nickFree("Живой", "10.9.9.9", "") {
+	if h.nickFree("Живой", "10.9.9.9", "", "") {
 		t.Fatal("бронь живой сессии вытеснена")
 	}
 }

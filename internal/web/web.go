@@ -39,16 +39,21 @@ func ReadSim(fsys fs.FS) ([]byte, error) {
 }
 
 // Register вешает отдачу статики на роутер. index.html не кэшируется и отдаётся
-// с подставленной версией сборки (__BUILD__), остальные файлы кэшируются на час —
-// клиент подставляет ?v=<build> к их URL, поэтому после деплоя кэш инвалидируется сам.
-// Исключение — сборка "dev" (без git-тега) и отдача с диска: там ?v=dev не меняется
-// между правками, поэтому статику не кэшируем, иначе F5 не подхватывает изменения.
-func Register(r *gin.Engine, fsys fs.FS, fromDisk bool, build string) {
+// с подставленной версией сборки (__BUILD__) и списком включённых способов входа (__AUTH__),
+// остальные файлы кэшируются на час — клиент подставляет ?v=<build> к их URL, поэтому после
+// деплоя кэш инвалидируется сам. Исключение — сборка "dev" (без git-тега) и отдача с диска:
+// там ?v=dev не меняется между правками, поэтому статику не кэшируем, иначе F5 не подхватывает
+// изменения.
+//
+// Способы входа подставляются в страницу, а не приходят по сокету, потому что кнопка нужна на
+// экране ника — до того, как сокет вообще открыт: у игрока без ника его ещё нет.
+func Register(r *gin.Engine, fsys fs.FS, fromDisk bool, build, auth string) {
 	noCacheStatic := fromDisk || build == "dev"
 	fileServer := http.FileServer(http.FS(fsys))
 	r.NoRoute(func(c *gin.Context) {
 		p := c.Request.URL.Path
-		if strings.HasPrefix(p, "/ws") || strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/admin") {
+		if strings.HasPrefix(p, "/ws") || strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/admin") ||
+			strings.HasPrefix(p, "/auth") {
 			c.Status(http.StatusNotFound)
 			return
 		}
@@ -60,7 +65,9 @@ func Register(r *gin.Engine, fsys fs.FS, fromDisk bool, build string) {
 				c.String(http.StatusNotFound, "index.html not found")
 				return
 			}
-			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(strings.ReplaceAll(string(b), "__BUILD__", build)))
+			page := strings.ReplaceAll(string(b), "__BUILD__", build)
+			page = strings.ReplaceAll(page, "__AUTH__", auth)
+			c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(page))
 			return
 		}
 		if noCacheStatic {
