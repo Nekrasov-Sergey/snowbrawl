@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog"
 
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/match"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
@@ -35,14 +36,19 @@ type Hub struct {
 	log  zerolog.Logger
 	now  func() time.Time
 
-	mu       sync.Mutex
-	byToken  map[string]*session.Player
-	byID     map[string]*session.Player
-	rooms    map[string]*room.Room
-	matches  map[string]*match.Match
-	draining bool
-	drainAt  time.Time
-	rng      *rand.Rand
+	mu      sync.Mutex
+	byToken map[string]*session.Player
+	byID    map[string]*session.Player
+	// byAccount — живая сессия аккаунта, ключ — id аккаунта. Один аккаунт держит одну сессию:
+	// вход со второго устройства перехватывает её вместе с местом в матче, как это уже делает
+	// вторая вкладка. Две параллельные сессии одного аккаунта дали бы двух бойцов от одного
+	// игрока и сломали бы бронь ника.
+	byAccount map[string]*session.Player
+	rooms     map[string]*room.Room
+	matches   map[string]*match.Match
+	draining  bool
+	drainAt   time.Time
+	rng       *rand.Rand
 	// listSubs — кто смотрит список комнат: страницу пересобираем в тике и отправляем,
 	// только если она изменилась. Ключ — id игрока.
 	listSubs map[string]*listSub
@@ -63,9 +69,16 @@ type Hub struct {
 	// nicks — брони ников до перезапуска сервера, ключ — protocol.NickKey (см. nicks.go).
 	nicks map[string]nickHold
 
+	// accs — постоянные аккаунты. У стора свой мьютекс, наружу он не ходит, поэтому звать его
+	// под h.mu безопасно; на диск он под нами не пишет (см. internal/accounts). Может быть nil.
+	accs *accounts.Store
+
 	// mod — роли и баны по IP. У стора свой мьютекс; hub только читает, запись на диск делает
 	// админка вне h.mu (см. internal/hub/moderation.go). Может быть nil.
 	mod *moderation.Store
+
+	// authInfo — какие способы входа включены; уходит игроку в welcome. nil — вход выключен.
+	authInfo *protocol.AuthInfo
 
 	// series — ряд онлайна для графика в админке. Под h.mu мы только дописываем точку в
 	// память; на диск пишет своя горутина серии (см. internal/onlinestat). Может быть nil.
@@ -76,14 +89,16 @@ type Hub struct {
 }
 
 // New создаёт hub. mod может быть nil: тогда все игроки без роли и без бана. series тоже может
-// быть nil — тогда истории онлайна нет, а игра работает как раньше.
+// быть nil — тогда истории онлайна нет, а игра работает как раньше. accs задаётся отдельно
+// (SetAccounts), потому что аккаунты появляются, только когда включён вход.
 func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderation.Store, series *onlinestat.Series) *Hub {
 	return &Hub{
 		cfg: cfg, prog: prog, log: log, now: time.Now, mod: mod, series: series,
 		byToken: map[string]*session.Player{}, byID: map[string]*session.Player{},
-		rooms:    map[string]*room.Room{},
-		matches:  map[string]*match.Match{},
-		listSubs: map[string]*listSub{}, codeTries: map[string]*codeTry{},
+		byAccount: map[string]*session.Player{},
+		rooms:     map[string]*room.Room{},
+		matches:   map[string]*match.Match{},
+		listSubs:  map[string]*listSub{}, codeTries: map[string]*codeTry{},
 		matchPush: map[string]string{},
 		pingPush:  map[string]string{},
 		nicks:     map[string]nickHold{},
@@ -91,6 +106,18 @@ func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderati
 		rng:       rand.New(rand.NewPCG(seedOf(cfg), 0xDEADBEEF)),
 		stopCh:    make(chan struct{}),
 	}
+}
+
+// SetAccounts подключает стор аккаунтов. Вызывать до Run: менять его на ходу незачем.
+func (h *Hub) SetAccounts(a *accounts.Store) { h.accs = a }
+
+// NickTakenByGuest — занят ли ник живой бронью гостя. Отдаётся входу (internal/auth), чтобы
+// новый аккаунт не получил имя, под которым прямо сейчас кто-то играет.
+func (h *Hub) NickTakenByGuest(key string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	hold, ok := h.nicks[key]
+	return ok && hold.owner != ""
 }
 
 // seedOf — зерно случайности hub'а: заданное в конфигурации или время. См. config.Config.Seed.
@@ -204,6 +231,12 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.handleRoomList(p, env.Data)
 	case protocol.CRoomUnlist:
 		delete(h.listSubs, p.ID)
+	case protocol.CNickSet:
+		h.handleNickSet(p, env.Data)
+	case protocol.CTutorialDone:
+		h.handleTutorialDone(p, env.Data)
+	case protocol.CTutorialSync:
+		h.handleTutorialSync(p, env.Data)
 	case protocol.CMatchJoin:
 		h.handleMatchJoin(p)
 	case protocol.CRoomKick:
@@ -280,28 +313,72 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		return
 	}
 	now := h.now()
+	// Аккаунт узнан по куке ещё на апгрейде соединения (см. internal/auth). Забаненный аккаунт
+	// не пускаем так же, как забаненный адрес: иначе достаточно было бы разлогиниться.
+	acc, hasAcc := h.accs.Get(c.AccountID())
+	if hasAcc && acc.Banned() {
+		h.sendErr(c, protocol.ErrBanned, "доступ для этого аккаунта заблокирован")
+		c.Close(websocket.StatusPolicyViolation, "banned")
+		return
+	}
 	var p *session.Player
-	if hello.Token != "" {
+	// Сессию аккаунта ищем раньше токена: игрок, зашедший с телефона, должен попасть в свою
+	// игру, а не завести вторую сессию под тем же именем.
+	if hasAcc {
+		p = h.byAccount[acc.ID]
+	}
+	if p == nil && hello.Token != "" {
 		p = h.byToken[hello.Token]
+		// Чужой аккаунт при том же токене — не наша сессия: так гостевой токен, попавший в
+		// другой браузер (или оставшийся от прежнего входа), не утащил бы аккаунт.
+		if p != nil && p.AccountID != c.AccountID() {
+			p = nil
+		}
 	}
 	if p == nil {
-		nick, err := protocol.NormalizeNick(hello.Nick)
-		if err != nil {
-			h.sendErr(c, nickErrCode(err), err.Error())
-			return
-		}
-		// Ник занят — отказ без закрытия соединения: клиент возвращает игрока на экран ника.
-		if !h.nickFree(nick, c.IP(), "") {
-			h.sendErr(c, protocol.ErrNickTaken, "nick is taken")
-			return
+		nick := acc.Nick // у аккаунта ник свой, введённый в hello игнорируется
+		switch {
+		case hasAcc:
+			// ник уже взят из аккаунта
+		case hello.Nick == "":
+			// «Играть гостем»: игрок не вводил имени, значит его выдаёт сервер. Пустой ник —
+			// это просьба, а не ошибка: экран входа спрашивает «как играть», а не «как вас звать».
+			nick = h.pickGuestNick(c.IP())
+		default:
+			var err error
+			nick, err = protocol.NormalizeNick(hello.Nick)
+			if err != nil {
+				h.sendErr(c, nickErrCode(err), err.Error())
+				return
+			}
+			// Ник занят — отказ без закрытия соединения: клиент возвращает игрока на экран ника.
+			if !h.nickFree(nick, c.IP(), "", "") {
+				h.sendErr(c, protocol.ErrNickTaken, "nick is taken")
+				return
+			}
 		}
 		p = session.New(nick, c.IP(), now)
+		p.AccountID = c.AccountID()
 		h.byToken[p.Token] = p
 		h.byID[p.ID] = p
+		if hasAcc {
+			h.byAccount[acc.ID] = p
+			h.accs.Touch(acc.ID, now)
+		}
 		h.holdNick(nick, p.IP, p.ID, now)
-		h.log.Info().Str("player", p.ID).Str("nick", nick).Str("ip", p.IP).Msg("new player")
+		h.log.Info().Str("player", p.ID).Str("nick", nick).Str("ip", p.IP).
+			Str("account", p.AccountID).Msg("new player")
 	} else {
-		if hello.Nick != "" && p.Place == session.InMenu {
+		if hasAcc {
+			// Ник аккаунта — источник истины: он мог смениться на другом устройстве.
+			if p.Nick != acc.Nick {
+				h.releaseNick(protocol.NickKey(p.Nick), p.ID)
+				p.Nick = acc.Nick
+				h.holdNick(acc.Nick, c.IP(), p.ID, now)
+			}
+			h.accs.Touch(acc.ID, now)
+		}
+		if !hasAcc && hello.Nick != "" && p.Place == session.InMenu {
 			// Ошибку не глотаем: с цензурой ников молчаливый отказ выглядел бы как «ник не
 			// сохранился». Соединение при этом живо, игрок остаётся под прежним ником.
 			// Проверяем по адресу этого соединения, а не по p.IP: тот перезаписывается ниже.
@@ -309,7 +386,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 			switch {
 			case err != nil:
 				h.sendErr(c, nickErrCode(err), err.Error())
-			case !h.nickFree(nick, c.IP(), p.ID):
+			case !h.nickFree(nick, c.IP(), p.ID, p.AccountID):
 				h.sendErr(c, protocol.ErrNickTaken, "nick is taken")
 			default:
 				// Переименование отпускает прежний ник: это единственный способ его освободить.
@@ -334,11 +411,22 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 	p.Conn = c
 	c.Session = p
 
-	c.Send(protocol.MustEncode(protocol.SWelcome, protocol.Welcome{
+	welcome := protocol.Welcome{
 		Token: p.Token, PlayerID: p.ID, Nick: p.Nick, Build: h.cfg.BuildVersion, SimVersion: h.prog.Version(),
 		Proto: protocol.Version, Draining: h.draining, Resume: string(p.Place), Online: h.onlineLocked(),
-		Rank: h.rank(p.IP),
-	}))
+		Rank: h.rankOf(p),
+	}
+	if h.authInfo != nil {
+		welcome.Auth = h.authInfo
+	}
+	if hasAcc {
+		// Аккаунт мог измениться на другом устройстве, поэтому читаем его заново, а не берём
+		// копию, снятую в начале обработки.
+		if fresh, ok := h.accs.Get(acc.ID); ok {
+			welcome.Account, welcome.Tutorial = accountInfo(fresh), fresh.Tutorial
+		}
+	}
+	c.Send(protocol.MustEncode(protocol.SWelcome, welcome))
 	if h.draining {
 		c.Send(h.drainMessage())
 	}
@@ -663,7 +751,7 @@ func (h *Hub) startRoomMatch(r *room.Room) *match.Match {
 			continue
 		}
 		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Index: m.Index,
-			Role: m.Role, Rank: h.rank(mp.IP)})
+			Role: m.Role, Rank: h.rankOf(mp)})
 	}
 	m := h.launchMatch(r.Code, r.Mode, r.Arena, r.GameMode, r.Campaign, r.Difficulty, players)
 	if m == nil {
@@ -704,7 +792,7 @@ func (h *Hub) roomState(r *room.Room) protocol.RoomState {
 		if p != nil {
 			rp.Nick, rp.Connected = p.Nick, p.Connected()
 			rp.InMatch = p.Place == session.InMatch && p.MatchID == r.MatchID
-			rp.Rank = h.rank(p.IP)
+			rp.Rank = h.rankOf(p)
 			rp.Ping = p.PingMs
 		}
 		st.Players = append(st.Players, rp)
@@ -977,6 +1065,9 @@ func (h *Hub) expirePlayer(p *session.Player) {
 	}
 	delete(h.byID, p.ID)
 	delete(h.byToken, p.Token)
+	if p.AccountID != "" && h.byAccount[p.AccountID] == p {
+		delete(h.byAccount, p.AccountID)
+	}
 	h.log.Debug().Str("player", p.ID).Msg("session expired")
 }
 
@@ -1136,7 +1227,7 @@ func (h *Hub) Stats() Stats {
 		}
 		ps := PlayerStat{
 			ID: p.ID, Nick: p.Nick, IP: p.IP, Place: string(p.Place), Online: online,
-			Since: p.CreatedAt, Rank: h.rank(p.IP), Banned: h.banned(p.IP), Ping: p.PingMs,
+			Since: p.CreatedAt, Rank: h.rankOf(p), Banned: h.banned(p.IP) || h.accountBanned(p), Ping: p.PingMs,
 		}
 		switch p.Place {
 		case session.InRoom:

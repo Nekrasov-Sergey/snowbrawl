@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
@@ -24,15 +25,31 @@ type Info struct {
 	Proto      int    `json:"proto"`
 }
 
+// Deps — всё, что нужно админке. Раньше это был список аргументов; с появлением аккаунтов он
+// перестал читаться, а порядок из десяти позиций легко перепутать местами.
+//
+// Moderation и Accounts могут быть nil: тогда соответствующие ручки отвечают ошибкой, а игра
+// работает как раньше. Identify (опознание игрока по куке входа) тоже необязателен — без него
+// в админку пускают только токен и роль по адресу.
+type Deps struct {
+	Hub         *hub.Hub
+	Moderation  *moderation.Store
+	Accounts    *accounts.Store
+	Info        Info
+	Token       string // пустой — админка выключена целиком
+	Started     time.Time
+	TrustProxy  bool // верить ли X-Forwarded-For при проверке роли по адресу
+	StreamEvery time.Duration
+	Identify    func(*http.Request) string
+}
+
 // Register вешает маршруты на роутер и возвращает функцию остановки SSE-потока: её нужно
 // вызвать при завершении работы, иначе висящий обработчик съест таймаут graceful shutdown.
-//
-// mod может быть nil — тогда ручки ролей и банов отвечают ошибкой, а игра работает как раньше.
-// trustProxy определяет, верить ли X-Forwarded-For при проверке роли по адресу (см. вход по роли
-// «Админ» ниже) — то же правило, что у игрового WebSocket.
-// streamEvery — период SSE-потока состояния; ноль означает боевую секунду, ненулевое значение
-// ставят тесты, чтобы не ждать реального времени (см. config.Config.AdminStreamEvery).
-func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token string, started time.Time, trustProxy bool, streamEvery time.Duration) func() {
+func Register(r *gin.Engine, d Deps) func() {
+	h, mod, accs := d.Hub, d.Moderation, d.Accounts
+	info, token, started := d.Info, d.Token, d.Started
+	trustProxy, streamEvery, identify := d.TrustProxy, d.StreamEvery, d.Identify
+
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "build": info.Build, "uptime": time.Since(started).Round(time.Second).String()})
 	})
@@ -48,9 +65,13 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 	if token == "" {
 		return func() {}
 	}
-	// Пускаем по токену (им ходят deploy.sh и человек со ссылкой) либо по роли «Админ»:
-	// у него кнопка «Админка» есть прямо в меню игры, и токен ему выдавать незачем. Защита
-	// получается ровно такой же, как у самой роли, — она тоже по адресу.
+	// Пускаем по токену (им ходят deploy.sh и человек со ссылкой) либо по роли «Админ»: у него
+	// кнопка «Админка» есть прямо в меню игры, и токен ему выдавать незачем.
+	//
+	// Роль проверяется двумя способами. По аккаунту (кука входа) — надёжный: он не зависит ни
+	// от сети, ни от заголовков прокси, поэтому админ заходит хоть с телефона. По адресу — как
+	// было раньше: это единственный путь, пока роли выданы на IP, и он требует доверенного
+	// прокси (см. docs/RUNBOOK.md).
 	g := r.Group("/admin", func(c *gin.Context) {
 		got := c.GetHeader("X-Admin-Token")
 		if got == "" {
@@ -58,6 +79,11 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 		}
 		if got == token {
 			return
+		}
+		if identify != nil {
+			if acc, ok := accs.Get(identify(c.Request)); ok && acc.Rank == protocol.RankAdmin {
+				return
+			}
 		}
 		if mod.Rank(ws.ClientIP(c.Request, trustProxy)) == protocol.RankAdmin {
 			return
@@ -215,6 +241,87 @@ func Register(r *gin.Engine, h *hub.Hub, mod *moderation.Store, info Info, token
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ip": ip, "banned": false})
+	})
+	// Те же действия, но по аккаунту. Роль и бан аккаунта сильнее адресных: они про человека,
+	// а не про сеть, и разлогином от них не спастись.
+	g.GET("/accounts", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"accounts": accs.List(), "broken": accs.Broken()})
+	})
+	g.POST("/account/rank", func(c *gin.Context) {
+		var req struct {
+			ID   string `json:"id"`
+			Rank string `json:"rank"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.ID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad account"})
+			return
+		}
+		switch req.Rank {
+		case protocol.RankPlayer, protocol.RankModerator, protocol.RankAdmin:
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad rank"})
+			return
+		}
+		if err := accs.SetRank(req.ID, req.Rank); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		// Файл пишем сразу и вне h.mu: выдача роли — редкое действие, терять его нельзя.
+		if err := accs.Flush(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		h.ApplyRankAccount(req.ID)
+		c.JSON(http.StatusOK, gin.H{"id": req.ID, "rank": req.Rank})
+	})
+	g.POST("/account/ban", func(c *gin.Context) {
+		var req struct {
+			ID     string `json:"id"`
+			Reason string `json:"reason"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.ID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad account"})
+			return
+		}
+		if acc, ok := accs.Get(req.ID); ok && acc.Rank == protocol.RankAdmin {
+			c.JSON(http.StatusConflict, gin.H{"error": "нельзя забанить админа: сначала снимите роль"})
+			return
+		}
+		if err := accs.Ban(req.ID, req.Reason, time.Now()); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if err := accs.Flush(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"id": req.ID, "kicked": h.ApplyBanAccount(req.ID)})
+	})
+	g.DELETE("/account/ban", func(c *gin.Context) {
+		id := c.Query("id")
+		if err := accs.Unban(id); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if err := accs.Flush(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"id": id, "banned": false})
+	})
+	// Выкинуть аккаунт со всех устройств: куки подписаны вместе с epoch, поэтому его инкремент
+	// обесценивает разом все выданные.
+	g.POST("/account/logout-all", func(c *gin.Context) {
+		id := c.Query("id")
+		if err := accs.BumpEpoch(id); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if err := accs.Flush(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"id": id})
 	})
 	g.POST("/chat/clear", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"cleared": h.ClearChat()})

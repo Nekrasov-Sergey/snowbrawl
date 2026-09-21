@@ -5,19 +5,28 @@
   var Settings = window.SBSettings, Device = window.SBDevice;
   var $ = function (id) { return document.getElementById(id); };
   var BUILD = document.querySelector('meta[name=build]').content;
+  // Способы входа сервер подставляет прямо в страницу: кнопка нужна на экране ника, где сокета
+  // ещё нет. Значение «__AUTH__» осталось бы при отдаче файла мимо сервера — считаем его пустым.
+  var AUTH_META = (function () {
+    var el = document.querySelector('meta[name=auth]');
+    var v = el ? el.content : '';
+    return v && v.indexOf('__') !== 0 ? v : '';
+  })();
   var store = {
     get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { /* игнор */ } }
   };
 
-  var SCREENS = ['nick', 'menu', 'createroom', 'rooms', 'lobby', 'game', 'settings', 'tutlist'];
+  var SCREENS = ['login', 'nick', 'menu', 'createroom', 'rooms', 'lobby', 'game', 'settings', 'tutlist'];
   var app = {
-    screen: 'nick',
+    screen: 'login',
     nav: [],                  // стек экранов для кнопки «Назад»
     nick: store.get('sb.nick') || '',
     token: store.get('sb.token') || '',
     me: null,                 // playerId с сервера
     rank: '',                 // роль модерации: '' | 'moderator' | 'admin' (цвет ника, права в чате)
+    account: null,            // аккаунт из welcome: {id, provider, nick, nickAuto} или null у гостя
+    auth: AUTH_META.indexOf('yandex') >= 0 ? { yandex: true } : null, // способы входа: из страницы, затем уточняется в welcome
     net: null,
     connected: false,
     ping: { rtt: 0, jitter: 0 },  // задержка: её мерит сервер и присылает в self.ping, см. onMessage
@@ -134,7 +143,7 @@
       // Ниже стража лежат либо записи прошлой загрузки страницы, либо чужой сайт. Если игрок не
       // на корневом экране, «назад» обязан привести в меню: после F5 в обучении или в списке
       // комнат он иначе не мог вернуться в меню вообще, только перезагрузкой.
-      if (app.screen !== 'menu' && app.screen !== 'nick') { goto('menu'); return; }
+      if (app.screen !== 'menu' && app.screen !== 'nick' && app.screen !== 'login') { goto('menu'); return; }
       if (!Device.isTouch()) {
         // На ПК «назад» — осознанное действие мышью, лишний вопрос там раздражает.
         leaveSite();
@@ -249,7 +258,7 @@
   var ERR_TEXT = {
     bad_nick: 'Ник: 2–16 символов, буквы, цифры, пробел, дефис.',
     nick_profanity: 'В нике нельзя использовать мат — придумайте другой',
-    nick_taken: 'Этот ник уже занят. Возможно, вами с другого адреса — придумайте другой.',
+    nick_taken: 'Этот ник занят: другим игроком, чужим аккаунтом или вами с другого адреса.',
     room_not_found: 'Комната с таким кодом не найдена.',
     room_full: 'Комната заполнена.',
     room_limit: 'С вашего адреса уже создано слишком много комнат.',
@@ -265,7 +274,9 @@
     chat_flood: 'Не так быстро — подождите пару секунд.',
     wrong_section: 'Этот код — от комнаты другого раздела.',
     banned: 'Доступ к игре с этого адреса закрыт.',
-    kicked: 'Вас выгнали из комнаты.'
+    kicked: 'Вас выгнали из комнаты.',
+    rename_cooldown: 'Ник можно менять раз в десять минут — попробуйте позже.',
+    no_account: 'Это действие доступно после входа через Яндекс ID.'
   };
   function fmtTime(ms) { var s = Math.ceil(ms / 1000); return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); }
 
@@ -320,8 +331,14 @@
     switch (type) {
       case 'welcome':
         app.token = d.token; store.set('sb.token', d.token);
+        // Ник, выданный сервером (гость нажал «Играть гостем»), помечаем: если он однажды
+        // окажется занят, новый возьмём молча, не спрашивая игрока.
+        if (!app.nick && d.nick) store.set('sb.nickAuto', '1');
         app.me = d.playerId; app.nick = d.nick; store.set('sb.nick', d.nick);
         app.rank = d.rank || '';
+        app.auth = d.auth || null;
+        tutSynced = false; // новое подключение — новое право на одно слияние
+        setAccount(d.account || null, d.tutorial);
         renderAdminBtn();
         $('verSim').textContent = d.sim; $('menuNick').textContent = d.nick;
         setOnline(d.online);
@@ -334,6 +351,14 @@
         else if (app.screen === 'rooms') watchRooms();
         break;
       case 'error':
+        // Имя гостя выдал сервер, и оно за сутки могло достаться другому. Молча берём
+        // следующее: игрок этого имени не выбирал, извиняться перед ним не за что — ни
+        // всплывашки, ни экрана ника здесь быть не должно.
+        if (d.code === 'nick_taken' && store.get('sb.nickAuto') === '1' && !app.account) {
+          app.nick = ''; store.set('sb.nick', '');
+          if (app.net) app.net.reconnectNow();
+          break;
+        }
         toast(ERR_TEXT[d.code] || ('Ошибка: ' + (d.msg || d.code)));
         if (d.code === 'bad_nick' || d.code === 'nick_profanity' || d.code === 'nick_taken') {
           // Всплывашка живёт 3.5 с, а игрок уходит на экран ника — причину надо оставить там.
@@ -343,6 +368,9 @@
         // Любая ошибка на введённый код — неудача: чистим форму целиком, как договорились.
         if (codeTry) codeFailed(ERR_TEXT[d.code] || ('Ошибка: ' + (d.msg || d.code)));
         else if (app.screen === 'rooms' && ERR_TEXT[d.code]) $('roomsMsg').textContent = ERR_TEXT[d.code];
+        break;
+      case 'account':
+        setAccount(d.account || null, d.tutorial);
         break;
       case 'online':
         setOnline(d.n);
@@ -443,13 +471,124 @@
   };
 
   // ------------------------------------------------------------
+  // Аккаунт (вход по Яндекс ID)
+  // ------------------------------------------------------------
+  // Гостевой режим остаётся прежним: аккаунт нужен тому, кто хочет один и тот же ник и прогресс
+  // на телефоне и на компьютере. Сервер узнаёт игрока по куке ещё при открытии сокета, поэтому
+  // здесь только отрисовка и отправка изменений.
+
+  // accountHint — id аккаунта из читаемой куки sb_acc_hint. Сама авторизация лежит в httpOnly-куке
+  // и скриптам недоступна; эта нужна ровно для одного: заметить, что в ДРУГОЙ вкладке вошли или
+  // вышли, и переподключиться. Узнать об этом по сокету нельзя — он открыт от прежнего лица.
+  function accountHint() {
+    var m = /(?:^|;\s*)sb_acc_hint=([^;]*)/.exec(document.cookie);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // tutSynced — слияние прогресса уже отправлено на этом подключении (см. mergeTutorial).
+  var tutSynced = false;
+
+  function setAccount(acc, tutorial) {
+    var wasAuto = app.account && app.account.nickAuto;
+    app.account = acc;
+    if (acc) {
+      app.nick = acc.nick; store.set('sb.nick', acc.nick);
+      $('menuNick').textContent = acc.nick;
+      mergeTutorial(tutorial);
+      // Имя из профиля не подошло или было занято — сервер выдал своё. Говорим об этом сразу,
+      // иначе игрок узнает, что он «Игрок 4821», уже в бою.
+      if (acc.nickAuto && !wasAuto && app.screen !== 'game') {
+        $('nickInput').value = acc.nick;
+        $('nickMsg').textContent = 'Имя из Яндекса занято или не подошло — выберите ник.';
+        goto('nick');
+      }
+    }
+    renderAccount();
+  }
+
+  function renderAccount() {
+    var enabled = !!(app.auth && app.auth.yandex);
+    var acc = app.account;
+    // На первом экране вход — главный путь. Если он выключен на сервере, кнопки Яндекса нет
+    // вовсе, и гостевая занимает её место, чтобы экран не выглядел полупустым.
+    $('btnYandexLogin').hidden = !enabled;
+    $('btnGuest').classList.toggle('primary', !enabled);
+    $('btnGuest').classList.toggle('ghost', enabled);
+    // В меню про аккаунт ничего не пишем: имя и так на виду, а выход — редкое действие,
+    // ему место в настройках. Гостю там оставляем кнопку входа.
+    $('btnYandexMenu').hidden = !enabled || !!acc;
+    $('accountBox').hidden = !acc;
+    if (acc) $('accountWho').textContent = 'Ник и прогресс сохраняются на всех устройствах.';
+  }
+
+  function login() {
+    // Возвращаемся туда же, откуда ушли: вход не должен выбрасывать из списка комнат в меню.
+    location.href = '/auth/yandex?return=' + encodeURIComponent(location.pathname + location.hash);
+  }
+  $('btnYandexLogin').onclick = function () { Audio_.uiClick(); login(); };
+  // «Играть гостем»: имени не спрашиваем, его выдаст сервер в ответ на пустой ник в hello.
+  $('btnGuest').onclick = function () {
+    Audio_.uiClick();
+    app.nick = '';
+    if (app.net) app.net.reconnectNow(); else connect();
+    goto('menu');
+  };
+  $('btnYandexMenu').onclick = function () { Audio_.uiClick(); login(); };
+  $('btnLogout').onclick = function () {
+    Audio_.uiClick();
+    // POST, а не ссылка: выход не должен случаться от чужой картинки на постороннем сайте.
+    fetch('/auth/logout', { method: 'POST' }).then(function () {
+      // Ник принадлежал аккаунту и остаётся за ним, поэтому забываем его здесь: иначе вышедший
+      // игрок тут же получил бы «ник занят» на собственное имя и не понял бы, чьё оно.
+      try { localStorage.removeItem('sb.nick'); } catch (e) { /* игнор */ }
+      location.reload();
+    }).catch(function () { toast('Не удалось выйти — проверьте связь.'); });
+  };
+
+  // Вкладка вернулась к игроку: если вход или выход случились в соседней вкладке, подсказка
+  // разойдётся с нашим состоянием — переподключаемся, и welcome принесёт правильное лицо.
+  function checkAccountHint() {
+    if (!app.net || !app.auth) return;
+    if (accountHint() !== (app.account ? app.account.id : '')) app.net.reconnectNow();
+  }
+  window.addEventListener('focus', checkAccountHint);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) checkAccountHint(); });
+
+  // Прогресс обучения хранится и на устройстве, и в аккаунте. Сливаем объединением: множество
+  // пройденного только растёт, поэтому порядок входа с разных устройств не важен.
+  function mergeTutorial(list) {
+    // Пустой список — обычное дело при первом входе, и именно тогда слияние нужнее всего:
+    // весь прогресс пока только на устройстве. Поэтому выходить здесь нельзя.
+    var theirs = list || [];
+    theirs.forEach(function (id) { store.set('sb.tut.done.' + id, '1'); });
+    renderTutorialBadge();
+    // Обратно уходит только то, чего на сервере ещё нет. Слать свой список безусловно нельзя:
+    // сервер отвечает на sync состоянием аккаунта, а оно снова приводит сюда — получилась бы
+    // переписка без конца, и соединение закрывалось бы по лимиту сообщений.
+    var mine = window.SBTutorial.SCENARIOS.filter(function (s) { return tutDone(s.id); })
+      .map(function (s) { return s.id; });
+    var missing = mine.filter(function (id) { return theirs.indexOf(id) < 0; });
+    // Вторая страховка от той же переписки: за одно подключение шлём слияние один раз. Если
+    // сервер почему-то не принял часть списка, повтор всё равно ничего не изменит.
+    if (missing.length && !tutSynced) { tutSynced = true; send('tutorial.sync', { ids: missing }); }
+  }
+
+  // ------------------------------------------------------------
   // Ник и меню
   // ------------------------------------------------------------
   $('nickOk').onclick = function () {
     var v = $('nickInput').value.trim().replace(/\s+/g, ' ');
     if (v.length < 2 || v.length > 16 || !/^[\p{L}\p{N} _\-]+$/u.test(v)) { $('nickMsg').textContent = ERR_TEXT.bad_nick; return; }
     Audio_.uiClick();
-    app.nick = v; store.set('sb.nick', v); $('nickMsg').textContent = '';
+    $('nickMsg').textContent = '';
+    if (app.account) {
+      // У вошедшего ник хранится на сервере. Отдельное сообщение, а не переподключение:
+      // реконнект посреди комнаты стоил бы места, а игрок всего лишь переименовался.
+      send('nick.set', { nick: v });
+      goto('menu');
+      return;
+    }
+    app.nick = v; store.set('sb.nick', v); store.set('sb.nickAuto', '');
     if (app.net) app.net.reconnectNow(); else connect();
     goto('menu');
   };
@@ -471,6 +610,7 @@
     $('setHaptics').checked = !!Settings.get('haptics');
     $('setTouch').value = Settings.get('touch');
     renderVolume();
+    renderAccount(); // блок аккаунта живёт здесь же: показываем его по текущему состоянию входа
   }
   // Громкость живёт в одном месте: значение в настройках, а звук, эмодзи кнопки и оба ползунка
   // (в настройках и в углу экрана) — производные.
@@ -1581,6 +1721,9 @@
       // у прошедших «Основы» до 0.9.0 они не должны сброситься.
       store.set('sb.tut.done.' + id, '1');
       renderTutorialBadge();
+      // У вошедшего прогресс живёт в аккаунте. Молча, как отметка о тренировке: без связи
+      // обучение всё равно играется, а список догонит при следующем входе.
+      if (app.account && app.net) app.net.send('tutorial.done', { id: id });
     }
   });
   function tutDone(id) {
@@ -1774,8 +1917,10 @@
     chatSetTab(cur.code ? 'room' : 'global');
   }
   // Чат виден на всех экранах вне боя: на ПК это столбец справа, на телефоне — блок снизу.
-  // Кроме экрана ника: сессии там ещё нет, писать некуда, а поле ввода отвлекало бы от имени.
-  function chatVisible() { return app.screen !== 'game' && app.screen !== 'nick'; }
+  // Кроме экранов входа и ника: сессии там ещё нет, писать некуда, а чат отвлекал бы от выбора.
+  function chatVisible() {
+    return app.screen !== 'game' && app.screen !== 'nick' && app.screen !== 'login';
+  }
   // focus — только при явном раскрытии чата игроком: при загрузке страницы фокус нужен полю
   // ника, а чат теперь виден и на этом экране.
   function chatSetOpen(open, focus) {
@@ -1871,12 +2016,15 @@
   window.SBApp = { state: app, renderOnce: renderOnce, send: send, intent: intent, tutorial: tutorial };
 
   Device.apply();
+  renderAccount(); // кнопка входа видна уже на экране ника, до подключения
   $('verBuild').textContent = BUILD;
   // Модуль звука грузится раньше настроек, поэтому сохранённую громкость подставляем здесь.
   Audio_.setVolume(Settings.get('volume'));
   renderVolume();
   pushGuard();
-  if (app.nick) {
+  // Подключаемся и при пустом ника, если в браузере есть подсказка входа: ник такого игрока
+  // хранится на сервере, спрашивать его заново незачем.
+  if (app.nick || accountHint()) {
     connect();
     // Восстанавливаем экран из адреса: без этого F5 в списке комнат или в настройках
     // выбрасывал в главное меню. Раздел берём из адреса, иначе из последнего выбранного.
@@ -1895,10 +2043,10 @@
     // истории, иначе «назад» на корневом экране сразу уводит с сайта.
     goto(first);
   } else {
-    // Ника нет — адрес не при чём: сначала имя. Разобранный хэш выбрасываем, иначе после
-    // ввода ника игрок телепортируется в раздел, которого не ждёт.
+    // Ни ника, ни аккаунта — сначала спрашиваем, как играть. Разобранный хэш выбрасываем,
+    // иначе после входа игрок телепортируется в раздел, которого не ждёт.
     $('nickInput').value = '';
-    goto('nick');
+    goto('login');
     try { history.replaceState(history.state, '', '#/'); } catch (e) { /* игнор */ }
   }
 })();

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/admin"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/auth"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
@@ -69,16 +72,56 @@ func run() error {
 		return fmt.Errorf("online series: %w", err)
 	}
 	series.Run(onlinestat.FlushEvery)
+	accs, err := accounts.Open(cfg.AccountsFile, log)
+	if err != nil {
+		return fmt.Errorf("accounts store: %w", err)
+	}
+	accs.Run(accounts.FlushEvery)
+	// Вход по Яндекс ID. Пустой client id — фича выключена: ручек нет, игра работает как раньше.
+	var authSvc *auth.Service
+	if auth.Enabled(authConfig(cfg)) {
+		authSvc, err = auth.New(authConfig(cfg), accs, log)
+		if err != nil {
+			return fmt.Errorf("auth: %w", err)
+		}
+		log.Info().Str("publicURL", cfg.PublicURL).Msg("auth: вход по Яндекс ID включён")
+	} else {
+		log.Info().Msg("auth: вход по Яндекс ID выключен (нет client id или секрета)")
+	}
+
 	h := hub.New(cfg, prog, log, mod, series)
+	h.SetAccounts(accs)
+	if authSvc != nil {
+		h.SetAuthInfo(&protocol.AuthInfo{Yandex: true})
+		// Новый аккаунт не должен получить имя, под которым прямо сейчас играет гость.
+		authSvc.SetNickTaken(h.NickTakenByGuest)
+	}
 	h.Run()
-	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: cfg.MsgRate, TrustProxy: cfg.TrustProxy, Log: log}, h)
+	wsServer := ws.NewServer(ws.Options{
+		MaxConns: cfg.MaxConns, MsgRate: cfg.MsgRate, TrustProxy: cfg.TrustProxy, Log: log,
+		// Аккаунт узнаётся по куке на апгрейде: игрок опознан ещё до первого сообщения.
+		Identify: authSvc.Identify,
+	}, h)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery(), requestLogger(log))
+	if authSvc != nil {
+		r.Use(authSvc.Refresh())
+		authSvc.Register(r)
+	}
 	r.GET("/ws", gin.WrapH(wsServer))
-	stopAdmin := admin.Register(r, h, mod, admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version}, cfg.AdminToken, started, cfg.TrustProxy, cfg.AdminStreamEvery)
-	web.Register(r, fsys, cfg.WebDir != "", cfg.BuildVersion)
+	stopAdmin := admin.Register(r, admin.Deps{
+		Hub: h, Moderation: mod, Accounts: accs,
+		Info:  admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version},
+		Token: cfg.AdminToken, Started: started, TrustProxy: cfg.TrustProxy,
+		StreamEvery: cfg.AdminStreamEvery, Identify: authSvc.Identify,
+	})
+	authMethods := ""
+	if authSvc != nil {
+		authMethods = "yandex"
+	}
+	web.Register(r, fsys, cfg.WebDir != "", cfg.BuildVersion, authMethods)
 
 	srv := &http.Server{Addr: cfg.Addr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
@@ -109,8 +152,27 @@ func run() error {
 	if err := series.Close(); err != nil {
 		log.Error().Err(err).Msg("online series close")
 	}
+	// Аккаунты — по тому же правилу: фоновая горутина уже не нужна, последние изменения
+	// (ник, урок, время входа) дописываем сами.
+	if err := accs.Close(); err != nil {
+		log.Error().Err(err).Msg("accounts close")
+	}
 	log.Info().Msg("bye")
 	return nil
+}
+
+// authConfig переводит настройки сервера в настройки пакета входа. Ключ подписи, если он не
+// задан переменной окружения, хранится рядом с файлом аккаунтов — в том же томе.
+func authConfig(cfg config.Config) auth.Config {
+	keyFile := ""
+	if cfg.AccountsFile != "" {
+		keyFile = filepath.Join(filepath.Dir(cfg.AccountsFile), "auth.key")
+	}
+	return auth.Config{
+		ClientID: cfg.YandexClientID, ClientSecret: cfg.YandexClientSecret,
+		PublicURL: cfg.PublicURL, Secret: cfg.AuthSecret, KeyFile: keyFile,
+		DevLogin: cfg.AuthDevLogin, TrustProxy: cfg.TrustProxy,
+	}
 }
 
 func newLogger(cfg config.Config) zerolog.Logger {

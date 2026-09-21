@@ -23,6 +23,16 @@ services:
       # История онлайна для графика в админке: точка в минуту, 30 дней. Пустое значение —
       # график живёт только в памяти и теряется при перезапуске.
       SNOWBRAWL_ONLINE_FILE: ${SNOWBRAWL_ONLINE_FILE:-/data/online.log}
+      # Аккаунты игроков (вход по Яндекс ID): ник, прогресс обучения, роль модерации.
+      SNOWBRAWL_ACCOUNTS_FILE: ${SNOWBRAWL_ACCOUNTS_FILE:-/data/accounts.json}
+      # Вход по Яндекс ID. Пустой CLIENT_ID или SECRET — вход выключен, игра работает как
+      # раньше (гости по нику). PUBLIC_URL нужен для redirect_uri и флага Secure у куки.
+      SNOWBRAWL_YANDEX_CLIENT_ID: ${SNOWBRAWL_YANDEX_CLIENT_ID:-}
+      SNOWBRAWL_YANDEX_CLIENT_SECRET: ${SNOWBRAWL_YANDEX_CLIENT_SECRET:-}
+      SNOWBRAWL_PUBLIC_URL: ${SNOWBRAWL_PUBLIC_URL:-}
+      # Ключ подписи кук входа. Пустой — сервер создаст /data/auth.key сам; терять его нельзя,
+      # иначе все игроки разом окажутся разлогинены.
+      SNOWBRAWL_AUTH_SECRET: ${SNOWBRAWL_AUTH_SECRET:-}
     volumes:
       - snowbrawl_data:/data
     ports:
@@ -57,6 +67,6 @@ services:
       - caddy_config:/config
 
 volumes:
-  snowbrawl_data:   # /data сервера: роли и баны по IP, история онлайна (down -v их снесёт)
+  snowbrawl_data:   # /data сервера: аккаунты, роли и баны по IP, история онлайна (down -v их снесёт)
   caddy_data:
   caddy_config:

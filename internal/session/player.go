@@ -30,6 +30,10 @@ type Player struct {
 	Token string
 	Nick  string
 	IP    string
+	// AccountID — постоянный аккаунт (internal/accounts), опознанный по куке при подключении.
+	// Пусто у гостя. Сессия остаётся тем же, чем была: аккаунт лишь говорит, чей это ник и
+	// чей прогресс, а место в комнате и матче по-прежнему живёт здесь и только в памяти.
+	AccountID string
 
 	Conn           Sender    // nil, если игрок отключён
 	DisconnectedAt time.Time // когда пропало соединение (если Conn == nil)

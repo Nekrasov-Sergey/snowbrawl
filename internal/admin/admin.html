@@ -67,6 +67,9 @@ input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a8
 <h3>Игроки</h3><div id="sessions"></div>
 <h3>Матчи</h3><div id="matches"></div>
 <h3>Комнаты</h3><div id="rooms"></div>
+<h3>Аккаунты <span id="accountsHint" class="empty"></span></h3><div id="accounts"></div>
+<div class="tools"><button id="accountsReload">Обновить список</button></div>
+
 <h3>Роли по IP</h3><div id="ranks"></div>
 <div class="tools">
   <input type="text" id="rankIp" placeholder="IP адрес" size="16">
@@ -188,6 +191,60 @@ async function unban(ip) {
   await post('/ban?ip=' + encodeURIComponent(ip), null, 'DELETE');
 }
 
+// Аккаунты приходят отдельной ручкой, а не потоком состояния: у них меняется время последнего
+// входа, и в потоке это ломало бы схлопывание одинаковых кадров. Список нужен редко — список
+// обновляется при открытии страницы и после каждого действия.
+let accounts = [];
+async function loadAccounts() {
+  const r = await fetch('/admin/accounts?token=' + encodeURIComponent(token));
+  if (!r.ok) { document.getElementById('accountsHint').textContent = 'не удалось загрузить'; return; }
+  const data = await r.json();
+  accounts = data.accounts || [];
+  document.getElementById('accountsHint').innerHTML = data.broken
+    ? '<span class="err">файл аккаунтов был испорчен и отложен в .bad</span>'
+    : 'всего: ' + accounts.length;
+  renderAccounts();
+}
+async function setAccountRank(id, rank) {
+  const acc = accounts.find(a => a.id === id);
+  const what = rank ? 'выдать роль «' + RANKS[rank] + '»' : 'снять роль';
+  if (!confirm('Аккаунт ' + (acc ? acc.nick : id) + '\n' + what + '?')) return;
+  if (await post('/account/rank', { id: id, rank: rank })) loadAccounts();
+}
+async function banAccount(id) {
+  const acc = accounts.find(a => a.id === id);
+  if (!confirm('Забанить аккаунт ' + (acc ? acc.nick : id) + '?\nОн не сможет играть ни с одного устройства.')) return;
+  const res = await post('/account/ban', { id: id, reason: '' });
+  if (res) { alert('Забанено. Выкинуто сессий: ' + res.kicked); loadAccounts(); }
+}
+async function unbanAccount(id) {
+  if (await post('/account/ban?id=' + encodeURIComponent(id), null, 'DELETE')) loadAccounts();
+}
+async function logoutAccount(id) {
+  if (!confirm('Выйти на всех устройствах этого аккаунта? Игроку придётся войти заново.')) return;
+  if (await post('/account/logout-all?id=' + encodeURIComponent(id))) loadAccounts();
+}
+function renderAccounts() {
+  table('accounts', ['ник', 'вход', 'роль', 'обучение', 'последний вход', 'действия'],
+    accounts.map(a => ({
+      key: a.id,
+      off: !!a.bannedAt,
+      cells: [esc(a.nick) + (a.bannedAt ? ' 🚫' : ''), esc(a.provider) + (a.login ? ' · ' + esc(a.login) : ''),
+        RANKS[a.rank] || 'Игрок', ((a.tut || []).length) + ' из 7', when(a.seenAt),
+        '<div class="act"><select data-id="' + esc(a.id) + '" class="accRank">' +
+          ['', 'moderator', 'admin'].map(v => '<option value="' + v + '"' + (v === (a.rank || '') ? ' selected' : '') + '>' +
+            (RANKS[v] || 'Игрок') + '</option>').join('') + '</select>' +
+          (a.bannedAt
+            ? '<button class="accUnban" data-id="' + esc(a.id) + '">Разбанить</button>'
+            : '<button class="accBan danger" data-id="' + esc(a.id) + '">Бан</button>') +
+          '<button class="accLogout" data-id="' + esc(a.id) + '">Выйти везде</button></div>'],
+    })), 'Аккаунтов пока нет.');
+  document.querySelectorAll('.accRank').forEach(el => { el.onchange = () => setAccountRank(el.dataset.id, el.value); });
+  document.querySelectorAll('.accBan').forEach(el => { el.onclick = () => banAccount(el.dataset.id); });
+  document.querySelectorAll('.accUnban').forEach(el => { el.onclick = () => unbanAccount(el.dataset.id); });
+  document.querySelectorAll('.accLogout').forEach(el => { el.onclick = () => logoutAccount(el.dataset.id); });
+}
+
 function render(s) {
   last = s;
   document.getElementById('sum').innerHTML =
@@ -302,6 +359,7 @@ document.getElementById('banSet').onclick = () => {
   const ip = document.getElementById('banIp').value.trim();
   if (ip) ban(ip, document.getElementById('banReason').value.trim());
 };
+document.getElementById('accountsReload').onclick = loadAccounts;
 document.getElementById('chatClear').onclick = async () => {
   if (!confirm('Удалить все сообщения общего чата у всех игроков?')) return;
   const res = await post('/chat/clear');
@@ -606,6 +664,7 @@ setInterval(() => {
 chart.from = Math.floor(Date.now() / 1000) - 21600;
 chart.to = Math.floor(Date.now() / 1000);
 chartTopUp();
+loadAccounts();
 connect();
 </script>
 </body>

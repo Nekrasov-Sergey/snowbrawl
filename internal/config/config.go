@@ -37,6 +37,24 @@ type Config struct {
 	// OnlineFile — ряд онлайна для графика в админке: точка в минуту, семь дней
 	// (см. internal/onlinestat). Пустой путь — история только в памяти.
 	OnlineFile string
+	// AccountsFile — JSON с постоянными аккаунтами (см. internal/accounts). Пустой путь —
+	// аккаунты живут только в памяти и теряются при перезапуске: так удобно в разработке.
+	AccountsFile string
+	// Вход по Яндекс ID (см. internal/auth). Пустой YandexClientID или YandexClientSecret —
+	// вход выключен целиком: ручек /auth/* нет, кнопки в клиенте нет. Так же ведёт себя
+	// админка при пустом AdminToken.
+	YandexClientID     string
+	YandexClientSecret string
+	// PublicURL — адрес, по которому игроки открывают игру («https://snowbrawl.ru»). Из него
+	// строится redirect_uri и решается, ставить ли куке флаг Secure. Берём из конфига, а не из
+	// заголовка Host: подменённый Host увёл бы код авторизации на чужой домен.
+	PublicURL string
+	// AuthSecret — ключ подписи кук входа. Пустой — ключ генерируется и сохраняется рядом с
+	// файлом аккаунтов: без этого каждый деплой разлогинивал бы всех игроков.
+	AuthSecret string
+	// AuthDevLogin — офлайновый вход /auth/dev/login для разработки. В неdev-сборке сервер с
+	// этим флагом не стартует: ручка пускает под любым аккаунтом без пароля.
+	AuthDevLogin bool
 	// Seed — зерно случайности hub'а и создаваемых им матчей: роли ботов, расстановка, разброс
 	// в симуляции. Ноль (и так в бою) — зерно из времени и crypto/rand, то есть каждый матч свой.
 	// Нужен тестам: без него бой каждый раз разный и тест на KO превращается в лотерею.
@@ -89,6 +107,11 @@ func Load(args []string, buildVersion string) (Config, error) {
 	envStr(&c.WebDir, "SNOWBRAWL_WEB_DIR")
 	envStr(&c.ModerationFile, "SNOWBRAWL_MODERATION_FILE")
 	envStr(&c.OnlineFile, "SNOWBRAWL_ONLINE_FILE")
+	envStr(&c.AccountsFile, "SNOWBRAWL_ACCOUNTS_FILE")
+	envStr(&c.YandexClientID, "SNOWBRAWL_YANDEX_CLIENT_ID")
+	envStr(&c.YandexClientSecret, "SNOWBRAWL_YANDEX_CLIENT_SECRET")
+	envStr(&c.PublicURL, "SNOWBRAWL_PUBLIC_URL")
+	envStr(&c.AuthSecret, "SNOWBRAWL_AUTH_SECRET")
 	envStr(&c.LogLevel, "SNOWBRAWL_LOG_LEVEL")
 	if err := envInt(&c.MaxConns, "SNOWBRAWL_MAX_CONNS"); err != nil {
 		return c, err
@@ -103,6 +126,9 @@ func Load(args []string, buildVersion string) (Config, error) {
 		return c, err
 	}
 	if err := envBool(&c.TrustProxy, "SNOWBRAWL_TRUST_PROXY"); err != nil {
+		return c, err
+	}
+	if err := envBool(&c.AuthDevLogin, "SNOWBRAWL_AUTH_DEV_LOGIN"); err != nil {
 		return c, err
 	}
 	for _, d := range []struct {
@@ -127,6 +153,9 @@ func Load(args []string, buildVersion string) (Config, error) {
 	fs.StringVar(&c.WebDir, "web-dir", c.WebDir, "каталог клиента на диске вместо встроенного")
 	fs.StringVar(&c.ModerationFile, "moderation-file", c.ModerationFile, "файл с ролями и банами по IP")
 	fs.StringVar(&c.OnlineFile, "online-file", c.OnlineFile, "файл истории онлайна для графика в админке")
+	fs.StringVar(&c.AccountsFile, "accounts-file", c.AccountsFile, "файл с аккаунтами игроков")
+	fs.StringVar(&c.PublicURL, "public-url", c.PublicURL, "публичный адрес игры (для redirect_uri входа)")
+	fs.BoolVar(&c.AuthDevLogin, "auth-dev-login", c.AuthDevLogin, "офлайновый вход /auth/dev/login (только dev-сборка)")
 	fs.IntVar(&c.MaxConns, "max-conns", c.MaxConns, "максимум WebSocket-соединений")
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "уровень логов")
 	fs.BoolVar(&c.LogPretty, "log-pretty", c.LogPretty, "человекочитаемые логи")
@@ -142,6 +171,12 @@ func Load(args []string, buildVersion string) (Config, error) {
 	}
 	if c.MaxConns <= 0 {
 		return c, errors.New("max-conns must be positive")
+	}
+	// Ручка входа без пароля не должна существовать нигде, кроме машины разработчика. Падаем
+	// на старте, а не выключаем её молча: молчаливое выключение однажды окажется молчаливым
+	// включением.
+	if c.AuthDevLogin && c.BuildVersion != "dev" {
+		return c, errors.New("auth-dev-login разрешён только в dev-сборке")
 	}
 	return c, nil
 }

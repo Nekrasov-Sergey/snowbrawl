@@ -65,7 +65,11 @@ func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.St
 	h.Run()
 	r := gin.New()
 	// trustProxy=false: адрес берётся только из RemoteAddr, заголовкам не верим.
-	stop := Register(r, h, mod, Info{Build: "test", SimVersion: prog.Version(), Proto: 3}, testToken, time.Now(), false, cfg.AdminStreamEvery)
+	stop := Register(r, Deps{
+		Hub: h, Moderation: mod,
+		Info:  Info{Build: "test", SimVersion: prog.Version(), Proto: 3},
+		Token: testToken, Started: time.Now(), StreamEvery: cfg.AdminStreamEvery,
+	})
 	srv := httptest.NewServer(r)
 	t.Cleanup(func() { stop(); h.Shutdown(); srv.Close() })
 	return srv, h, mod, stop

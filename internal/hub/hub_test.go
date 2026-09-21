@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 
 	snowbrawl "github.com/Nekrasov-Sergey/snowbrawl"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
@@ -31,10 +32,11 @@ import (
 )
 
 type testServer struct {
-	hub *hub.Hub
-	srv *httptest.Server
-	cfg config.Config
-	mod *moderation.Store
+	hub  *hub.Hub
+	srv  *httptest.Server
+	cfg  config.Config
+	mod  *moderation.Store
+	accs *accounts.Store
 }
 
 func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
@@ -75,16 +77,33 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Аккаунты держим в памяти: тестам нужен сам механизм, а не файл.
+	accs, err := accounts.Open("", log)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := hub.New(cfg, prog, log, mod, series)
+	h.SetAccounts(accs)
+	h.SetAuthInfo(&protocol.AuthInfo{Yandex: true})
 	h.Run()
 	// TrustProxy прокидываем: без него все тестовые клиенты приходят с 127.0.0.1, и правила,
 	// различающие адреса (брони ников, роли, баны), интеграционно не проверить.
-	wsServer := ws.NewServer(ws.Options{MaxConns: cfg.MaxConns, MsgRate: 1000, TrustProxy: cfg.TrustProxy, Log: log}, h)
+	wsServer := ws.NewServer(ws.Options{
+		MaxConns: cfg.MaxConns, MsgRate: 1000, TrustProxy: cfg.TrustProxy, Log: log,
+		// Настоящую подписанную куку проверяет internal/auth; здесь важно только то, что хаб
+		// получает опознанный аккаунт до первого сообщения — как в бою.
+		Identify: func(r *http.Request) string {
+			if c, err := r.Cookie(testAccountCookie); err == nil {
+				return c.Value
+			}
+			return ""
+		},
+	}, h)
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsServer)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(func() { h.Shutdown(); srv.Close() })
-	return &testServer{hub: h, srv: srv, cfg: cfg, mod: mod}
+	return &testServer{hub: h, srv: srv, cfg: cfg, mod: mod, accs: accs}
 }
 
 type client struct {
@@ -94,11 +113,32 @@ type client struct {
 	name string
 	// welcome
 	Token, ID string
+	Welcome   protocol.Welcome // ответ на hello целиком: его читает сам dial
 	inbox     chan protocol.Envelope
 }
 
+// testAccountCookie — кука, которой тестовый клиент представляется аккаунтом.
+const testAccountCookie = "sb_test_acc"
+
 func (s *testServer) connect(t *testing.T, nick, token string) *client {
 	return s.connectFrom(t, nick, token, "")
+}
+
+// account заводит аккаунт и возвращает его id — им клиент представляется в dialAs.
+func (s *testServer) account(t *testing.T, sub, nick string) string {
+	t.Helper()
+	acc, _, err := s.accs.Ensure(accounts.ProviderYandex, sub, sub, nick, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return acc.ID
+}
+
+// dialAs подключается от имени аккаунта: кука входа доезжает до сервера на апгрейде сокета,
+// ровно как в браузере.
+func (s *testServer) dialAs(t *testing.T, accountID string) *client {
+	t.Helper()
+	return s.dialOpts(t, "", "", accountID, false)
 }
 
 // connectFrom подключается, представляясь адресом ip через X-Forwarded-For. Работает только
@@ -110,12 +150,29 @@ func (s *testServer) connectFrom(t *testing.T, nick, token, ip string) *client {
 
 func (s *testServer) dial(t *testing.T, nick, token, ip string, raw bool) *client {
 	t.Helper()
+	return s.dialFull(t, nick, token, ip, "", raw)
+}
+
+func (s *testServer) dialOpts(t *testing.T, nick, token, accountID string, raw bool) *client {
+	t.Helper()
+	return s.dialFull(t, nick, token, "", accountID, raw)
+}
+
+func (s *testServer) dialFull(t *testing.T, nick, token, ip, accountID string, raw bool) *client {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	url := "ws" + strings.TrimPrefix(s.srv.URL, "http") + "/ws"
 	var opts *websocket.DialOptions
-	if ip != "" {
-		opts = &websocket.DialOptions{HTTPHeader: http.Header{"X-Forwarded-For": []string{ip}}}
+	if ip != "" || accountID != "" {
+		hdr := http.Header{}
+		if ip != "" {
+			hdr.Set("X-Forwarded-For", ip)
+		}
+		if accountID != "" {
+			hdr.Set("Cookie", testAccountCookie+"="+accountID)
+		}
+		opts = &websocket.DialOptions{HTTPHeader: hdr}
 	}
 	c, _, err := websocket.Dial(ctx, url, opts)
 	if err != nil {
@@ -143,7 +200,7 @@ func (s *testServer) dial(t *testing.T, nick, token, ip string, raw bool) *clien
 	}
 	var w protocol.Welcome
 	cl.expect(protocol.SWelcome, &w)
-	cl.Token, cl.ID = w.Token, w.PlayerID
+	cl.Token, cl.ID, cl.Welcome = w.Token, w.PlayerID, w
 	return cl
 }
 
@@ -198,6 +255,42 @@ func (cl *client) expectWithin(wait time.Duration, typ string, dst any) protocol
 }
 
 func (cl *client) close() { _ = cl.c.Close(websocket.StatusNormalClosure, "") }
+
+// expectNone проверяет, что сообщение типа typ за отведённое время НЕ пришло: так тесты
+// убеждаются, что сервер промолчал там, где обязан молчать.
+func (cl *client) expectNone(typ string, wait time.Duration) {
+	cl.t.Helper()
+	deadline := time.After(wait)
+	for {
+		select {
+		case env, ok := <-cl.inbox:
+			if !ok {
+				return // соединение закрылось — сообщения точно не было
+			}
+			if env.Type == typ {
+				cl.t.Fatalf("%s: пришло %s, хотя не должно", cl.name, typ)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// expectClosed ждёт, пока сервер закроет соединение: так проверяется вытеснение сессии.
+func (cl *client) expectClosed(t *testing.T) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case _, ok := <-cl.inbox:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("%s: соединение не закрылось", cl.name)
+		}
+	}
+}
 
 // waitRoom ждёт состояние комнаты, удовлетворяющее cond: в очереди клиента могут лежать
 // состояния прошлых изменений. Каждое сообщение разбирается в свежую структуру — иначе

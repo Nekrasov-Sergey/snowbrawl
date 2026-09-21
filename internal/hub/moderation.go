@@ -4,6 +4,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/ws"
 )
 
@@ -14,8 +15,78 @@ import (
 // rank — роль модерации адреса. Вызывать под h.mu (у стора свой мьютекс, дедлока нет).
 func (h *Hub) rank(ip string) string { return h.mod.Rank(ip) }
 
+// rankOf — роль игрока: сначала аккаунт, потом адрес. Роль аккаунта сильнее, потому что она
+// про человека, а не про сеть, из которой он зашёл; роль по адресу остаётся — для гостей это
+// единственный механизм, и уже выданные роли продолжают работать.
+func (h *Hub) rankOf(p *session.Player) string {
+	if p.AccountID != "" {
+		if acc, ok := h.accs.Get(p.AccountID); ok && acc.Rank != "" {
+			return acc.Rank
+		}
+	}
+	return h.mod.Rank(p.IP)
+}
+
 // banned — заблокирован ли адрес. Вызывать под h.mu.
 func (h *Hub) banned(ip string) bool { return h.mod.Banned(ip) }
+
+// accountBanned — заблокирован ли аккаунт игрока. Вызывать под h.mu.
+func (h *Hub) accountBanned(p *session.Player) bool {
+	if p.AccountID == "" {
+		return false
+	}
+	acc, ok := h.accs.Get(p.AccountID)
+	return ok && acc.Banned()
+}
+
+// ApplyRankAccount рассылает новую роль аккаунта — зеркало ApplyRank, но по аккаунту, а не по
+// адресу. Файл, как и там, пишет админка до вызова и вне h.mu.
+func (h *Hub) ApplyRankAccount(accountID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := h.byAccount[accountID]
+	if p != nil {
+		p.Send(protocol.MustEncode(protocol.SRank, protocol.RankUpdate{Rank: h.rankOf(p)}))
+	}
+	// Цвет ника виден всем в истории чата, поэтому её надо перевыслать целиком — ровно как в
+	// ApplyRank. Состав идущего матча не трогаем: он зафиксирован при старте.
+	for _, other := range h.byID {
+		h.sendChatHistory(other)
+		if r := h.rooms[other.RoomCode]; r != nil && r.Member(other.ID) != nil {
+			h.sendRoomChatHistory(other, r)
+		}
+	}
+	if p != nil && p.RoomCode != "" {
+		h.broadcastRoom(h.rooms[p.RoomCode])
+	}
+	h.log.Info().Str("account", accountID).Msg("moderation: rank applied to account")
+}
+
+// ApplyBanAccount выкидывает из игры сессию забаненного аккаунта. Бан адреса остаётся отдельным
+// механизмом: он про сеть, этот — про человека, и разлогином от него не спастись.
+func (h *Hub) ApplyBanAccount(accountID string) int {
+	h.mu.Lock()
+	p := h.byAccount[accountID]
+	var conn *ws.Conn
+	if p != nil {
+		p.Send(protocol.MustEncode(protocol.SError, protocol.Error{Code: protocol.ErrBanned, Message: "доступ для этого аккаунта заблокирован"}))
+		conn, _ = p.Conn.(*ws.Conn)
+		h.expirePlayer(p)
+		p.ToMenu()
+		p.Conn = nil
+		h.broadcastOnline(nil)
+	}
+	h.mu.Unlock()
+
+	if conn != nil {
+		conn.Close(websocket.StatusPolicyViolation, "banned")
+	}
+	h.log.Info().Str("account", accountID).Bool("kicked", conn != nil).Msg("moderation: account ban applied")
+	if conn != nil {
+		return 1
+	}
+	return 0
+}
 
 // ApplyBan выкидывает из игры всех с этого адреса и закрывает их соединения. Возвращает
 // число выкинутых сессий. Сам бан в файл записывает админка до вызова.

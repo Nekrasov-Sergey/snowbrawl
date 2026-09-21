@@ -44,6 +44,11 @@ const (
 	CChatSend   = "chat.send" // сообщение в чат: общий чат меню или чат комнаты (поле scope)
 	CChatDel    = "chat.del"  // удалить сообщение чата (своё или по праву роли)
 	CPong       = "pong"      // ответ на зонд задержки от сервера (см. Ping)
+	// Аккаунт (вход по Яндекс ID). Гость эти сообщения не шлёт; если пришлют — сервер молча
+	// их игнорирует, чтобы клиенту не приходилось знать, вошёл игрок или нет, в двух местах.
+	CNickSet      = "nick.set"      // сменить ник аккаунта
+	CTutorialDone = "tutorial.done" // урок пройден
+	CTutorialSync = "tutorial.sync" // слить прогресс, накопленный на устройстве, с аккаунтом
 )
 
 // Типы сообщений сервер → клиент.
@@ -69,6 +74,7 @@ const (
 	SPing        = "ping"         // зонд задержки от сервера: клиент обязан ответить pong с тем же seq
 	SSelfPing    = "self.ping"    // задержка самого адресата: единственный источник числа в углу
 	SRoomPing    = "room.ping"    // задержки участников лобби (отдельно от room.state)
+	SAccount     = "account"      // состояние аккаунта изменилось (ник, прогресс обучения)
 )
 
 // Роли модерации. Выдаются по IP из админки (см. internal/moderation) и влияют на цвет ника
@@ -82,32 +88,34 @@ const (
 
 // Коды ошибок в SError.
 const (
-	ErrBadMessage    = "bad_message"
-	ErrBadVersion    = "bad_version"
-	ErrNotAllowed    = "not_allowed"
-	ErrBadNick       = "bad_nick"
-	ErrNickProfanity = "nick_profanity" // в нике мат: причина отказа своя, чтобы её можно было объяснить
-	ErrNickTaken     = "nick_taken"     // ник занят другим игроком до перезапуска сервера
-	ErrRoomNotFound  = "room_not_found"
-	ErrRoomFull      = "room_full"
-	ErrRoomLimit     = "room_limit"
-	ErrBusy          = "busy"
-	ErrDraining      = "draining"
-	ErrBadMode       = "bad_mode"
-	ErrBadArena      = "bad_arena"
-	ErrBadRole       = "bad_role"
-	ErrBadGameMode   = "bad_gamemode"
-	ErrBadSlot       = "bad_slot"
-	ErrCodeRequired  = "code_required"
-	ErrBadCode       = "bad_code"
-	ErrTooManyTries  = "too_many_tries"
-	ErrSlotTaken     = "slot_taken"
-	ErrNoSlots       = "no_slots"
-	ErrChatFlood     = "chat_flood"    // слишком часто пишете в чат
-	ErrBanned        = "banned"        // адрес заблокирован
-	ErrWrongSection  = "wrong_section" // комната из другого раздела (PVP против PVE)
-	ErrServerFull    = "server_full"
-	ErrInternal      = "internal"
+	ErrBadMessage     = "bad_message"
+	ErrBadVersion     = "bad_version"
+	ErrNotAllowed     = "not_allowed"
+	ErrBadNick        = "bad_nick"
+	ErrNickProfanity  = "nick_profanity" // в нике мат: причина отказа своя, чтобы её можно было объяснить
+	ErrNickTaken      = "nick_taken"     // ник занят другим игроком до перезапуска сервера
+	ErrRoomNotFound   = "room_not_found"
+	ErrRoomFull       = "room_full"
+	ErrRoomLimit      = "room_limit"
+	ErrBusy           = "busy"
+	ErrDraining       = "draining"
+	ErrBadMode        = "bad_mode"
+	ErrBadArena       = "bad_arena"
+	ErrBadRole        = "bad_role"
+	ErrBadGameMode    = "bad_gamemode"
+	ErrBadSlot        = "bad_slot"
+	ErrCodeRequired   = "code_required"
+	ErrBadCode        = "bad_code"
+	ErrTooManyTries   = "too_many_tries"
+	ErrSlotTaken      = "slot_taken"
+	ErrNoSlots        = "no_slots"
+	ErrChatFlood      = "chat_flood"      // слишком часто пишете в чат
+	ErrBanned         = "banned"          // адрес заблокирован
+	ErrRenameCooldown = "rename_cooldown" // ник меняли недавно
+	ErrNoAccount      = "no_account"      // действие только для вошедшего игрока
+	ErrWrongSection   = "wrong_section"   // комната из другого раздела (PVP против PVE)
+	ErrServerFull     = "server_full"
+	ErrInternal       = "internal"
 )
 
 // Hello — первое сообщение клиента.
@@ -116,6 +124,43 @@ type Hello struct {
 	Nick            string `json:"nick"`
 	BuildVersion    string `json:"build"`
 	ProtocolVersion int    `json:"proto"`
+}
+
+// Account — постоянный аккаунт игрока в сообщениях клиенту. Пустой указатель — гость.
+type Account struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Nick     string `json:"nick"`
+	// NickAuto — ник выдан сервером, потому что имя из профиля не подошло или было занято.
+	// Клиент по нему сразу предлагает выбрать имя.
+	NickAuto bool `json:"nickAuto,omitempty"`
+}
+
+// AuthInfo — какие способы входа включены на сервере. Пустой указатель — вход выключен, и
+// клиент не показывает кнопку.
+type AuthInfo struct {
+	Yandex bool `json:"yandex,omitempty"`
+}
+
+// AccountState — состояние аккаунта после изменения (смена ника, слияние прогресса).
+type AccountState struct {
+	Account  *Account `json:"account"`
+	Tutorial []string `json:"tutorial,omitempty"`
+}
+
+// NickSet — смена ника аккаунта.
+type NickSet struct {
+	Nick string `json:"nick"`
+}
+
+// TutorialDone — пройденный урок.
+type TutorialDone struct {
+	ID string `json:"id"`
+}
+
+// TutorialSync — прогресс обучения, накопленный на этом устройстве.
+type TutorialSync struct {
+	IDs []string `json:"ids"`
 }
 
 // Welcome — ответ на hello.
@@ -131,6 +176,13 @@ type Welcome struct {
 	Rank       string `json:"rank,omitempty"` // роль модерации этого игрока (RankModerator/RankAdmin)
 	// Куда клиент должен вернуться после реконнекта: "menu" | "room" | "match".
 	Resume string `json:"resume"`
+	// Account — аккаунт игрока, если он вошёл; Auth — доступные способы входа; Tutorial —
+	// прогресс обучения аккаунта. Все три необязательны, поэтому версия протокола не растёт:
+	// старый клиент их просто не читает, а до старой вкладки дело не доходит — расхождение
+	// сборок отсекается раньше и она перезагружается.
+	Account  *Account  `json:"account,omitempty"`
+	Auth     *AuthInfo `json:"auth,omitempty"`
+	Tutorial []string  `json:"tutorial,omitempty"`
 }
 
 // Online — число игроков на сервере. Приходит в welcome и дальше при каждом изменении:
