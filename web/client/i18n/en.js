@@ -237,6 +237,9 @@ window.SBI18nEN = {
   'Прошлый забег: команда повержена': 'Previous run: the team went down',
   'Прошлый забег: снеговик разбит': 'Previous run: the snowman was broken',
   'Прошлый забег: время вышло': 'Previous run: time ran out',
+  'Прошлый забег: все игроки вышли': 'Previous run: all players left',
+  'Прошлый забег прерван: сервер перезапускался': 'Previous run interrupted: the server was restarting',
+  'Прошлый забег завершён': 'Previous run is over',
 
   // ---- чат ----
   'Чат': 'Chat',
