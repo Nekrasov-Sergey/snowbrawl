@@ -50,7 +50,7 @@ input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a8
 <div id="sum"></div>
 <div id="drain"></div>
 <div id="modbroken"></div>
-<div class="bar"><span id="conn">подключаемся…</span><button id="pause">Пауза</button></div>
+<div class="bar"><span id="conn">подключаемся…</span></div>
 
 <h3>Онлайн</h3>
 <div id="chartBox">
@@ -87,7 +87,7 @@ input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a8
 
 <script>
 const token = new URLSearchParams(location.search).get('token') || '';
-let paused = false, es = null, last = null;
+let es = null, last = null;
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const secs = ms => {
@@ -343,14 +343,6 @@ function connect() {
   es.onmessage = e => { try { render(JSON.parse(e.data)); } catch (err) { /* игнор битого кадра */ } };
   es.onerror = () => { document.getElementById('conn').innerHTML = '<span class="err">нет связи с сервером</span>'; };
 }
-function disconnect() { if (es) { es.close(); es = null; } }
-
-document.getElementById('pause').onclick = function () {
-  paused = !paused;
-  this.textContent = paused ? 'Продолжить' : 'Пауза';
-  if (paused) { disconnect(); document.getElementById('conn').textContent = 'обновление на паузе'; }
-  else connect();
-};
 document.getElementById('rankSet').onclick = () => {
   const ip = document.getElementById('rankIp').value.trim();
   if (ip) setRank(ip, document.getElementById('rankVal').value);
@@ -656,7 +648,6 @@ window.addEventListener('resize', () => { chartDraw(); });
 // Хвост ряда догоняем всегда (он дешёвый), а окно двигаем только у правого края: иначе
 // автообновление дёргало бы график, который администратор увёл в прошлое.
 setInterval(() => {
-  if (paused) return;
   const atNow = chartAtNow();
   chartTopUp().then(() => { if (atNow) chartSetRange(chart.to - chart.from); });
 }, 60000);

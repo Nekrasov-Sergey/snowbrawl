@@ -722,7 +722,8 @@
   function botLevelNames() { return (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).map(function (n) { return t(n); }); }
   function pveResultText(r) {
     return { cleared: t('Прошлый забег: прохождение завершено 🏆'), wiped: t('Прошлый забег: команда повержена'),
-      objective: t('Прошлый забег: снеговик разбит'), expired: t('Прошлый забег: время вышло') }[r] || '';
+      objective: t('Прошлый забег: снеговик разбит'), expired: t('Прошлый забег: время вышло'),
+      abandoned: t('Прошлый забег: все игроки вышли'), shutdown: t('Прошлый забег прерван: сервер перезапускался') }[r] || '';
   }
   // Ники ботов придумывает сервер («Бот 3», «Союзник 2») — их и только их переводит I18n.nick;
   // имя живого игрока одинаково видно всем и не трогается.
@@ -1068,8 +1069,9 @@
     var res = $('lobbyResult');
     if (r.lastWinner) {
       res.hidden = false;
-      res.textContent = pveResultText(r.lastWinner) ||
-        (r.lastWinner === 'draw' ? t('Прошлый матч: ничья') : t('Прошлый матч выиграла команда {team}', { team: r.lastWinner }));
+      // В PvE lastWinner — причина конца забега; сырой код на экран не выводим.
+      res.textContent = pve ? (pveResultText(r.lastWinner) || t('Прошлый забег завершён'))
+        : (r.lastWinner === 'draw' ? t('Прошлый матч: ничья') : t('Прошлый матч выиграла команда {team}', { team: r.lastWinner }));
     } else res.hidden = true;
 
     $('slotsBCol').hidden = pve;
