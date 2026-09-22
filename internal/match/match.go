@@ -93,9 +93,9 @@ type Match struct {
 	origNick map[string]string // ID бойца -> исходный ник (только для тех, кто родился ботом)
 	tick     int
 	done     bool
-	result  Result
-	stopCh  chan struct{}
-	stopped sync.Once
+	result   Result
+	stopCh   chan struct{}
+	stopped  sync.Once
 	// finished закрывается, когда match.end уже разослан и onEnd отработал: по нему ждёт Wait,
 	// чтобы остановка сервера не угадывала задержку сном.
 	finished chan struct{}
