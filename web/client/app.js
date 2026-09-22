@@ -725,7 +725,7 @@
       objective: t('Прошлый забег: снеговик разбит'), expired: t('Прошлый забег: время вышло'),
       abandoned: t('Прошлый забег: все игроки вышли'), shutdown: t('Прошлый забег прерван: сервер перезапускался') }[r] || '';
   }
-  // Ники ботов придумывает сервер («Бот 3», «Союзник 2») — их и только их переводит I18n.nick;
+  // Ники ботов придумывает сервер («Бот Сугроб», «Союзник Иней») — их и только их переводит I18n.nick;
   // имя живого игрока одинаково видно всем и не трогается.
   function nameMap(players) {
     var out = {};
@@ -1188,6 +1188,13 @@
     var names = app.game && app.game.names;
     return (names && names[p.id]) || t(p.nick);
   }
+  // Сырой (непереведённый) ник бойца из состава матча: в снапшоте sim.js остаётся ник на старте,
+  // а состав сервер обновляет — например, выдаёт ушедшему в лобби игроку имя бота.
+  function rosterNick(p) {
+    var list = (app.game && app.game.players) || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === p.id) return list[i].nick;
+    return p.nick;
+  }
   function radiusOf(p) { return (Sim.ROLE_STATS[p.role] || { radius: 15 }).radius; }
   function overMe(pt, me) { return !!me && Math.hypot(pt.x - me.x, pt.y - me.y) <= radiusOf(me) + 10; }
 
@@ -1327,13 +1334,10 @@
       for (var i = 0; i < 3; i++) pips += '<span class="pip ' + (i < p.hp ? 'on ' + p.team.toLowerCase() : '') + '"></span>';
       var cls = 'charname' + (p.id === app.game.meId ? ' me' : '') + (p.bot ? ' bot' : '');
       var lives = (pve && p.team === 'A' && p.lives != null) ? ' <span class="lives">♥' + p.lives + '</span>' : '';
-      // Ник ушедшего в лобби человека остаётся у бойца (это позволяет вернуться за него же), но
-      // без пометки бот-строка неотличима от живого игрока — путает, будто это два разных
-      // человека. У ботов «с рождения» (добор пустых слотов) ник и так «Бот N»/«Союзник N», а у
-      // слота, освобождённого пересевшим в другое место игроком, может не быть номера («Бот» без
-      // цифры — см. match.go, fallbackBotNick) — проверяем сырой p.nick (до перевода I18n.nick),
-      // второй раз не подписываем.
-      var isGenericBot = /^(Бот|Союзник)( \d+)?$/.test(p.nick);
+      // Ушедшему в лобби человеку сервер сразу выдаёт ник бота (Match.Leave), и такой ник
+      // второй раз не подписываем — проверяем сырой ник из состава, до перевода I18n.nick. Пометка
+      // остаётся для бойца, за которого бот играет временно: обрыв связи или AFK.
+      var isGenericBot = I18n.isBotNick(rosterNick(p));
       var botMark = (p.bot && !isGenericBot) ? ' <span class="botMark">' + t('(бот)') + '</span>' : '';
       var name = escapeHtml(nickOf(p)) + botMark + ' · ' + t(p.role) + (p.id === app.game.meId ? ' ' + t('(вы)') : '') + lives;
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'

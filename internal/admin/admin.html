@@ -370,7 +370,7 @@ const chart = {
   from: 0, to: 0,                                  // окно в секундах unix
   fine: { from: 0, to: 0, step: 60, points: [] },  // неделя поминутно
   deep: { from: 0, to: 0, step: 0, points: [] },   // глубже недели — крупным шагом
-  hover: null, drag: null, pinch: null, broken: false,
+  hover: null, drag: null, pinch: null, frame: 0, broken: false,
   loading: false, err: false, deepTimer: null, deepAbort: null,
   yTop: 4, holdY: false, holdTimer: null
 };
@@ -556,11 +556,14 @@ function chartDraw() {
   }
 }
 
-function chartSecAt(clientX) {
+// Доля ширины области графика под точкой экрана: 0 — левый край, 1 — правый.
+function chartFracAt(clientX) {
   const r = chart.canvas.getBoundingClientRect();
   const padL = 34, padR = 8;
-  const frac = (clientX - r.left - padL) / Math.max(1, r.width - padL - padR);
-  return chart.from + frac * (chart.to - chart.from);
+  return (clientX - r.left - padL) / Math.max(1, r.width - padL - padR);
+}
+function chartSecAt(clientX) {
+  return chart.from + chartFracAt(clientX) * (chart.to - chart.from);
 }
 function chartZoom(sec, factor) {
   let span = (chart.to - chart.from) * factor;
@@ -569,8 +572,7 @@ function chartZoom(sec, factor) {
   chart.from = sec - span * frac;
   chart.to = chart.from + span;
   chartClamp();
-  chartDraw();
-  chartNeedDeep();
+  chartFrame();
 }
 // Окно не пускаем в будущее: справа всегда «сейчас».
 function chartClamp() {
@@ -622,23 +624,75 @@ chart.canvas.addEventListener('pointerup', e => {
   if (chart.canvas.hasPointerCapture(e.pointerId)) chart.canvas.releasePointerCapture(e.pointerId);
 });
 chart.canvas.addEventListener('pointerleave', () => { chart.hover = null; chartDraw(); });
+// Колесо и щипок на тачпаде: щипок браузер присылает как wheel с ctrlKey, десятками событий за
+// жест, поэтому шаг масштаба пропорционален deltaY, а не фиксирован на событие — иначе лёгкое
+// движение пальцев проматывало масштаб в разы. Щелчок колеса мыши (~100 px) — примерно ×1.16.
+const WHEEL_K = 0.0015, WHEEL_PINCH_K = 0.005;
 chart.canvas.addEventListener('wheel', e => {
   e.preventDefault();
   chartHoldY(true); chartHoldY(false);
-  chartZoom(chartSecAt(e.clientX), e.deltaY > 0 ? 1.25 : 0.8);
+  const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+  const d = Math.max(-120, Math.min(120, px));
+  chartZoom(chartSecAt(e.clientX), Math.exp(d * (e.ctrlKey ? WHEEL_PINCH_K : WHEEL_K)));
 }, { passive: false });
-// Щипок двумя пальцами: без него на телефоне масштаб недоступен.
+// Safari на Mac шлёт щипок тачпада не колесом, а gesture-событиями с накопленным scale.
+let gesture = null;
+chart.canvas.addEventListener('gesturestart', e => {
+  e.preventDefault();
+  if (chart.pinch) return; // на iPhone щипок уже ведут touch-события
+  gesture = { span: chart.to - chart.from, anchor: chartSecAt(e.clientX), x: e.clientX };
+  chartHoldY(true);
+});
+chart.canvas.addEventListener('gesturechange', e => {
+  e.preventDefault();
+  if (!gesture || chart.pinch) return;
+  const span = Math.max(MIN_SPAN, Math.min(MAX_SPAN, gesture.span * Math.pow(1 / Math.max(0.01, e.scale), PINCH_POWER)));
+  chart.from = gesture.anchor - chartFracAt(gesture.x) * span;
+  chart.to = chart.from + span;
+  chartClamp();
+  chartFrame();
+});
+chart.canvas.addEventListener('gestureend', e => { e.preventDefault(); gesture = null; chartHoldY(false); });
+// Щипок двумя пальцами: без него на телефоне масштаб недоступен. Окно считается от состояния
+// на начало жеста, а не от прошлого кадра: иначе ошибки каждого touchmove копились и график
+// прыгал. Степень 0.45 гасит чувствительность — разведение пальцев вдвое даёт ×1.37, а не ×2.
+// Момент под серединой пальцев остаётся под ней, так что двумя пальцами можно и сдвигать.
+const PINCH_POWER = 0.45, PINCH_DEADZONE = 4;
+function touchPair(e) {
+  const a = e.touches[0], b = e.touches[1];
+  return { dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), mid: (a.clientX + b.clientX) / 2 };
+}
 chart.canvas.addEventListener('touchmove', e => {
   if (e.touches.length !== 2) return;
   e.preventDefault();
-  const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-  const mid = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+  const t = touchPair(e);
   chartHoldY(true);
-  if (chart.pinch) chartZoom(chartSecAt(mid), chart.pinch / Math.max(1, dist));
-  chart.pinch = dist;
   chart.drag = null;
+  if (!chart.pinch) {
+    chart.pinch = { dist: Math.max(1, t.dist), span: chart.to - chart.from, anchor: chartSecAt(t.mid), moved: false };
+    return;
+  }
+  const p = chart.pinch;
+  if (!p.moved && Math.abs(t.dist - p.dist) < PINCH_DEADZONE) return; // дрожь пальцев — не зум
+  p.moved = true;
+  const span = Math.max(MIN_SPAN, Math.min(MAX_SPAN, p.span * Math.pow(p.dist / Math.max(1, t.dist), PINCH_POWER)));
+  chart.from = p.anchor - chartFracAt(t.mid) * span;
+  chart.to = chart.from + span;
+  chartClamp();
+  chartFrame();
 }, { passive: false });
-chart.canvas.addEventListener('touchend', () => { chart.pinch = null; chartHoldY(false); });
+function pinchEnd(e) {
+  if (e.touches.length >= 2) return;
+  chart.pinch = null;
+  chartHoldY(false);
+}
+chart.canvas.addEventListener('touchend', pinchEnd);
+chart.canvas.addEventListener('touchcancel', pinchEnd);
+// Одна перерисовка на кадр: touchmove приходит чаще, чем экран успевает обновиться.
+function chartFrame() {
+  if (chart.frame) return;
+  chart.frame = requestAnimationFrame(() => { chart.frame = 0; chartDraw(); chartNeedDeep(); });
+}
 
 document.querySelectorAll('.chartBar button[data-range]').forEach(b => {
   b.onclick = () => chartSetRange(Number(b.dataset.range));

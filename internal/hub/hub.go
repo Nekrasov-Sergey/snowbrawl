@@ -900,6 +900,10 @@ func (h *Hub) fillTeams(mode int, gameMode string, difficulty int, humans []prot
 		taken[hp.Team+strconv.Itoa(hp.Index)] = true
 	}
 	botN := 0
+	botNicks := map[string]bool{} // имена ботов в матче не повторяются и не совпадают с никами людей
+	for _, hp := range players {
+		botNicks[hp.Nick] = true
+	}
 	for _, team := range teams {
 		for i := 0; i < mode; i++ {
 			if taken[team+strconv.Itoa(i)] {
@@ -907,12 +911,11 @@ func (h *Hub) fillTeams(mode int, gameMode string, difficulty int, humans []prot
 			}
 			botN++
 			level := difficulty
+			nick := match.PickBotNick(gameMode, botNicks, h.rng.IntN)
+			botNicks[nick] = true
 			bp := protocol.MatchPlayer{
-				ID: fmt.Sprintf("bot%d", botN), Nick: fmt.Sprintf("Бот %d", botN), Team: team,
+				ID: fmt.Sprintf("bot%d", botN), Nick: nick, Team: team,
 				Index: i, Role: roles[h.rng.IntN(len(roles))], Bot: true, BotLevel: &level,
-			}
-			if pve {
-				bp.Nick = fmt.Sprintf("Союзник %d", botN)
 			}
 			players = append(players, bp)
 			count[team]++

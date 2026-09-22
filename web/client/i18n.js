@@ -55,23 +55,31 @@ window.SBI18n = (function () {
     return forms[2];
   }
 
-  // Ники, которые придумал сервер (internal/hub/hub.go) или оффлайновый режим: только они
-  // и переводятся. Имя живого игрока — его собственность, оно одинаково видно всем.
-  var NICK_PATTERNS = [
-    { re: /^Бот (\d+)$/, key: 'Бот {n}' },
-    { re: /^Союзник (\d+)$/, key: 'Союзник {n}' },
-    { re: /^Игрок (\d+)$/, key: 'Игрок {n}' }
+  // Имена ботов: ник бойца — «Бот Сугроб» в PvP и «Союзник Сугроб» в PvE. Тот же список —
+  // match.BotNames на сервере (internal/match/botnames.go), совпадение сверяет i18n_test.go.
+  var BOT_NAMES = [
+    'Снежок', 'Сугроб', 'Сосулька', 'Метель', 'Пурга', 'Буран', 'Иней', 'Льдинка', 'Снежинка', 'Морозко',
+    'Позёмка', 'Наст', 'Айсберг', 'Пломбир', 'Валенок', 'Варежка', 'Санки', 'Ледник', 'Сквозняк', 'Холодок'
   ];
-  // Слот, освобождённый пересевшим на другое место игроком, может остаться без номера
-  // (fallbackBotNick в match.go) — переводим и голые «Бот»/«Союзник» отдельно.
-  var NICK_PLAIN = { 'Бот': 'Бот', 'Союзник': 'Союзник' };
+  // Разбор ника бота: { prefix, name, n } или null. n — номер, если пул имён кончился.
+  // Живой игрок с ником «Бот Вася» ботом не считается: имени нет в пуле.
+  var BOT_NICK_RE = /^(Бот|Союзник) (\S+)(?: (\d+))?$/;
+  function botNick(s) {
+    var m = BOT_NICK_RE.exec(s || '');
+    return m && BOT_NAMES.indexOf(m[2]) >= 0 ? { prefix: m[1], name: m[2], n: m[3] } : null;
+  }
+  function isBotNick(s) { return !!botNick(s); }
+  // Ники, которые придумал сервер или оффлайновый режим: только они и переводятся. Имя живого
+  // игрока — его собственность, оно одинаково видно всем.
   function nick(s) {
     if (cur === 'ru' || !s) return s;
-    for (var i = 0; i < NICK_PATTERNS.length; i++) {
-      var m = NICK_PATTERNS[i].re.exec(s);
-      if (m) return t(NICK_PATTERNS[i].key, { n: m[1] });
+    var b = botNick(s);
+    if (b) {
+      var name = t(b.name) + (b.n ? ' ' + b.n : '');
+      return b.prefix === 'Бот' ? t('Бот {name}', { name: name }) : t('Союзник {name}', { name: name });
     }
-    if (NICK_PLAIN[s]) return t(NICK_PLAIN[s]);
+    var m = /^Игрок (\d+)$/.exec(s);
+    if (m) return t('Игрок {n}', { n: m[1] });
     return s === 'Вы' || s === 'Соперник' ? t(s) : s;
   }
 
@@ -115,5 +123,5 @@ window.SBI18n = (function () {
   if (document.documentElement) document.documentElement.lang = cur;
   applyDom(document.body);
 
-  return { lang: function () { return cur; }, t: t, plural: plural, nick: nick, applyDom: applyDom, set: set };
+  return { lang: function () { return cur; }, t: t, plural: plural, nick: nick, isBotNick: isBotNick, BOT_NAMES: BOT_NAMES, applyDom: applyDom, set: set };
 })();

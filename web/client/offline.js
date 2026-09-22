@@ -7,10 +7,12 @@ window.SBOffline = (function () {
     var lvl = botLevel == null ? 1 : (botLevel | 0);
     var players = [{ id: 'me', team: 'A', role: myRole, bot: false, nick: 'Вы' }];
     var pool = Sim.shuffle(rng, Sim.ALL_ROLES.filter(function (r) { return r !== myRole; }));
-    for (var i = 1; i < mode; i++) players.push({ id: 'a' + i, team: 'A', role: pool[(i - 1) % pool.length], bot: true, botLevel: lvl, nick: 'Союзник ' + i });
+    // Имена ботов — из того же пула, что раздаёт сервер (I18n.BOT_NAMES), без повторов.
+    var names = Sim.shuffle(rng, window.SBI18n.BOT_NAMES.slice());
+    for (var i = 1; i < mode; i++) players.push({ id: 'a' + i, team: 'A', role: pool[(i - 1) % pool.length], bot: true, botLevel: lvl, nick: 'Союзник ' + names[i - 1] });
     if (pve) return players; // врагов создаёт волновой планировщик sim.js
     var poolB = Sim.shuffle(rng, Sim.ALL_ROLES.slice());
-    for (var j = 0; j < mode; j++) players.push({ id: 'b' + j, team: 'B', role: poolB[j % poolB.length], bot: true, botLevel: lvl, nick: 'Бот ' + (mode + j) });
+    for (var j = 0; j < mode; j++) players.push({ id: 'b' + j, team: 'B', role: poolB[j % poolB.length], bot: true, botLevel: lvl, nick: 'Бот ' + names[mode - 1 + j] });
     return players;
   }
 
