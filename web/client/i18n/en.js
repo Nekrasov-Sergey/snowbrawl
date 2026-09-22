@@ -184,6 +184,7 @@ window.SBI18nEN = {
   'следующий бросок': 'next throw',
   'готова': 'ready',
   '(вы)': '(you)',
+  '(бот)': '(bot)',
   '(кнопка справа)': '(button on the right)',
   'У вашего бойца нет активной способности — играйте позиционированием.': 'Your fighter has no active ability — play with positioning.',
   'Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.': 'Left half moves, right half winds up and throws; bring your finger back to the centre to cancel.',

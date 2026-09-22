@@ -879,8 +879,11 @@ window.SBRender = (function () {
           ctx.fillStyle = 'rgba(255,255,255,0.5)';
           for (var t1 = 0; t1 < 4; t1++) { ctx.beginPath(); ctx.arc((dxr > 0 ? -1 : 1) * (R + 6 + t1 * 7), R * 0.55, 3 - t1 * 0.5, 0, TAU2); ctx.fill(); }
         }
-      } else if (kind === 'tank') {
-        // «Йети» — мохнатый снежный монстр: сгорбленный, лапы до земли, злая морда.
+      } else if (kind === 'tank' || (boss && p.bk === 'yeti')) {
+        // «Йети» — мохнатый снежный монстр: сгорбленный, лапы до земли, злая морда. Босс-«вожак»
+        // (bossKind 'yeti') рисуется этой же моделью, а не общим сугробом-«снеговиком» ниже —
+        // раньше bk с сервера просто не читался тут, и любой босс выглядел как «Снеговик-голем»
+        // независимо от никнейма (нашли по репорту: «Йети-вожак» со скином голема).
         var dxy = rc.prevX == null ? 0 : p.x - rc.prevX; rc.prevX = p.x;
         var FUR = dead >= 0 ? '#c2cad2' : '#eef4f8', FINK = dead >= 0 ? '#4a525c' : '#26323e';
         var sway = Math.sin(now * 0.003 + rc.ph) * 0.05 + (dxy > 0.4 ? 0.05 : dxy < -0.4 ? -0.05 : 0);
@@ -941,6 +944,18 @@ window.SBRender = (function () {
           ctx.globalAlpha = 0.5 * (1 - hitT); ctx.fillStyle = '#fff';
           furPath(ctx, bcx, bcy, bw * 1.05, bh * 1.05, 20, 0.14); ctx.fill(); ctx.globalAlpha = 1;
         }
+        if (boss) {
+          // Корона и ярость 2-й фазы — те же, что у голема (см. ниже), но над головой йети.
+          var ycrY = hy - hr * 1.05, yrage = p.bph === 2;
+          ctx.fillStyle = '#bfe6f5'; ctx.strokeStyle = FINK; ctx.lineWidth = 2;
+          for (var yc = -1; yc <= 1; yc++) { var ychh = yc === 0 ? hr * 0.36 : hr * 0.23; ctx.beginPath(); ctx.moveTo(yc * hr * 0.32 - hr * 0.09, ycrY); ctx.lineTo(yc * hr * 0.32, ycrY - ychh); ctx.lineTo(yc * hr * 0.32 + hr * 0.09, ycrY); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+          if (yrage) {
+            ctx.strokeStyle = 'rgba(255,90,60,0.85)'; ctx.lineWidth = 2; ctx.shadowColor = '#ff5a3c'; ctx.shadowBlur = 5;
+            for (var ycr = 0; ycr < 5; ycr++) { var ycra = ycr * 1.4; ctx.beginPath(); ctx.moveTo(0, hy - hr * 0.9); ctx.lineTo(Math.cos(ycra) * hr * 0.8, hy - hr * 0.9 + Math.sin(ycra) * hr * 0.8); ctx.stroke(); }
+            ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(180,210,240,0.7)';
+            for (var ysh = 0; ysh < 4; ysh++) { var ysa = now * 0.001 + ysh * TAU2 / 4; ctx.beginPath(); ctx.arc(Math.cos(ysa) * (r + 16), hy + Math.sin(ysa) * (r + 16) * 0.5, 3, 0, TAU2); ctx.fill(); }
+          }
+        }
       } else {
         rc.prevX = p.x;
         var n = boss ? 4 : 3;
@@ -984,7 +999,7 @@ window.SBRender = (function () {
           }
         }
       }
-      if (hitT >= 0 && kind !== 'tank') {
+      if (hitT >= 0 && kind !== 'tank' && !(boss && p.bk === 'yeti')) {
         ctx.globalAlpha = 0.5 * (1 - hitT); ctx.fillStyle = '#fff';
         ctx.beginPath(); ctx.arc(0, -r, r * 1.2, 0, TAU2); ctx.fill(); ctx.globalAlpha = 1;
         ctx.fillStyle = MAT.fill; ctx.strokeStyle = MAT.ink; ctx.lineWidth = 2;
@@ -1141,7 +1156,7 @@ window.SBRender = (function () {
       var lb = labelOf(p, isMe, myTeam);
       // Подпись встаёт НАД макушкой, а не над центром бойца: модели разной высоты (риг втрое
       // выше прежнего кружка, Йети и босс ещё выше), и от центра ник с полоской ложились на лицо.
-      var above = golemKind === 'boss' ? r * 4.6 : golemKind === 'tank' ? r * 2.5
+      var above = golemKind === 'boss' ? (p.bk === 'yeti' ? r * 2.6 : r * 4.6) : golemKind === 'tank' ? r * 2.5
                 : golemKind === 'roller' ? r * 1.2
                 : (useRig && Rig.topOf ? Rig.topOf(r, p.role, RIG_SCALE) - r * 0.9 : r + 4);
       // Свой боезапас идёт третьей строкой стека, поэтому весь стек поднимается на её высоту:

@@ -211,9 +211,19 @@ func (m *Match) Replace(team string, index int, playerID, nick, rank string, con
 		return ErrMatchOver
 	}
 	// Запись игрока, который вышел в лобби или потерял связь, входу не мешает — он возвращается.
+	// Если он при этом садится за ДРУГОГО бойца (сменил слот в комнате, пока матч шёл без него),
+	// прежний слот освобождаем от его ника — иначе тот остаётся ботом с именем игрока навсегда,
+	// и в составе матча один человек выглядит как два разных: активный и «завис ботом».
 	if h, ok := m.humans[playerID]; ok {
 		if h.conn != nil && !h.left {
 			return ErrAlreadyIn
+		}
+		for i := range m.Players {
+			if m.Players[i].ID == h.simID {
+				m.Players[i].Nick = "Бот"
+				m.Players[i].Rank = ""
+				break
+			}
 		}
 		delete(m.humans, playerID)
 	}

@@ -1325,7 +1325,13 @@
       for (var i = 0; i < 3; i++) pips += '<span class="pip ' + (i < p.hp ? 'on ' + p.team.toLowerCase() : '') + '"></span>';
       var cls = 'charname' + (p.id === app.game.meId ? ' me' : '') + (p.bot ? ' bot' : '');
       var lives = (pve && p.team === 'A' && p.lives != null) ? ' <span class="lives">♥' + p.lives + '</span>' : '';
-      var name = escapeHtml(nickOf(p)) + ' · ' + t(p.role) + (p.id === app.game.meId ? ' ' + t('(вы)') : '') + lives;
+      // Ник ушедшего в лобби человека остаётся у бойца (это позволяет вернуться за него же), но
+      // без пометки бот-строка неотличима от живого игрока — путает, будто это два разных
+      // человека. У ботов «с рождения» (добор пустых слотов) ник и так «Бот N»/«Союзник N» —
+      // проверяем сырой p.nick (до перевода I18n.nick), второй раз не подписываем.
+      var isGenericBot = /^(Бот|Союзник) \d+$/.test(p.nick);
+      var botMark = (p.bot && !isGenericBot) ? ' <span class="botMark">' + t('(бот)') + '</span>' : '';
+      var name = escapeHtml(nickOf(p)) + botMark + ' · ' + t(p.role) + (p.id === app.game.meId ? ' ' + t('(вы)') : '') + lives;
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'
         : '<div class="charrow"><span class="' + cls + '">' + name + '</span><span class="pips">' + pips + '</span></div>';
     }
@@ -1488,14 +1494,16 @@
     clearTimeout(zonesHintTimer);
     clearTimeout(abilityHintTimer);
     $('abilityHint').classList.remove('faded');
+    // Шапка (угол с пингом) в бою на ПК не скрыта, но там же в углу — кнопка «Выйти» из игровой
+    // панели, и они наезжали друг на друга. Пинг переезжает в игровую панель, к зелёной точке —
+    // как и раньше было заведено для тача (там угол скрыт целиком), теперь это общее место в бою.
+    $('gameConnSlot').appendChild($('connState'));
     if (isTouch) {
       touchLayer.classList.add('showZones');
       zonesHintTimer = setTimeout(function () { touchLayer.classList.remove('showZones'); }, 4000);
       // Подсказка о способности лежит поверх арены — гасим, чтобы не мешала. Отдельного тоста
       // больше нет: он дублировал ровно этот текст.
       abilityHintTimer = setTimeout(function () { $('abilityHint').classList.add('faded'); }, 7000);
-      // В сенсорном бою шапка скрыта, поэтому точка соединения с пингом переезжает в панель.
-      $('gameConnSlot').appendChild($('connState'));
       if (Device.isPortrait() && !sessionFlag('sb.portraitHint')) toast(t('В горизонтальном положении телефона играть удобнее.'));
     }
     goto('game');
