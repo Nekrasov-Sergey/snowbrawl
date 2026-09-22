@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	mrand "math/rand/v2"
 	"sync"
 	"time"
 
@@ -65,6 +66,7 @@ type Options struct {
 
 type human struct {
 	id        string // id сессии игрока
+	nick      string // ник игрока: у бойца его сменяет имя бота, когда игрок уходит в лобби
 	simID     string // id бойца в симуляции; отличается от id, если игрок подсел на место бота
 	team      string
 	conn      session.Sender
@@ -90,7 +92,7 @@ type Match struct {
 	mu       sync.Mutex
 	sim      *sim.Match
 	humans   map[string]*human
-	origNick map[string]string // ID бойца -> исходный ник (только для тех, кто родился ботом)
+	origNick map[string]string // ID бойца -> ник бота слота: родной или выданный, когда ушёл человек
 	tick     int
 	done     bool
 	result   Result
@@ -143,9 +145,9 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 	for _, p := range players {
 		if !p.Bot {
 			// bot=true до Attach
-			m.humans[p.ID] = &human{id: p.ID, simID: p.ID, team: p.Team, lastInput: now, bot: true}
+			m.humans[p.ID] = &human{id: p.ID, nick: p.Nick, simID: p.ID, team: p.Team, lastInput: now, bot: true}
 		} else {
-			// Родной пронумерованный ник слота («Бот 2», «Союзник 1») — единственное место, где он
+			// Родной ник слота («Бот Сугроб», «Союзник Иней») — единственное место, где он
 			// хранится отдельно от Players[i].Nick. Нужен, чтобы вернуть его, если человек, вошедший
 			// за этого бота, потом пересядет на другой слот (см. Replace).
 			m.origNick[p.ID] = p.Nick
@@ -219,24 +221,14 @@ func (m *Match) Replace(team string, index int, playerID, nick, rank string, con
 	// Запись игрока, который вышел в лобби или потерял связь, входу не мешает — он возвращается.
 	// Если он при этом садится за ДРУГОГО бойца (сменил слот в комнате, пока матч шёл без него),
 	// прежний слот освобождаем от его ника — иначе тот остаётся ботом с именем игрока навсегда,
-	// и в составе матча один человек выглядит как два разных: активный и «завис ботом». Ник слота
-	// возвращаем к тому, с которым слот родился («Бот 2», «Союзник 1») — если слот с самого начала
-	// матча занимал человек (а не бот), пронумерованного ника у него не было, тогда — безликий
-	// «Бот»/«Союзник».
+	// и в составе матча один человек выглядит как два разных: активный и «завис ботом». Ушедшему
+	// в лобби слот уже переименовал Leave, а после обрыва связи ник ещё игрока — меняем его здесь.
 	if h, ok := m.humans[playerID]; ok {
 		if h.conn != nil && !h.left {
 			return ErrAlreadyIn
 		}
-		for i := range m.Players {
-			if m.Players[i].ID == h.simID {
-				if orig, ok := m.origNick[h.simID]; ok {
-					m.Players[i].Nick = orig
-				} else {
-					m.Players[i].Nick = fallbackBotNick(m.GameMode)
-				}
-				m.Players[i].Rank = ""
-				break
-			}
+		if !h.left {
+			m.renameToBot(h.simID)
 		}
 		delete(m.humans, playerID)
 	}
@@ -258,7 +250,7 @@ func (m *Match) Replace(team string, index int, playerID, nick, rank string, con
 		delete(m.humans, h.id) // слот освободил тот, кто вышел в лобби или потерял связь
 	}
 	now := m.opts.Now()
-	h := &human{id: playerID, simID: simID, team: team, conn: conn, lastInput: now, bot: true}
+	h := &human{id: playerID, nick: nick, simID: simID, team: team, conn: conn, lastInput: now, bot: true}
 	m.humans[playerID] = h
 	m.setBot(h, false)
 	m.Players[idx].Nick = nick
@@ -268,12 +260,34 @@ func (m *Match) Replace(team string, index int, playerID, nick, rank string, con
 	return nil
 }
 
-// fallbackBotNick — ник слота, у которого нет сохранённого исходного (родился человеком, не ботом).
-func fallbackBotNick(gameMode string) string {
-	if gameMode != "" && gameMode != "pvp" {
-		return "Союзник"
+// renameToBot отдаёт бойцу ник бота: тот, с которым слот родился, а если слот с начала матча
+// занимал человек — свободное имя из пула. Состав не рассылает. Вызывать под m.mu.
+func (m *Match) renameToBot(simID string) {
+	p := m.playerByID(simID)
+	if p == nil {
+		return
 	}
-	return "Бот"
+	if orig, ok := m.origNick[simID]; ok {
+		p.Nick = orig
+	} else {
+		used := map[string]bool{}
+		for _, q := range m.Players {
+			used[q.Nick] = true
+		}
+		p.Nick = PickBotNick(m.GameMode, used, mrand.IntN)
+		m.origNick[simID] = p.Nick // вернётся и уйдёт снова — останется тем же ботом
+	}
+	p.Rank = ""
+}
+
+// playerByID — боец по id в симуляции. Вызывать под m.mu.
+func (m *Match) playerByID(simID string) *protocol.MatchPlayer {
+	for i := range m.Players {
+		if m.Players[i].ID == simID {
+			return &m.Players[i]
+		}
+	}
+	return nil
 }
 
 // Ошибки входа в идущий матч.
@@ -370,7 +384,8 @@ func (m *Match) Detach(playerID string) {
 	}
 }
 
-// Leave — игрок ушёл навсегда.
+// Leave — игрок ушёл из боя (в лобби или насовсем). Бойца сразу переименовываем в бота, чтобы
+// все в матче видели, что за него играет бот; вернётся — Replace поставит его ник обратно.
 func (m *Match) Leave(playerID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -378,7 +393,11 @@ func (m *Match) Leave(playerID string) {
 		h.conn = nil
 		h.left = true
 		m.setBot(h, true)
-		m.releaseSlot(h.simID)
+		m.renameToBot(h.simID)
+		if p := m.playerByID(h.simID); p != nil {
+			p.Bot = true
+		}
+		m.broadcast(m.rosterMessage())
 	}
 }
 
@@ -453,6 +472,7 @@ func (m *Match) Info() Info {
 	for _, p := range m.Players {
 		pi := PlayerInfo{ID: p.ID, Nick: p.Nick, Team: p.Team, Role: p.Role, Bot: p.Bot}
 		if h := m.humanBySim(p.ID); h != nil {
+			pi.Nick = h.nick // админке нужен ник игрока, а не имя бота, которое у бойца после ухода
 			pi.BotNow = h.bot
 			pi.Left = h.left
 			pi.Online = h.conn != nil && !h.conn.Closed()

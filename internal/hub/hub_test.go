@@ -1089,11 +1089,10 @@ func TestJoinRunningMatchTakesOwnSlot(t *testing.T) {
 	}
 }
 
-// TestRejoinDifferentSlotClearsOldNick — игрок выходит из боя (место остаётся ботом с его
-// ником, см. TestJoinRunningMatchTakesOwnSlot), но вместо возврата на своё место пересаживается
-// в комнате на чужой слот и входит туда. Прежний слот обязан потерять его ник (стать обычным
-// «Бот») — иначе один человек виден в составе дважды: один раз как бот с его именем на старом
-// месте, второй раз как активный боец на новом.
+// TestRejoinDifferentSlotClearsOldNick — игрок выходит из боя: место сразу становится ботом
+// с родным ником слота, чтобы все в матче видели, что играет бот. Потом он вместо возврата на
+// своё место пересаживается в комнате на чужой слот и входит туда. Его ник должен быть в составе
+// ровно один раз — на новом месте, а прежний слот остаться ботом с тем же родным ником.
 func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 	t.Parallel()
 	s := newServer(t, nil)
@@ -1130,8 +1129,8 @@ func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 		t.Fatalf("no spare bot slot to move to: %+v", msGuest.Players)
 	}
 	// Слот, который гость займёт, родился ботом при старте матча (гостя тогда ещё не было в
-	// комнате) — у него был свой пронумерованный ник ("Бот N"). Его и должен получить обратно
-	// покинутый слот, а не безликое "Бот".
+	// комнате) — у него был свой ник бота ("Бот Сугроб"). Его и должен получить обратно
+	// покинутый слот, а не случайное новое имя.
 	var origMineNick string
 	for _, p := range ms.Players {
 		if p.Team == mine.Team && p.Index == mine.Index {
@@ -1143,7 +1142,7 @@ func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 		t.Fatalf("could not find guest's bot-born original nick in initial roster: %+v", ms.Players)
 	}
 
-	// Выходим из боя (место становится ботом с ником "Гость") и пересаживаемся в комнате
+	// Выходим из боя (место сразу становится ботом с родным ником) и пересаживаемся в комнате
 	// на чужой (пока ботовский) слот, вместо возврата на своё место.
 	guest.send(protocol.CMatchLeave, nil)
 	guest.waitRoom("back in lobby", func(st protocol.RoomState) bool {
@@ -1157,8 +1156,8 @@ func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 	var afterLeave protocol.MatchRoster
 	host.expect(protocol.SMatchRoster, &afterLeave)
 	for _, p := range afterLeave.Players {
-		if p.ID == mine.ID && (!p.Bot || p.Nick != "Гость") {
-			t.Fatalf("old slot must stay a bot named after the player right after leaving: %+v", p)
+		if p.ID == mine.ID && (!p.Bot || p.Nick != origMineNick) {
+			t.Fatalf("old slot must get its bot name %q right after leaving: %+v", origMineNick, p)
 		}
 	}
 
@@ -1199,8 +1198,8 @@ func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 
 // TestRejoinDifferentSlotFallsBackToPlainBotName — слот, который освобождает вернувшийся игрок,
 // может быть с самого начала матча его собственным (не ботом: он уже сидел в комнате до старта).
-// У такого слота нет сохранённого пронумерованного ника — освобождённый слот обязан стать просто
-// «Бот», без падения и без дублирования чужого номера.
+// У такого слота нет родного ника бота — уход в лобби сразу выдаёт ему свободное имя из пула
+// («Бот Сугроб»), не совпадающее с другими бойцами, и оно остаётся за слотом после пересадки.
 func TestRejoinDifferentSlotFallsBackToPlainBotName(t *testing.T) {
 	t.Parallel()
 	s := newServer(t, nil)
@@ -1243,6 +1242,20 @@ func TestRejoinDifferentSlotFallsBackToPlainBotName(t *testing.T) {
 	})
 	var afterLeave protocol.MatchRoster
 	host.expect(protocol.SMatchRoster, &afterLeave)
+	leftNick := ""
+	seen := map[string]bool{}
+	for _, p := range afterLeave.Players {
+		if seen[p.Nick] {
+			t.Fatalf("bot name %q is used twice: %+v", p.Nick, afterLeave.Players)
+		}
+		seen[p.Nick] = true
+		if p.ID == mine.ID {
+			leftNick = p.Nick
+			if !p.Bot || !strings.HasPrefix(p.Nick, "Бот ") || p.Nick == "Гость" {
+				t.Fatalf("slot of a player who left to the lobby must get a bot name at once, got: %+v", p)
+			}
+		}
+	}
 
 	guest.send(protocol.CRoomSlot, protocol.RoomSlot{Team: otherTeam, Index: otherIndex})
 	guest.waitRoom("moved to another slot", func(st protocol.RoomState) bool {
@@ -1261,8 +1274,8 @@ func TestRejoinDifferentSlotFallsBackToPlainBotName(t *testing.T) {
 
 	for _, p := range final.Players {
 		if p.ID == mine.ID {
-			if !p.Bot || p.Nick != "Бот" {
-				t.Fatalf("slot that started as a human must fall back to plain %q, got: %+v", "Бот", p)
+			if !p.Bot || p.Nick != leftNick {
+				t.Fatalf("slot that started as a human must keep bot name %q, got: %+v", leftNick, p)
 			}
 			return
 		}

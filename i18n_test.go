@@ -10,9 +10,12 @@ package snowbrawl_test
 import (
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/match"
 )
 
 var (
@@ -36,8 +39,31 @@ var simExtras = []string{
 	"Раннер", "Танк", "Снайпер", "Бомбер", "Фризер", "Щит",
 	"Рой", "Йети", "Ком", "Снежколёт", "Вьюга", "Йети-вожак", "Снеговик-голем",
 	"Соперник", "Вы",
-	"Бот {n}", "Союзник {n}", "Игрок {n}", // имена, которые придумывает сервер, см. I18n.nick
-	"Бот", "Союзник", // тот же ник без номера — слот, освобождённый пересевшим игроком (match.go)
+	"Бот {name}", "Союзник {name}", "Игрок {n}", // имена, которые придумывает сервер, см. I18n.nick
+}
+
+var reBotNames = regexp.MustCompile(`(?s)var BOT_NAMES = \[(.*?)\];`)
+
+// botNames — имена ботов из web/client/i18n.js (I18n.BOT_NAMES): их показывает I18n.nick.
+func botNames(t *testing.T) []string {
+	t.Helper()
+	m := reBotNames.FindStringSubmatch(read(t, "web/client/i18n.js"))
+	if m == nil {
+		t.Fatal("в i18n.js не найден BOT_NAMES — тест устарел, поправьте регулярку")
+	}
+	var out []string
+	for _, q := range reQuoted.FindAllStringSubmatch(m[1], -1) {
+		out = append(out, q[1])
+	}
+	return out
+}
+
+// Пул имён ботов живёт в двух местах: сервер раздаёт ники, клиент их переводит и берёт в
+// оффлайне. Разъедутся — у части ботов пропадёт перевод.
+func TestBotNamesMatchServer(t *testing.T) {
+	if got := botNames(t); !slices.Equal(got, match.BotNames) {
+		t.Errorf("I18n.BOT_NAMES в web/client/i18n.js не совпадает с match.BotNames:\n  клиент: %q\n  сервер: %q", got, match.BotNames)
+	}
 }
 
 func read(t *testing.T, path string) string {
@@ -120,6 +146,9 @@ func wantedKeys(t *testing.T) *keySet {
 		keys.add(q[1])
 	}
 	for _, s := range simExtras {
+		keys.add(s)
+	}
+	for _, s := range botNames(t) {
 		keys.add(s)
 	}
 
