@@ -297,10 +297,9 @@ window.SBRender = (function () {
       rc.prevX = p.x;
       var throwT = (now - rc.throwAt) / THROW_MS;
       var abilT = (now - rc.abilAt) / ABIL_MS;
-      // Труп тает 4 с и стартует полупрозрачным — и у PvE-мобов, и у союзников в PvE (p.lives —
-      // признак члена пати; вплотную до конца жизней он лежит так же, как враг). Боец PvP,
-      // где p.lives нет, просто валится до конца раунда.
-      var dissolve = !!p.et || p.lives != null;
+      // Труп тает 4 с и стартует полупрозрачным — одинаково у PvE-мобов, союзников в PvE и
+      // бойцов PvP (раньше PvP-труп просто лежал до конца раунда без затухания).
+      var dissolve = true;
       var koMs = dissolve ? 4000 : (Sim.KO_ANIM_MS || 500), hitAge = snap.time - p.hitAt;
       var mode = 'idle';
       if (p.koed) mode = 'ko';
@@ -1016,9 +1015,9 @@ window.SBRender = (function () {
       var aimX = isMe && local && local.charging ? local.aimX : p.aimX;
       var aimY = isMe && local && local.charging ? local.aimY : p.aimY;
       var alive = p.hp > 0 && !p.koed;
-      // Труп истаял (см. koFade / drawGolem, 4 с) — кадр на него не тратим. У союзника в PvE
-      // (p.lives не null) действует то же правило, что у врага (p.et).
-      if (p.koed && (p.et || p.lives != null) && (snap.time - (p.koAt || snap.time)) > 4400) return;
+      // Труп истаял (см. koFade / drawGolem, 4 с) — кадр на него не тратим. Правило общее для
+      // PvE-моба, союзника в PvE (p.lives) и бойца PvP.
+      if (p.koed && (snap.time - (p.koAt || snap.time)) > 4400) return;
       if (p.moving && alive) vy -= Math.abs(Math.sin(p.anim)) * 2;
       if (charging) {
         var dx = aimX - p.x, dy = aimY - p.y, d = Math.hypot(dx, dy) || 1;
@@ -1032,14 +1031,15 @@ window.SBRender = (function () {
 
       ctx.save();
       if (p.koed && !useRig && !golemKind) {
-        var isDissolve = !!p.et || p.lives != null;
-        var progress = Math.min(1, (snap.time - p.koAt) / (isDissolve ? 4000 : Sim.KO_ANIM_MS));
-        ctx.globalAlpha = 1 - (isDissolve ? 0.6 : 0.22) * progress; // враг/союзник PvE тает, боец PvP только тускнеет
+        // Труп тает 4 с у всех, кто попадает в эту ветку (без рига и не голем) — см. dissolve в
+        // rigStateFor, здесь та же логика для не-ригованной модели.
+        var progress = Math.min(1, (snap.time - p.koAt) / 4000);
+        ctx.globalAlpha = 1 - 0.6 * progress;
         ctx.translate(p.x, p.y); ctx.rotate(progress * Math.PI / 2.2); ctx.translate(-p.x, -p.y);
       }
       ctx.beginPath(); ctx.ellipse(p.x, p.y + r * 0.6, r * 0.9, r * 0.35, 0, 0, Math.PI * 2);
-      // Тень тает вместе с трупом (тело гасит koFade/drawGolem) — у врага и у союзника в PvE.
-      var shA = (p.koed && (p.et || p.lives != null)) ? 0.15 * Math.max(0, 1 - (snap.time - (p.koAt || snap.time)) / 4000) : 0.15;
+      // Тень тает вместе с трупом (тело гасит koFade/drawGolem) — у любого павшего.
+      var shA = p.koed ? 0.15 * Math.max(0, 1 - (snap.time - (p.koAt || snap.time)) / 4000) : 0.15;
       ctx.fillStyle = 'rgba(0,0,0,' + shA + ')'; ctx.fill();
 
       // Щит, пассив «Закалка»: свечение по контуру модели (drawAuraRig), рисуется под ригом.
@@ -1151,6 +1151,18 @@ window.SBRender = (function () {
         ctx.globalAlpha = 0.35 + 0.15 * Math.sin(snap.time / 90);
         ctx.beginPath(); ctx.arc(vx, vy, r + 14, 0, Math.PI * 2);
         ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
+        ctx.restore();
+      }
+      // Неуязвимость (рывок или возрождение в PvE, см. p.iframeUntil в sim.js) — отдельное
+      // пульсирующее кольцо поверх модели, видное всем: иначе противник не поймёт, почему урон
+      // не проходит, особенно на все 3 с после возрождения в PvE.
+      if (p.iframe && alive) {
+        ctx.save();
+        ctx.globalAlpha = 0.55 + 0.25 * Math.sin(snap.time / 130);
+        ctx.beginPath(); ctx.arc(vx, vy, r + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = '#bfe6f5'; ctx.lineWidth = 3;
+        ctx.shadowColor = '#bfe6f5'; ctx.shadowBlur = 6;
+        ctx.stroke();
         ctx.restore();
       }
       var lb = labelOf(p, isMe, myTeam);

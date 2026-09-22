@@ -1329,9 +1329,11 @@
       var lives = (pve && p.team === 'A' && p.lives != null) ? ' <span class="lives">♥' + p.lives + '</span>' : '';
       // Ник ушедшего в лобби человека остаётся у бойца (это позволяет вернуться за него же), но
       // без пометки бот-строка неотличима от живого игрока — путает, будто это два разных
-      // человека. У ботов «с рождения» (добор пустых слотов) ник и так «Бот N»/«Союзник N» —
-      // проверяем сырой p.nick (до перевода I18n.nick), второй раз не подписываем.
-      var isGenericBot = /^(Бот|Союзник) \d+$/.test(p.nick);
+      // человека. У ботов «с рождения» (добор пустых слотов) ник и так «Бот N»/«Союзник N», а у
+      // слота, освобождённого пересевшим в другое место игроком, может не быть номера («Бот» без
+      // цифры — см. match.go, fallbackBotNick) — проверяем сырой p.nick (до перевода I18n.nick),
+      // второй раз не подписываем.
+      var isGenericBot = /^(Бот|Союзник)( \d+)?$/.test(p.nick);
       var botMark = (p.bot && !isGenericBot) ? ' <span class="botMark">' + t('(бот)') + '</span>' : '';
       var name = escapeHtml(nickOf(p)) + botMark + ' · ' + t(p.role) + (p.id === app.game.meId ? ' ' + t('(вы)') : '') + lives;
       return right ? '<div class="charrow right"><span class="pips">' + pips + '</span><span class="' + cls + '" style="text-align:right">' + name + '</span></div>'

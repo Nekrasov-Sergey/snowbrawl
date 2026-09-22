@@ -62,12 +62,16 @@ window.SBI18n = (function () {
     { re: /^Союзник (\d+)$/, key: 'Союзник {n}' },
     { re: /^Игрок (\d+)$/, key: 'Игрок {n}' }
   ];
+  // Слот, освобождённый пересевшим на другое место игроком, может остаться без номера
+  // (fallbackBotNick в match.go) — переводим и голые «Бот»/«Союзник» отдельно.
+  var NICK_PLAIN = { 'Бот': 'Бот', 'Союзник': 'Союзник' };
   function nick(s) {
     if (cur === 'ru' || !s) return s;
     for (var i = 0; i < NICK_PATTERNS.length; i++) {
       var m = NICK_PATTERNS[i].re.exec(s);
       if (m) return t(NICK_PATTERNS[i].key, { n: m[1] });
     }
+    if (NICK_PLAIN[s]) return t(NICK_PLAIN[s]);
     return s === 'Вы' || s === 'Соперник' ? t(s) : s;
   }
 

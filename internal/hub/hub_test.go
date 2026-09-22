@@ -1129,6 +1129,19 @@ func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 	if !foundOther {
 		t.Fatalf("no spare bot slot to move to: %+v", msGuest.Players)
 	}
+	// Слот, который гость займёт, родился ботом при старте матча (гостя тогда ещё не было в
+	// комнате) — у него был свой пронумерованный ник ("Бот N"). Его и должен получить обратно
+	// покинутый слот, а не безликое "Бот".
+	var origMineNick string
+	for _, p := range ms.Players {
+		if p.Team == mine.Team && p.Index == mine.Index {
+			origMineNick = p.Nick
+			break
+		}
+	}
+	if origMineNick == "" {
+		t.Fatalf("could not find guest's bot-born original nick in initial roster: %+v", ms.Players)
+	}
 
 	// Выходим из боя (место становится ботом с ником "Гость") и пересаживаемся в комнате
 	// на чужой (пока ботовский) слот, вместо возврата на своё место.
@@ -1173,15 +1186,88 @@ func TestRejoinDifferentSlotClearsOldNick(t *testing.T) {
 			}
 		}
 		if p.ID == mine.ID {
-			botNamed = p.Bot && p.Nick == "Бот"
+			botNamed = p.Bot && p.Nick == origMineNick
 		}
 	}
 	if nicked != 1 {
 		t.Fatalf("guest's nick must appear exactly once in the roster, got %d: %+v", nicked, final.Players)
 	}
 	if !botNamed {
-		t.Fatalf("abandoned old slot must fall back to a plain bot name: %+v", final.Players)
+		t.Fatalf("abandoned old slot must fall back to its original bot name %q: %+v", origMineNick, final.Players)
 	}
+}
+
+// TestRejoinDifferentSlotFallsBackToPlainBotName — слот, который освобождает вернувшийся игрок,
+// может быть с самого начала матча его собственным (не ботом: он уже сидел в комнате до старта).
+// У такого слота нет сохранённого пронумерованного ника — освобождённый слот обязан стать просто
+// «Бот», без падения и без дублирования чужого номера.
+func TestRejoinDifferentSlotFallsBackToPlainBotName(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+	guest := s.connect(t, "Гость", "")
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+	guest.send(protocol.CRoomJoin, protocol.RoomJoin{Code: rs.Code})
+	guest.expect(protocol.SRoomState, &rs)
+
+	host.send(protocol.CRoomReady, protocol.RoomReady{Ready: true})
+	host.waitRoom("host ready", func(st protocol.RoomState) bool { return st.ReadyCount == 1 })
+	guest.send(protocol.CRoomReady, protocol.RoomReady{Ready: true})
+	var msHost, msGuest protocol.MatchStart
+	host.expect(protocol.SMatchStart, &msHost)
+	guest.expect(protocol.SMatchStart, &msGuest)
+
+	var mine protocol.MatchPlayer
+	otherTeam, otherIndex, foundOther := "", -1, false
+	for _, p := range msGuest.Players {
+		if p.ID == msGuest.YourID {
+			mine = p
+		} else if p.Nick != "Хост" {
+			otherTeam, otherIndex, foundOther = p.Team, p.Index, true
+		}
+	}
+	if !foundOther {
+		t.Fatalf("no spare bot slot to move to: %+v", msGuest.Players)
+	}
+
+	guest.send(protocol.CMatchLeave, nil)
+	guest.waitRoom("back in lobby", func(st protocol.RoomState) bool {
+		for _, p := range st.Players {
+			if p.ID == guest.ID {
+				return !p.InMatch
+			}
+		}
+		return false
+	})
+	var afterLeave protocol.MatchRoster
+	host.expect(protocol.SMatchRoster, &afterLeave)
+
+	guest.send(protocol.CRoomSlot, protocol.RoomSlot{Team: otherTeam, Index: otherIndex})
+	guest.waitRoom("moved to another slot", func(st protocol.RoomState) bool {
+		for _, p := range st.Players {
+			if p.ID == guest.ID {
+				return p.Team == otherTeam && p.Index == otherIndex
+			}
+		}
+		return false
+	})
+
+	guest.send(protocol.CMatchJoin, nil)
+	guest.expect(protocol.SMatchStart, &msGuest)
+	var final protocol.MatchRoster
+	host.expect(protocol.SMatchRoster, &final)
+
+	for _, p := range final.Players {
+		if p.ID == mine.ID {
+			if !p.Bot || p.Nick != "Бот" {
+				t.Fatalf("slot that started as a human must fall back to plain %q, got: %+v", "Бот", p)
+			}
+			return
+		}
+	}
+	t.Fatalf("original slot vanished from roster: %+v", final.Players)
 }
 
 func TestRoomListSortsOpenAndFreeFirst(t *testing.T) {
