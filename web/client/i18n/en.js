@@ -278,6 +278,7 @@ window.SBI18nEN = {
   'Бот {n}': 'Bot {n}',
   'Союзник {n}': 'Ally {n}',
   'Игрок {n}': 'Player {n}',
+  'Союзник': 'Ally',
   'Вы': 'You',
   'Соперник': 'Opponent',
 

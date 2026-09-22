@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.15.0';
+  var SIM_VERSION = '1.16.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -36,6 +36,7 @@
   var WAVE_BREAK_MS = 12000;             // пауза между волнами
   var MAX_ENEMIES = 24;                  // потолок одновременно живых врагов (размер снапшота, стоимость goja)
   var PVE_RESPAWN_MS = 2500;             // задержка возрождения члена пати, пока есть жизни
+  var PVE_RESPAWN_IFRAME_MS = 3000;      // неуязвимость после возрождения — чтобы не фармили у базы
   var PVE_LIVES = 3;                     // жизни на волну
   var PVE_FIRST_WAVE_MS = 1500;          // первая волна через столько после старта
   var SNOWMAN_HP = 40;
@@ -1282,11 +1283,15 @@
     return pveIsCampaignLevel(state) ? PVE_LEVELS[state.pve.level].arena
                                      : PVE_LEVELS[PVE_LEVELS.length - 1].arena;
   }
-  function pveSpawnPoint(state, idx) {
-    var team = teamMembers(state, 'A');
-    var ys = spawnYs(team.length || 1);
-    var x = state.pve.objective === 'defense' ? 180 : 160;
-    return { x: x, y: ys[Math.min(idx, ys.length - 1)] };
+  // Случайная точка в прямоугольнике базы (не фиксированный слот) — иначе противник зажимает
+  // одну и ту же точку появления и фармит фраги (с 1.16.0, вместе с PVE_RESPAWN_IFRAME_MS).
+  var PVE_BASE_HALF_W = 50, PVE_BASE_MARGIN_Y = 110;
+  function pveSpawnPoint(state) {
+    var cx = state.pve.objective === 'defense' ? 180 : 160;
+    var rng = state.rng;
+    var x = cx - PVE_BASE_HALF_W + rng.next() * PVE_BASE_HALF_W * 2;
+    var y = PVE_BASE_MARGIN_Y + rng.next() * (H - PVE_BASE_MARGIN_Y * 2);
+    return { x: x, y: y };
   }
   function teamMembers(state, team) {
     var r = [];
@@ -1315,7 +1320,7 @@
   function respawnParty(state) {
     var team = teamMembers(state, 'A');
     for (var i = 0; i < team.length; i++) {
-      var p = team[i], sp = pveSpawnPoint(state, i);
+      var p = team[i], sp = pveSpawnPoint(state);
       p.hp = 3; p.koed = false; p.stunTimer = 0; p.charging = false; p.lives = PVE_LIVES;
       p.respawnAt = 0; p.dashUntil = 0; p.armedSpecial = null; p.pendingSpecialThrow = false;
       p.reloadUntil = 0; p.iframeUntil = 0; p.bubble = p.role === 'Щит';
@@ -1425,8 +1430,8 @@
         emit(state, { type: 'partyDown', id: p.id, lives: p.lives });
       }
       if (p.koed && p.respawnAt > 0 && state.time >= p.respawnAt) {
-        var sp = pveSpawnPoint(state, i);
-        p.hp = 3; p.koed = false; p.stunTimer = 0; p.respawnAt = 0; p.iframeUntil = state.time + 1200;
+        var sp = pveSpawnPoint(state);
+        p.hp = 3; p.koed = false; p.stunTimer = 0; p.respawnAt = 0; p.iframeUntil = state.time + PVE_RESPAWN_IFRAME_MS;
         p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y }; p.bubble = p.role === 'Щит';
         // Запас — как при рестарте уровня: пока боец лежал, дозарядка не шла (она требует alive),
         // и без этого он вставал с одним зарядом, да ещё и в секунды неуязвимости.
