@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.14.0';
+  var SIM_VERSION = '1.15.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -40,6 +40,7 @@
   var PVE_FIRST_WAVE_MS = 1500;          // первая волна через столько после старта
   var SNOWMAN_HP = 40;
   var SNOWMAN_R = 26;
+  var SNOWMAN_WAVE_HEAL = 3;             // снеговик подлечивается на столько HP за каждую зачищенную волну
   var DEFENSE_AGGRO_R = 120;             // ближе — враг переключается со снеговика на игрока
   var PVE_SPAWN_X0 = 760, PVE_SPAWN_X1 = 884; // полоса появления врагов у правого края
   var CONTACT_DAMAGE_CD = 0.8;           // с, пауза контактного урона одного врага (умолч.)
@@ -1071,7 +1072,7 @@
         if (want > 0.1 && moved < want * 0.5) {
           // упёрлись в стену/край
           p.dashUntil = 0;
-          if (p.enemyType === 'roller') { p.koed = true; p.hp = 0; emit(state, { type: 'ko', targetId: p.id, x: p.x, y: p.y }); }
+          if (p.enemyType === 'roller') { p.koed = true; p.hp = 0; p.koAt = state.time; emit(state, { type: 'ko', targetId: p.id, x: p.x, y: p.y }); }
         }
       }
       return;
@@ -1453,6 +1454,7 @@
     if (pve.spawnQueue.length === 0 && aliveEnemies(state) === 0) {
       pve.wavesSurvived += 1;
       pve.bossActive = false;
+      if (pve.snowman && pve.snowman.hp > 0) pve.snowman.hp = Math.min(pve.snowman.maxHp, pve.snowman.hp + SNOWMAN_WAVE_HEAL);
       emit(state, { type: 'waveCleared', level: pve.level, wave: pve.wave });
       pve.wave += 1;
       if (pveIsCampaignLevel(state) && pve.wave > pveWaveCount(state)) {
@@ -1642,7 +1644,7 @@
       }
       if (hitSomething) {
         e.contactCdUntil = state.time + e.contactCd; // у Роя кулдаун длиннее — см. ENEMY_STATS.swarm
-        if (e.enemyType === 'roller') { e.koed = true; e.hp = 0; e.dashUntil = 0; emit(state, { type: 'ko', targetId: e.id, x: e.x, y: e.y }); }
+        if (e.enemyType === 'roller') { e.koed = true; e.hp = 0; e.koAt = state.time; e.dashUntil = 0; emit(state, { type: 'ko', targetId: e.id, x: e.x, y: e.y }); }
       }
     }
   }
