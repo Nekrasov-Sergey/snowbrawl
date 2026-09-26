@@ -1,6 +1,10 @@
 package match
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
+)
 
 // BotNames — имена ботов, одно слово в зимней тематике: ник бойца — «Бот Сугроб» в PvP и
 // «Союзник Сугроб» в PvE. Тот же список лежит в web/client/i18n.js (I18n.BOT_NAMES): там их
@@ -13,7 +17,7 @@ var BotNames = []string{
 
 // BotPrefix — первое слово ника бота: в PvP это противник или напарник-бот, в PvE — союзник.
 func BotPrefix(gameMode string) string {
-	if gameMode != "" && gameMode != "pvp" {
+	if sim.IsPvEMode(gameMode) {
 		return "Союзник"
 	}
 	return "Бот"

@@ -119,6 +119,31 @@ func TestPveRoomCapacityAndPlacement(t *testing.T) {
 	}
 }
 
+// TestDeathmatchRoomIsPvP — «Бой насмерть» — это PvP: две команды по Mode, раздел pvp, а смена
+// лимита выбиваний — тоже смена правил и снимает готовность.
+func TestDeathmatchRoomIsPvP(t *testing.T) {
+	t.Parallel()
+	r := New("1234", "h", "1.1.1.1", Config{Mode: 2, GameMode: "deathmatch", KillLimit: 10}, time.Now())
+	if r.IsPvE() || r.Section() != "pvp" || r.Capacity() != 4 {
+		t.Fatalf("deathmatch: isPvE=%v section=%q cap=%d", r.IsPvE(), r.Section(), r.Capacity())
+	}
+	if err := r.Join("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetSlot("a", "B", 1); err != nil {
+		t.Fatalf("team B slot must be allowed in deathmatch: %v", err)
+	}
+	if err := r.SetReady("a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetConfig("h", Config{Mode: 2, GameMode: "deathmatch", KillLimit: 20}, 5); err != nil {
+		t.Fatal(err)
+	}
+	if r.KillLimit != 20 || r.Member("a").Ready {
+		t.Fatalf("killLimit=%d ready=%v: смена лимита должна примениться и снять готовность", r.KillLimit, r.Member("a").Ready)
+	}
+}
+
 func TestGenerateCode(t *testing.T) {
 	t.Parallel()
 	seen := map[string]bool{}

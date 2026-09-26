@@ -131,7 +131,7 @@ window.SBRig = (function () {
     ctx.restore();
   }
 
-  // Труп (s.corpse, теперь всегда true при koed — и PvE-мобы, и бойцы PvP) тает за 4 c
+  // Труп (s.corpse, теперь всегда true при koed — и PvE-мобы, и бойцы PvP) тает за Sim.CORPSE_MS (3 c)
   // и стартует полупрозрачным, заваливаясь набок.
   function koFade(ctx, s) {
     if (!s.koT) return;

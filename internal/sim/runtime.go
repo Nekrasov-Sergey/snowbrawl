@@ -14,11 +14,12 @@ import (
 
 // Program — скомпилированный sim.js, разделяемый всеми матчами (компиляция один раз).
 type Program struct {
-	prog      *goja.Program
-	version   string
-	arenas    int
-	roles     []string
-	gameModes []string
+	prog       *goja.Program
+	version    string
+	arenas     int
+	roles      []string
+	gameModes  []string
+	killLimits []int
 }
 
 // Compile компилирует исходник sim.js и проверяет, что модуль экспортирует нужный контракт.
@@ -61,8 +62,15 @@ func Compile(src []byte) (*Program, error) {
 		}
 		p.gameModes = list
 	}
-	if p.arenas == 0 || len(p.roles) == 0 || len(p.gameModes) == 0 {
-		return nil, errors.New("sim.js: ARENAS, ALL_ROLES or GAME_MODES is empty")
+	if kl := obj.Get("DM_KILL_LIMITS"); kl != nil && !goja.IsUndefined(kl) {
+		var list []int
+		if err := vm.ExportTo(kl, &list); err != nil {
+			return nil, errors.Wrap(err, "sim.js: DM_KILL_LIMITS")
+		}
+		p.killLimits = list
+	}
+	if p.arenas == 0 || len(p.roles) == 0 || len(p.gameModes) == 0 || len(p.killLimits) == 0 {
+		return nil, errors.New("sim.js: ARENAS, ALL_ROLES, GAME_MODES or DM_KILL_LIMITS is empty")
 	}
 	return p, nil
 }
@@ -86,7 +94,7 @@ func (p *Program) HasRole(role string) bool {
 	return false
 }
 
-// GameModes возвращает список режимов игры (pvp, survival, defense).
+// GameModes возвращает список режимов игры (pvp, deathmatch, survival, defense).
 func (p *Program) GameModes() []string { return append([]string(nil), p.gameModes...) }
 
 // HasGameMode проверяет, что режим известен модулю.
@@ -97,6 +105,25 @@ func (p *Program) HasGameMode(mode string) bool {
 		}
 	}
 	return false
+}
+
+// IsPvEMode сообщает, что режим — PvE (пати против волн). Все прочие режимы — PvP двух команд:
+// классический «на выбывание» (pvp, в том числе пустой режим старых комнат) и «Бой насмерть».
+func IsPvEMode(mode string) bool { return mode == "survival" || mode == "defense" }
+
+// KillLimits возвращает варианты лимита выбиваний «Боя насмерть» (DM_KILL_LIMITS).
+func (p *Program) KillLimits() []int { return append([]int(nil), p.killLimits...) }
+
+// KillLimitFor возвращает want, если это допустимый лимит, иначе значение по умолчанию для
+// размера команд mode (1..4): DM_KILL_LIMITS[mode-1], как в dmKillLimit в sim.js.
+func (p *Program) KillLimitFor(mode, want int) int {
+	for _, v := range p.killLimits {
+		if v == want {
+			return want
+		}
+	}
+	i := min(max(mode-1, 0), len(p.killLimits)-1)
+	return p.killLimits[i]
 }
 
 func (p *Program) newVM() (*goja.Runtime, error) {
@@ -130,6 +157,7 @@ type MatchConfig struct {
 	Mode       int        `json:"mode"`
 	ArenaIndex int        `json:"arenaIndex"`
 	DurationMs int64      `json:"durationMs,omitempty"`
+	KillLimit  int        `json:"killLimit,omitempty"` // deathmatch: выбиваний команды для победы
 	Difficulty int        `json:"difficulty,omitempty"`
 	Campaign   *bool      `json:"campaign,omitempty"`
 	Pve        *PveConfig `json:"pve,omitempty"`
@@ -318,7 +346,7 @@ func (m *Match) Winner() string {
 }
 
 // Reason возвращает причину завершения из симуляции:
-// "" | "ko" | "timeout" (PvP) | "cleared" | "wiped" | "objective" | "expired" (PvE).
+// "" | "ko" | "timeout" (PvP) | "kills" (deathmatch) | "cleared" | "wiped" | "objective" | "expired" (PvE).
 func (m *Match) Reason() string {
 	if m.reason == nil {
 		return ""

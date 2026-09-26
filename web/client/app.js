@@ -209,9 +209,6 @@
       // Чат виден на всех экранах вне боя, а сообщения приходят и пока смотришь список комнат:
       // при переходе лог надо дорисовать, иначе он остаётся на том, что было видно раньше.
       if (app.chat.open) { chatMarkRead(chatFeed(app.chat.tab)); chatBadge(); chatRender(); }
-      // Индикатор связи мог переехать в игровую панель — возвращаем в шапку.
-      var conn = $('connState');
-      if (conn.parentNode !== $('topLeftBar')) $('topLeftBar').insertBefore(conn, $('fsTopBtn'));
     }
     document.documentElement.classList.toggle('ingame', name === 'game');
     document.documentElement.classList.toggle('tut', name === 'game' && !!(app.game && app.game.tutorial));
@@ -701,8 +698,9 @@
       el.appendChild(b);
     });
   }
-  var GAME_MODE_NAMES = { pvp: t('Дуэли (PvP)'), survival: t('Волны'), defense: t('Защита') };
+  var GAME_MODE_NAMES = { deathmatch: t('Бой насмерть'), pvp: t('Бой на выбывание'), survival: t('Волны'), defense: t('Защита') };
   var GAME_MODE_DESCRIPTIONS = {
+    deathmatch: t('Две команды бросают снежки. Выбитый боец встаёт на своей базе, когда растает, и 3 секунды неуязвим. Побеждает команда, первой набравшая нужное число выбиваний; если за 10 минут никто не набрал — та, у которой их больше.'),
     pvp: t('Две команды бросают снежки. Побеждает команда, которая вывела из строя всех соперников; если время вышло — ничья.'),
     survival: t('Волны врагов идут на вашу команду. У команды общие жизни, между волнами есть передышка, каждый уровень заканчивается боссом.'),
     defense: t('То же, что «Волны», но на арене стоит снеговик, и врагам нужен он. Разобьют снеговика — забег закончен, даже если команда жива.')
@@ -714,9 +712,11 @@
     campaign: t('Три уровня по четыре волны, в конце каждого — босс. Уровни идут на разных аренах; зачистите все три — кампания пройдена.'),
     endless: t('Волны не кончаются и становятся всё сложнее. Играете, пока команда держится; в итогах записывается, сколько волн выстояли.')
   };
-  var PVE_GAME_MODES = ['survival', 'defense'];
+  var PVE_GAME_MODES = Sim.PVE_GAME_MODES;
+  var PVP_GAME_MODES = ['deathmatch', 'pvp']; // первый — режим новой PvP-комнаты
   var VIS_NAMES = { open: t('Открытая — видна всем'), closed: t('Закрытая — только по коду') };
-  function isPve(gm) { return gm && gm !== 'pvp'; }
+  function isPve(gm) { return PVE_GAME_MODES.indexOf(gm) >= 0; }
+  function defaultKillLimit(mode) { return Sim.DM_KILL_LIMITS[mode - 1]; }
   // Уровни сложности приходят из sim.js русскими строками: там это идентификаторы, перевод —
   // только на показ.
   function botLevelNames() { return (Sim.BOT_LEVEL_NAMES || ['Лёгкий', 'Обычный', 'Сложный']).map(function (n) { return t(n); }); }
@@ -783,8 +783,9 @@
     var c = app.create, pve = app.section === 'pve';
     send('room.create', {
       mode: c.mode, arena: pve ? 0 : c.arena, visibility: c.visibility, difficulty: c.botLevel,
-      // Волны или защита выбираются уже в комнате; при создании берём волны.
-      gameMode: pve ? 'survival' : 'pvp', campaign: true
+      // Режим (волны/защита, насмерть/на выбывание) выбирается уже в комнате.
+      // «Бой насмерть» — режим PvP-комнаты по умолчанию; лимит сервер берёт по размеру команд.
+      gameMode: pve ? 'survival' : PVP_GAME_MODES[0], campaign: true
     });
   };
 
@@ -909,7 +910,8 @@
     el.className = 'roomRow' + (r.inMatch ? ' live' : '');
     var game = isPve(r.gameMode)
       ? (GAME_MODE_NAMES[r.gameMode] || r.gameMode) + ' · ' + (r.campaign ? t('Прохождение') : t('Бесконечные волны'))
-      : GAME_MODE_NAMES.pvp;
+      : (GAME_MODE_NAMES[r.gameMode] || GAME_MODE_NAMES.pvp) +
+        (r.gameMode === 'deathmatch' && r.killLimit ? ' · ' + t('до {n}', { n: r.killLimit }) : '');
     var size = isPve(r.gameMode) ? pveSizeText(r.mode) : r.mode + '×' + r.mode;
     var arena = (Sim.ARENAS[r.arena] || {}).name || '';
     var meta = [size];
@@ -986,19 +988,23 @@
     for (var i = 0; i < r.players.length; i++) if (r.players[i].id === app.me) return !!r.players[i].ready;
     return false;
   }
-  function sendLobbyConfig() {
+  function sendLobbyConfig(e) {
     var r = app.room; if (!r) return;
     var pve = isPve(r.gameMode);
+    var changed = e && e.target ? e.target.id : '';
     send('room.config', {
       mode: +$('lobbyMode').value,
       arena: pve ? r.arena : +$('lobbyArena').value,
-      gameMode: pve ? ($('lobbyGameMode').value || 'survival') : 'pvp',
+      gameMode: $('lobbyGameMode').value || (pve ? 'survival' : PVP_GAME_MODES[0]),
+      // Лимит выбиваний по умолчанию зависит от размера команд: сменили размер или режим —
+      // шлём 0, и сервер подставит значение для нового размера.
+      killLimit: (changed === 'lobbyMode' || changed === 'lobbyGameMode') ? 0 : +$('lobbyKillLimit').value,
       campaign: $('lobbyCampaign').value === '1',
       difficulty: +$('lobbyDifficulty').value,
       visibility: $('lobbyVisibility').value
     });
   }
-  ['lobbyGameMode', 'lobbyMode', 'lobbyArena', 'lobbyCampaign', 'lobbyDifficulty', 'lobbyVisibility'].forEach(function (id) {
+  ['lobbyGameMode', 'lobbyKillLimit', 'lobbyMode', 'lobbyArena', 'lobbyCampaign', 'lobbyDifficulty', 'lobbyVisibility'].forEach(function (id) {
     $(id).onchange = sendLobbyConfig;
   });
   $('lobbyGameModeInfoBtn').onclick = function (e) {
@@ -1039,14 +1045,20 @@
   function renderLobby() {
     var r = app.room; if (!r) return;
     var isHost = r.hostId === app.me;
-    var gm = r.gameMode || 'pvp', pve = isPve(gm);
+    var gm = r.gameMode || 'pvp', pve = isPve(gm), dm = gm === 'deathmatch';
     $('lobbyCode').textContent = r.code;
     var gmSel = $('lobbyGameMode'), modeSel = $('lobbyMode'), arenaSel = $('lobbyArena');
     var campSel = $('lobbyCampaign'), difSel = $('lobbyDifficulty'), visSel = $('lobbyVisibility');
-    // В PvP-комнате выбора игры нет: она только про дуэли.
-    $('lobbyGameModeWrap').hidden = !pve;
-    gmSel.innerHTML = PVE_GAME_MODES.map(function (m) {
+    var klSel = $('lobbyKillLimit');
+    // Выбор игры — в пределах раздела: волны/защита в PvE, насмерть/на выбывание в PvP.
+    $('lobbyGameModeWrap').hidden = false;
+    gmSel.innerHTML = (pve ? PVE_GAME_MODES : PVP_GAME_MODES).map(function (m) {
       return '<option value="' + m + '"' + (m === gm ? ' selected' : '') + '>' + (GAME_MODE_NAMES[m] || m) + '</option>';
+    }).join('');
+    $('lobbyKillLimitWrap').hidden = !dm;
+    var kl = r.killLimit || defaultKillLimit(r.mode);
+    klSel.innerHTML = Sim.DM_KILL_LIMITS.map(function (n) {
+      return '<option value="' + n + '"' + (n === kl ? ' selected' : '') + '>' + n + '</option>';
     }).join('');
     modeSel.innerHTML = Sim.MODES.map(function (n) { return '<option value="' + n + '"' + (n === r.mode ? ' selected' : '') + '>' + (pve ? pveSizeText(n) : n + '×' + n) + '</option>'; }).join('');
     arenaSel.innerHTML = Sim.ARENAS.map(function (a, i) { return '<option value="' + i + '"' + (i === r.arena ? ' selected' : '') + '>' + t(a.name) + '</option>'; }).join('');
@@ -1058,7 +1070,7 @@
     visSel.innerHTML = ['open', 'closed'].map(function (v) {
       return '<option value="' + v + '"' + (v === (r.visibility || 'open') ? ' selected' : '') + '>' + VIS_NAMES[v] + '</option>';
     }).join('');
-    [gmSel, modeSel, arenaSel, campSel, difSel, visSel].forEach(function (sel) { sel.disabled = !isHost || r.inMatch; });
+    [gmSel, klSel, modeSel, arenaSel, campSel, difSel, visSel].forEach(function (sel) { sel.disabled = !isHost || r.inMatch; });
     $('lobbyArenaWrap').hidden = pve;   // в PvE арену задаёт уровень
     $('lobbyCampaignWrap').hidden = !pve;
     $('lobbyConfigHint').textContent = r.inMatch
@@ -1296,10 +1308,10 @@
     var el = document.documentElement;
     try { el.requestFullscreen({ navigationUI: 'hide' }).catch(function () { /* отказ — не страшно */ }); } catch (e) { /* игнор */ }
   }
-  $('fsBtn').onclick = toggleFullscreen;
   $('fsTopBtn').onclick = function () { Audio_.uiClick(); toggleFullscreen(); };
   function syncFsTop() {
-    $('fsTopBtn').hidden = !(Device.isTouch() && Device.fullscreenAvailable() && app.screen !== 'game');
+    // Угол с пингом, громкостью и фуллскрином один на всю игру — в бою он тот же, что и в меню.
+    $('fsTopBtn').hidden = !(Device.isTouch() && Device.fullscreenAvailable());
   }
 
   // Возврат из фона: сервер через 20 с без ввода отдаёт бойца боту; любой ввод возвращает управление.
@@ -1322,13 +1334,15 @@
   }
 
   // HUD пишется в DOM только при изменении: сигнатура составов/HP, секунда таймера, состояние способности.
-  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', pve: '' };
-  function resetHudCache() { hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.pve = ''; }
+  var hudCache = { sig: '', a: '', b: '', timer: '', abil: '', pve: '', dm: '', respawn: '' };
+  function resetHudCache() {
+    hudCache.sig = hudCache.a = hudCache.b = hudCache.timer = hudCache.abil = hudCache.pve = hudCache.dm = hudCache.respawn = '';
+  }
   function updateHUD(snap) {
     var me = myPlayer(snap);
     // Волновой HUD — только если клиент точно в PvE-матче. Иначе хвост snap.pve от прошлого
     // матча (переиспользуемый объект интерполяции) включал «Ур./Волна» прямо в PvP.
-    var pve = (app.game && app.game.gameMode && app.game.gameMode !== 'pvp') ? (snap.pve || null) : null;
+    var pve = (app.game && isPve(app.game.gameMode)) ? (snap.pve || null) : null;
     function row(p, right) {
       var pips = '';
       for (var i = 0; i < 3; i++) pips += '<span class="pip ' + (i < p.hp ? 'on ' + p.team.toLowerCase() : '') + '"></span>';
@@ -1346,9 +1360,10 @@
     // На телефоне HUD-строки скрыты: в ландшафте они абсолютно позиционированы поверх арены
     // и закрывали игровое поле. HP там рисуется на канвасе под ником бойца. Скрываем из JS,
     // а не правилом CSS: в PvE в #hudB живёт панель волны и полоса босса, её убирать нельзя.
-    var hidePips = Device.isTouch();
+    // В PvP списки команд внизу не нужны — нижнего ряда там нет вовсе (showGameScreen). В PvE
+    // остаются: жизни отряда и панель волны.
+    var hidePips = Device.isTouch() || !pve;
     $('hudA').hidden = hidePips;
-    if (!pve) $('hudB').hidden = hidePips;
     if (!hidePips) {
       var sig = '';
       for (var i = 0; i < snap.players.length; i++) { var q = snap.players[i]; sig += q.id + ':' + q.hp + (q.koed ? 'k' : '') + (q.lives != null ? 'l' + q.lives : '') + ';'; }
@@ -1356,13 +1371,11 @@
         hudCache.sig = sig;
         var a = snap.players.filter(function (p) { return p.team === 'A'; }).map(function (p) { return row(p, false); }).join('');
         if (a !== hudCache.a) { hudCache.a = a; $('teamA').innerHTML = a; }
-        if (!pve) {
-          var b = snap.players.filter(function (p) { return p.team === 'B'; }).map(function (p) { return row(p, true); }).join('');
-          if (b !== hudCache.b) { hudCache.b = b; $('teamB').innerHTML = b; }
-        }
       }
     }
     if (pve) updatePveHud(snap, pve);
+    if (app.game.gameMode === 'deathmatch') updateDmHud(snap);
+    updateRespawnMsg(snap, me, pve);
     var tm = fmtTime(snap.timeLeft);
     if (tm !== hudCache.timer) { hudCache.timer = tm; $('matchTimer').textContent = tm; }
 
@@ -1373,13 +1386,42 @@
     hudCache.abil = abil;
     if (!hasSpec) {
       abilityBtn.disabled = true; abilityBtn.textContent = t('Нет способности'); abilityCd.textContent = '';
+      abilityBtn.classList.remove('ready');
       touchAbility.hidden = true;
     } else {
       abilityBtn.textContent = me.special ? t('Способность заряжена') : t('Способность (Q)');
       touchAbility.hidden = !Device.isTouch();
       touchAbility.className = me.cd > 0 ? 'off' : (me.special ? 'armed' : 'ready');
+      // Перезарядилась и ещё не нажата — кнопка мигает, пока игрок её не применит.
+      abilityBtn.classList.toggle('ready', me.cd <= 0 && !me.special);
       if (me.cd > 0) { abilityBtn.disabled = true; abilityCd.textContent = t('{n} с', { n: me.cd.toFixed(1) }); touchAbilityCd.textContent = t('{n}с', { n: Math.ceil(me.cd) }); }
       else { abilityBtn.disabled = false; abilityCd.textContent = me.special ? t('следующий бросок') : t('готова'); touchAbilityCd.textContent = ''; }
+    }
+  }
+  // «Бой насмерть»: счёт команды — сумма выбиваний её бойцов (поле k), лимит — snap.killLimit.
+  function updateDmHud(snap) {
+    var a = 0, b = 0;
+    for (var i = 0; i < snap.players.length; i++) {
+      var p = snap.players[i];
+      if (p.team === 'A') a += p.k || 0; else if (p.team === 'B') b += p.k || 0;
+    }
+    var score = '<span class="a">' + a + '</span> : <span class="b">' + b + '</span>' +
+      (snap.killLimit ? ' <span class="lim">· ' + t('до {n}', { n: snap.killLimit }) + '</span>' : '');
+    if (score !== hudCache.dm) { hudCache.dm = score; $('dmScore').innerHTML = score; }
+  }
+  // Отсчёт до возрождения: боец встаёт, когда растаял труп — через Sim.CORPSE_MS (3 с) от koAt,
+  // поэтому счёт идёт 3, 2, 1. В PvE — только если возрождение будет: есть жизни и идёт волна
+  // (между волнами пати поднимается вся сразу, без отсчёта).
+  function updateRespawnMsg(snap, me, pve) {
+    var will = me && me.koed && !snap.over &&
+      (app.game.gameMode === 'deathmatch' || (pve && me.lives > 0 && pve.phase === 'fighting'));
+    // Время кадра интерполировано и в первом кадре после выбивания бывает чуть меньше koAt —
+    // без зажима на миг показывалось «4 с».
+    var left = will ? Math.min(Sim.CORPSE_MS, (me.koAt || 0) + Sim.CORPSE_MS - snap.time) : 0;
+    var msg = left > 0 ? t('Возрождение через {n} с', { n: Math.ceil(left / 1000) }) : '';
+    if (msg !== hudCache.respawn) {
+      hudCache.respawn = msg;
+      $('respawnMsg').textContent = msg; $('respawnMsg').hidden = !msg;
     }
   }
   function updatePveHud(snap, pve) {
@@ -1476,17 +1518,19 @@
     // «(Q)» есть и в переводе подсказок — на сенсорном экране клавиши нет, там кнопка справа.
     if (isTouch) abilityHint = abilityHint.replace('(Q)', t('(кнопка справа)'));
     $('abilityHint').textContent = abilityHint;
-    $('hint').textContent = isTouch
-      ? t('Левая половина — движение, правая — замах и бросок; вернуть палец в центр — отмена.')
-      : t('WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом или E — отмена. Q или ПКМ — способность.');
+    // Строка над ареной нужна только обучению на телефоне: туда уходит текст шага (tutorial.setStep).
+    // Описание управления здесь больше не пишем — его объясняет обучение.
+    $('hint').textContent = '';
+    $('hint').hidden = !(g.tutorial && isTouch);
     $('tutFlash').hidden = true;
     // В матче комнаты «Выйти» ведёт в лобби, а не в меню; в обучении таймера нет — бой не кончается.
-    $('btnToMenu').textContent = (!g.offline && g.roomCode) ? t('← В лобби') : t('← Выйти');
+    $('btnToMenu').textContent = (!g.offline && g.roomCode) ? t('В лобби') : t('В меню');
     $('matchTimer').hidden = !!g.tutorial;
     $('tutorialBox').hidden = !g.tutorial;
-    var pve = g.gameMode && g.gameMode !== 'pvp';
+    var pve = isPve(g.gameMode);
     $('pveInfo').hidden = !pve;
-    $('hint').hidden = pve && !g.offline; // в сетевом PvE пинг и инфо волн делят панель — подсказку убираем
+    $('dmScore').hidden = g.gameMode !== 'deathmatch'; $('dmScore').innerHTML = '';
+    $('respawnMsg').hidden = true;
     if (pve) {
       $('teamALabel').textContent = t('Команда');
       $('teamBLabel').textContent = t('Волна');
@@ -1495,17 +1539,13 @@
       $('teamBLabel').textContent = t('Команда B') + (g.myTeam === 'B' ? ' ' + t('(вы)') : '');
     }
     $('teamA').innerHTML = ''; $('teamB').innerHTML = ''; resetHudCache();
+    $('bottomRow').hidden = !pve;
     Device.apply();
     touchLayer.hidden = !isTouch;
     touch.reset(); intent.reset();
-    $('fsBtn').hidden = !(isTouch && Device.fullscreenAvailable());
     clearTimeout(zonesHintTimer);
     clearTimeout(abilityHintTimer);
     $('abilityHint').classList.remove('faded');
-    // Шапка (угол с пингом) в бою на ПК не скрыта, но там же в углу — кнопка «Выйти» из игровой
-    // панели, и они наезжали друг на друга. Пинг переезжает в игровую панель, к зелёной точке —
-    // как и раньше было заведено для тача (там угол скрыт целиком), теперь это общее место в бою.
-    $('gameConnSlot').appendChild($('connState'));
     if (isTouch) {
       touchLayer.classList.add('showZones');
       zonesHintTimer = setTimeout(function () { touchLayer.classList.remove('showZones'); }, 4000);
@@ -1522,7 +1562,7 @@
     return false;
   }
   var PVE_REASONS = { cleared: 1, wiped: 1, objective: 1, expired: 1 };
-  var RESULT_MS = 3000; // сколько висит плашка итогов, прежде чем игрок сам окажется в лобби
+  var RESULT_MS = 10000; // сколько висит плашка итогов, прежде чем игрок сам окажется в лобби
 
   // «Кто сколько выбил»: столбец на команду, мобы PvE в счёт не идут — считаются только бойцы.
   function resultScoreHtml(snap, pve) {
@@ -1535,13 +1575,16 @@
       }
       if (!list.length) return '';
       list.sort(function (a, b) { return (b.k || 0) - (a.k || 0); });
-      var rows = '';
+      var rows = '', total = 0;
       for (var j = 0; j < list.length; j++) {
         var q = list[j];
+        total += q.k || 0;
         rows += '<div class="scoreRow' + (g && q.id === g.meId ? ' me' : '') + '">' +
           '<span>' + escapeHtml(nickOf(q)) + (q.bot ? ' 🤖' : '') + '</span>' +
           '<span class="kv">' + (q.k || 0) + '</span></div>';
       }
+      // В «Бое насмерть» итог матча — счёт команды, его пишем прямо в заголовке столбца.
+      if (g && g.gameMode === 'deathmatch') title += ' · ' + total;
       return '<div class="scoreCol"><h4 style="color:' + color + '">' + title + '</h4>' + rows + '</div>';
     }
     if (pve) return column('A', t('Отряд'), '#4aa8ff');
@@ -1575,6 +1618,7 @@
     var shownTime = g.lastSnap && typeof g.lastSnap.time === 'number' ? g.lastSnap.time : null;
     g.overTime = shownTime !== null ? shownTime : ((last && last.time) || 0);
     intent.reset(); touch.reset();
+    $('respawnMsg').hidden = true;
     $('toMenuBtn').textContent = t('Главное меню'); // в обучении подпись другая, см. showTutorialResult
     // Кнопки обучения не должны протекать в обычный матч: табло у них одно.
     $('tutNextBtn').hidden = true;
@@ -1584,9 +1628,20 @@
       showPveResult(reason, snap || g.lastSnap);
     } else if (reason === 'shutdown') { overlayText.textContent = t('МАТЧ ПРЕРВАН'); overlayText.style.color = '#ffd166'; overlaySub.textContent = t('Сервер перезапускается для обновления.'); }
     else if (reason === 'abandoned') { overlayText.textContent = t('МАТЧ ЗАВЕРШЁН'); overlayText.style.color = '#ffd166'; overlaySub.textContent = t('Все игроки покинули матч.'); }
-    else if (!winner) { overlayText.textContent = t('НИЧЬЯ'); overlayText.style.color = '#ffd166'; overlaySub.textContent = t('Время вышло.'); Audio_.drawChord(); }
-    else if (winner === myTeam) { overlayText.textContent = t('ПОБЕДА 🎉'); overlayText.style.color = '#7CFFB2'; overlaySub.textContent = t('Команда {team} вывела из строя всех соперников.', { team: winner }); Audio_.victoryFanfare(); }
-    else { overlayText.textContent = t('ПОРАЖЕНИЕ'); overlayText.style.color = '#ff8080'; overlaySub.textContent = t('Команда {team} оказалась сильнее.', { team: winner }); Audio_.defeatChord(); }
+    else if (!winner) {
+      overlayText.textContent = t('НИЧЬЯ'); overlayText.style.color = '#ffd166';
+      overlaySub.textContent = reason === 'kills' ? t('Обе команды набрали лимит выбиваний одновременно.') : t('Время вышло.');
+      Audio_.drawChord();
+    } else {
+      var won = winner === myTeam, dm = g.gameMode === 'deathmatch';
+      overlayText.textContent = won ? t('ПОБЕДА 🎉') : t('ПОРАЖЕНИЕ');
+      overlayText.style.color = won ? '#7CFFB2' : '#ff8080';
+      if (reason === 'kills') overlaySub.textContent = t('Команда {team} первой набрала {n} выбиваний.', { team: winner, n: (last && last.killLimit) || '' });
+      else if (dm) overlaySub.textContent = t('Время вышло — у команды {team} больше выбиваний.', { team: winner });
+      else if (won) overlaySub.textContent = t('Команда {team} вывела из строя всех соперников.', { team: winner });
+      else overlaySub.textContent = t('Команда {team} оказалась сильнее.', { team: winner });
+      if (won) Audio_.victoryFanfare(); else Audio_.defeatChord();
+    }
     $('againBtn').textContent = g.offline ? t('Играть снова') : (g.roomCode ? t('В лобби') : t('Играть снова'));
     // Матч в комнате: короткая плашка с фрагами и автовыход. Тренировка и обучение живут по
     // прежним правилам — возвращаться там некуда, и повтор в один клик там по делу.

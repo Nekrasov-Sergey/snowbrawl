@@ -210,11 +210,14 @@ type Training struct {
 type RoomCreate struct {
 	Mode  int `json:"mode"`
 	Arena int `json:"arena"`
-	// PvE: gameMode "" | "pvp" | "survival" | "defense"; campaign — кампания (иначе эндлесс).
+	// gameMode "" | "pvp" | "deathmatch" | "survival" | "defense"; campaign — кампания PvE
+	// (иначе эндлесс); killLimit — выбиваний для победы в deathmatch (0 или неизвестное
+	// значение — по умолчанию для размера команд).
 	// Difficulty 0..2 — сложность ботов (в PvP они занимают пустые слоты, в PvE это ещё и
 	// сдвиг уровня врагов). Указатель, чтобы отличить «не прислали» от «Лёгкий»: без него
 	// комната по умолчанию получала бы самых слабых ботов.
 	GameMode   string `json:"gameMode,omitempty"`
+	KillLimit  int    `json:"killLimit,omitempty"`
 	Campaign   bool   `json:"campaign,omitempty"`
 	Difficulty *int   `json:"difficulty,omitempty"`
 	// Visibility "open" — комната видна в списке и открыта для входа; "closed" — видна со
@@ -246,6 +249,7 @@ type RoomConfig struct {
 	Mode       int    `json:"mode"`
 	Arena      int    `json:"arena"`
 	GameMode   string `json:"gameMode,omitempty"`
+	KillLimit  int    `json:"killLimit,omitempty"` // deathmatch; см. RoomCreate
 	Campaign   bool   `json:"campaign,omitempty"`
 	Difficulty *int   `json:"difficulty,omitempty"`
 	Visibility string `json:"visibility,omitempty"`
@@ -269,6 +273,7 @@ type RoomBrief struct {
 	Code       string `json:"code"`
 	Section    string `json:"section"`
 	GameMode   string `json:"gameMode,omitempty"`
+	KillLimit  int    `json:"killLimit,omitempty"` // deathmatch
 	Campaign   bool   `json:"campaign,omitempty"`
 	Mode       int    `json:"mode"`
 	Arena      int    `json:"arena"`
@@ -373,6 +378,7 @@ type RoomState struct {
 	Mode       int          `json:"mode"`
 	Arena      int          `json:"arena"`
 	GameMode   string       `json:"gameMode,omitempty"`
+	KillLimit  int          `json:"killLimit,omitempty"` // deathmatch
 	Campaign   bool         `json:"campaign,omitempty"`
 	Difficulty int          `json:"difficulty,omitempty"`
 	Visibility string       `json:"visibility"`
@@ -420,7 +426,7 @@ type Snapshot struct {
 type MatchEnd struct {
 	Winner   string `json:"winner"` // "A" | "B" | "" (ничья)
 	YourTeam string `json:"yourTeam,omitempty"`
-	Reason   string `json:"reason"` // PvP: "ko"|"timeout"|"abandoned"|"shutdown"; PvE: "cleared"|"wiped"|"objective"|"expired"
+	Reason   string `json:"reason"` // PvP: "ko"|"kills"|"timeout"|"abandoned"|"shutdown"; PvE: "cleared"|"wiped"|"objective"|"expired"
 	RoomCode string `json:"roomCode,omitempty"`
 }
 
