@@ -22,7 +22,7 @@
 
 ```js
 SnowBrawlSim = {
-  SIM_VERSION: '1.16.0',                // semver правил игры, показывается в админке и логах
+  SIM_VERSION: '1.17.0',                // semver правил игры, показывается в админке и логах
   W, H, GRAVITY, HIT_Z, CHARGE_FULL_MS, KO_ANIM_MS,      // HIT_Z — с 1.6.0
   FREEZER_AURA_R, FREEZER_AURA_SLOW, FREEZER_AURA_RELOAD,      // с 1.8.0
   FROST_R, FROST_SLOW,                                         // с 1.8.0
@@ -30,7 +30,10 @@ SnowBrawlSim = {
   PICKUP_RADIUS,                                               // с 1.13.0
   EXPLOSION_RADIUS, BUBBLE_REGEN_MS, WALL_LIFETIME_MS,         // с 1.8.0
   ARENAS, ROLE_STATS, SPECIALS, ABILITIES, BOT_LEVEL_NAMES, MODES,
-  GAME_MODES: ['pvp','survival','defense'],   // с 1.3.0
+  GAME_MODES: ['pvp','deathmatch','survival','defense'],   // с 1.3.0, deathmatch — с 1.17.0
+  PVE_GAME_MODES: ['survival','defense'],      // с 1.17.0: какие из GAME_MODES — PvE
+  DM_KILL_LIMITS: [5,10,15,20], DM_DURATION_MS,              // с 1.17.0, «Бой насмерть»
+  CORPSE_MS, RESPAWN_IFRAME_MS,                              // с 1.17.0
   PVE_LEVEL_COUNT: 3,                          // с 1.3.0
   HERO_DESCRIPTIONS, ABILITY_HINT_TEXT, ALL_ROLES,
   makeRng(seed), shuffle(rng, arr),
@@ -47,12 +50,12 @@ SnowBrawlSim = {
   snapshot(state) -> object,
   isOver(state) -> bool,
   winner(state) -> 'A' | 'B' | null,
-  reason(state) -> '' | 'ko' | 'timeout' | 'cleared' | 'wiped' | 'objective' | 'expired'  // с 1.3.0
+  reason(state) -> '' | 'ko' | 'kills' | 'timeout' | 'cleared' | 'wiped' | 'objective' | 'expired'  // с 1.3.0, kills — с 1.17.0
 }
 ```
 
 Сервер обязательно использует: `SIM_VERSION`, `ARENAS.length`, `ALL_ROLES`, `GAME_MODES`,
-`createMatch`, `applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`, `reason`.
+`DM_KILL_LIMITS` (с 1.17.0: по нему `Program.KillLimitFor` нормализует лимит комнаты), `createMatch`, `applyInput`, `setBot`, `step`, `snapshot`, `isOver`, `winner`, `reason`.
 Остальное — для клиента. Радиусы и сроки (`FREEZER_AURA_R`, `EXPLOSION_RADIUS`,
 `BUBBLE_REGEN_MS` и соседние) экспортированы именно для него: по ним рисуются кольцо ауры
 Фризера, вспышка взрыва и аура щитового пузыря, а обучение строит на них условия шагов.
@@ -194,6 +197,39 @@ PvE с соперниками `tutorialSpawn`: они появляются с г
   клиент: он держит его на шагах-упражнениях и снимает (`tutorialLock(state, false)`) на шаге
   настоящего боя.
 
+### PvP-режим «Бой насмерть» (с 1.17.0)
+
+`config.gameMode = 'deathmatch'` — тот же PvP (ровно `2*mode` бойцов, команды A/B, те же
+стартовые точки), но выбитый боец не выбывает до конца матча:
+
+- **Возрождение.** `updateDeathmatch` (в `step` перед `checkWin`) поднимает бойца, когда с `koAt`
+  прошло `CORPSE_MS` = 3000 мс — ровно за столько клиент растапливает труп (render.js берёт
+  длительность таяния из `Sim.CORPSE_MS`, отсчёт «Возрождение через 3, 2, 1 с» — оттуда же). Точка — случайная на своей базе (`baseSpawnPoint`: `x` в
+  ±50 от 160 у A и от `W-160` у B, `y` в 110..450, не внутри препятствия — до 20 попыток), сброс
+  общий с PvE (`respawnFighter`): 3 HP, полный запас, снятые замах, рывок и взведённая
+  способность, пузырь Щита, неуязвимость `RESPAWN_IFRAME_MS` = 3 с. Событие
+  `{type:'respawn', id, x, y}`. Время до возрождения клиент считает сам: `koAt + CORPSE_MS`.
+- **Лимит.** `config.killLimit` — одно из `DM_KILL_LIMITS` (5/10/15/20), иначе значение по
+  умолчанию для размера: `DM_KILL_LIMITS[mode-1]`. Лежит в `state.killLimit` (0 во всех других
+  режимах) и в снапшоте как `killLimit` (только в deathmatch).
+- **Исход** (`checkWin`): счёт команды — сумма `kills` её бойцов (то же `k` в снапшоте, клиент
+  считает счёт так же). Набрала `killLimit` — победа, `reason = 'kills'`; если лимит в одном подшаге
+  добрали обе, решает счёт, при равенстве ничья с той же причиной. Запасной таймер —
+  `DM_DURATION_MS` = 10 мин (если `durationMs` не задан): по нему побеждает больший счёт,
+  `reason = 'timeout'`, при равенстве `winner = null`. Правило «команда вымерла» здесь не действует.
+- **Боты** в deathmatch выбирают цель без неуязвимости и берут неуязвимую, только если других нет
+  (`findNearestEnemy`). `canHitTarget` не менялась.
+
+Общие правки 1.17.0, которые касаются и других режимов:
+- таран Танка (`applyTaram`) больше не сбивает и не оглушает неуязвимого (`iframeUntil`: рывок
+  Раннера, возрождение) — иначе вставшего тут же валили у базы;
+- возрождение члена пати в PvE идёт через тот же `respawnFighter`: теперь оно тоже снимает
+  замах, рывок и взведённую способность, а точка появления не попадает в препятствие;
+- `PVE_RESPAWN_MS` (2.5 с) удалена: член пати встаёт через `CORPSE_MS` от `koAt`, как и в
+  deathmatch, а трупы бойцов и мобов тают за те же 3 с (было 4);
+- `PVE_RESPAWN_IFRAME_MS` переименована в `RESPAWN_IFRAME_MS`, `PVE_BASE_HALF_W`/`PVE_BASE_MARGIN_Y`
+  — в `BASE_HALF_W`/`BASE_MARGIN_Y`, значения прежние.
+
 ### PvE-режим «Волны» (с 1.3.0)
 
 `config.gameMode` (`'pvp'` по умолчанию, `'survival'`, `'defense'`) переключает тип матча.
@@ -204,7 +240,9 @@ PvE с соперниками `tutorialSpawn`: они появляются с г
 
 - Врагов ≤ 24 одновременно; спавн от правого края, растянут во времени.
 - Жизни пати (`players[].lives`, старт 3) пополняются в начале волны, все возрождаются;
-  выбывший в бою возрождается через ~2.5 с, пока есть жизни.
+  выбывший в бою возрождается, пока есть жизни. С 1.17.0 — когда растаял труп, через
+  `CORPSE_MS` = 3 с от `koAt` (было 2.5 с от момента, когда `updatePve` заметил выбывание), в
+  случайной точке базы не внутри препятствия и с неуязвимостью `RESPAWN_IFRAME_MS`.
 - Между волнами пауза 12 с (`pve.phase = 'between'`, `pve.nextInMs`).
 - Исход (`reason(state)` и событие `matchEnd`): `cleared` — кампания пройдена; `wiped` —
   вся пати выбита без жизней; `objective` — в «Защите» разбит снеговик; `expired` —
@@ -263,10 +301,12 @@ PvE с соперниками `tutorialSpawn`: они появляются с г
 
 ```js
 config = {
-  gameMode?: 'pvp'|'survival'|'defense',   // по умолчанию 'pvp' (с 1.3.0)
+  gameMode?: 'pvp'|'deathmatch'|'survival'|'defense',   // по умолчанию 'pvp' (с 1.3.0; deathmatch — 1.17.0)
   mode: 1|2|3|4,                 // PvP — размер команды; PvE — размер пати
   arenaIndex: 0..ARENAS.length-1, // PvP; в PvE арену задаёт уровень кампании
-  durationMs?: 300000,           // PvP — таймер матча (5 мин, потом ничья); PvE игнорируется
+  durationMs?: 300000,           // PvP — таймер матча (5 мин, потом ничья; в deathmatch 10 мин,
+                                 // потом победа по счёту); PvE игнорируется
+  killLimit?: 5|10|15|20,        // deathmatch — выбиваний для победы, иначе DM_KILL_LIMITS[mode-1] (с 1.17.0)
   difficulty?: 0|1|2,            // PvE — ручка сложности (с 1.3.0)
   campaign?: true,               // PvE — кампания (по умолч.) или эндлесс (с 1.3.0)
   pve?: { levels?, waves? },     // PvE — урезание кампании для тестов (с 1.3.0)
@@ -322,6 +362,7 @@ config = {
 {type:'matchEnd', winner: 'A'|'B'|null, reason?}   // reason — с 1.3.0 (PvE)
 // PvE (с 1.3.0): waveStart, waveCleared, enemySpawn, bossPhase, contactHit,
 //                objectiveHit, levelStart, levelRestart, partyDown, partyRespawn
+{type:'respawn', id, x, y}            // с 1.17.0, deathmatch: боец встал на своей базе
 ```
 
 События — единственный источник для звука и эффектов на клиенте. Новые события добавлять
@@ -345,6 +386,7 @@ config = {
   destr:   [{ i, type, x, y, w, h, r, mat, hp, maxHp }],      // разрушаемые укрытия арены
   fx:      [{ id, kind:'frost', x, y, r, team, ttl, life }],  // зоны на земле
   pickup?: { x, y, r },                                       // «жизнь» на карте, с 1.12.0
+  killLimit?,                                                 // deathmatch, с 1.17.0
   pve?: {  objective, campaign, endless, level, levelCount, wave, waveCount,   // PvE, с 1.3.0
            enemiesLeft, phase:'fighting'|'between', nextInMs, wavesSurvived,
            bossHp, bossMax, objHp?, objMaxHp?, objX?, objY?, objR? } }
@@ -392,7 +434,7 @@ config = {
 ## Обязательные правила для сервера
 
 - **Матч должен заканчиваться.** В PvP таймер `durationMs` с ничьёй обязателен: без него
-  два спрятавшихся игрока держат матч и память сервера вечно. В PvE ту же роль играет
+  два спрятавшихся игрока держат матч и память сервера вечно. В deathmatch это `DM_DURATION_MS`. В PvE ту же роль играет
   абсолютный потолок 60 мин (`reason = 'expired'`).
 - **Боты должны уметь играть сами**: сервер добирает ими команды и заменяет отключившихся.
 - `isOver`/`winner` должны соответствовать событию `matchEnd`.

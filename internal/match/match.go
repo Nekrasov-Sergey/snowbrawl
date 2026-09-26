@@ -27,6 +27,7 @@ import (
 // Причины завершения матча.
 const (
 	ReasonKO        = "ko"
+	ReasonKills     = "kills" // deathmatch: команда набрала лимит выбиваний (из sim.reason())
 	ReasonTimeout   = "timeout"
 	ReasonAbandoned = "abandoned"
 	ReasonShutdown  = "shutdown"
@@ -50,8 +51,10 @@ type Options struct {
 	Countdown  time.Duration // отсчёт перед стартом: симуляция стоит, снапшоты идут
 	Log        zerolog.Logger
 	Now        func() time.Time
-	// PvE: пусто/"pvp" — обычный матч; иначе кооперативные волны.
+	// Пусто/"pvp" — PvP на выбывание, "deathmatch" — PvP до KillLimit выбиваний команды,
+	// "survival"/"defense" — кооперативные волны (PvE).
 	GameMode   string
+	KillLimit  int // deathmatch; 0 — по умолчанию для размера (решает sim.js)
 	Campaign   bool
 	Difficulty int
 	Pve        *sim.PveConfig
@@ -111,8 +114,9 @@ func New(prog *sim.Program, roomCode string, mode, arena int, players []protocol
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	cfg := sim.MatchConfig{Mode: mode, ArenaIndex: arena, GameMode: opts.GameMode, Difficulty: opts.Difficulty, Pve: opts.Pve}
-	if opts.GameMode != "" && opts.GameMode != "pvp" {
+	cfg := sim.MatchConfig{Mode: mode, ArenaIndex: arena, GameMode: opts.GameMode, KillLimit: opts.KillLimit,
+		Difficulty: opts.Difficulty, Pve: opts.Pve}
+	if sim.IsPvEMode(opts.GameMode) {
 		campaign := opts.Campaign
 		cfg.Campaign = &campaign
 	}

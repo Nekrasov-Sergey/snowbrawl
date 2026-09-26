@@ -227,21 +227,26 @@ html.touch .setVol input[type=range] { width: 150px; height: 32px; }
 
 /* игра */
 #hint { font-size: 13px; color: #a9c2e0; margin-bottom: 4px; text-align: center; max-width: 900px; }
-#abilityHint { font-size: 12px; color: #ffd166; margin-bottom: 10px; text-align: center; max-width: 900px; min-height: 16px; }
-#topGameBar { display:flex; justify-content:space-between; align-items:center; width:100%; max-width:900px; margin-bottom:6px; }
+#abilityRow { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; max-width: 900px; margin-bottom: 8px; box-sizing: border-box; }
+#abilityHint { font-size: 12px; color: #ffd166; text-align: left; min-width: 0; }
+/* Три ячейки: левая пустая — над ней общий угол #topLeftBar (пинг, громкость); центр — инфо
+   режима; справа таймер и кнопка выхода из боя в самом углу. */
+#topGameBar { display:grid; grid-template-columns: 1fr auto 1fr; align-items:center; width:100%; max-width:900px; margin-bottom:6px; }
+#topGameBar .tgbCenter { display:flex; justify-content:center; align-items:center; min-width:0; }
+#topGameBar .tgbRight { display:flex; justify-content:flex-end; align-items:center; gap:10px; }
 #topGameBar button { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px; }
 #topGameBar button:hover { background:#274363; }
-#pveInfo { font-size: 13px; color: #ffd88a; font-weight: 600; white-space: nowrap; flex: 1; text-align: center; }
-#matchTimer { width: 70px; text-align: right; font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 14px; }
+#pveInfo { font-size: 13px; color: #ffd88a; font-weight: 600; white-space: nowrap; text-align: center; }
+/* Счёт «Боя насмерть» — главная цифра матча: крупно, цвет команды вместо букв A и B. */
+#dmScore { font-size: 22px; line-height: 1; color: #e6f0ff; font-weight: 800; white-space: nowrap; text-align: center; font-variant-numeric: tabular-nums; }
+#dmScore .a { color: #4aa8ff; } #dmScore .b { color: #ff5b5b; } #dmScore .lim { color: #a9c2e0; font-weight: 600; font-size: 16px; }
+html.touch.ingame #dmScore { font-size: 20px; }
+html.touch.ingame #dmScore .lim { font-size: 14px; }
+#matchTimer { text-align: right; font-variant-numeric: tabular-nums; color: #a9c2e0; font-size: 14px; }
 .lives { color: #ff9ec4; font-weight: 700; font-size: 12px; }
 .wavePanel { font-size: 13px; color: #ffb3b3; }
 .bossBar { margin-top: 4px; font-size: 12px; color: #ff8080; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
 .bossBar .phase2 { color: #ff3b3b; font-weight: 700; letter-spacing: 0; }
-#topGameBar #fsBtn { font-size: 15px; padding: 4px 10px; margin-left: 8px; }
-/* В сенсорном бою шапка скрыта, поэтому индикатор связи переезжает сюда: пинг во всей игре
-   живёт ровно в одном месте — рядом с зелёной точкой. */
-#gameConnSlot { display: flex; align-items: center; flex: none; }
-#topGameBar #connState { font-size: 12px; }
 #gameWrap { width: 100%; display: flex; flex-direction: column; align-items: center; position: relative; }
 #stage { position: relative; max-width: 100%; aspect-ratio: 900 / 560; }
 /* ПК в бою: арену делаем настолько крупной, насколько возможно без прокрутки. Первая попытка
@@ -257,22 +262,9 @@ html.touch .setVol input[type=range] { width: 150px; height: 32px; }
    механизм размера. */
 html.ingame:not(.touch) h1.title { display: none; }
 html.ingame:not(.touch) #app { max-width: 96vw; height: 100vh; height: 100dvh; overflow: hidden; }
-/* Громкость и звук — #topRightBar, absolute (см. блок «Угол справа» ниже) и не участвует в потоке
-   #app, поэтому в бою его прятать незачем: места арены не отнимает, а видеть громкость посреди
-   матча удобно. Но сам верхний правый угол в бою уже занят концом игровой панели (там таймер
-   матча, у него нет фиксированной ширины) — опускаем громкость под панель, а не подгоняем под
-   переменную ширину таймера. #topLeftBar с пингом — наоборот, в бою скрыт целиком: тот же угол
-   занимает кнопка «Выйти» игровой панели, и пинг с ней наезжал. Сам пинг никуда не девается — JS
-   переносит #connState в #gameConnSlot внутри игровой панели (тот же приём и на тач, ниже). */
-html.ingame:not(.touch) #topLeftBar { display: none; }
-html.ingame:not(.touch) #topRightBar { top: 52px; }
-/* Подпись версии внизу — обычный поток-элемент #app; при высоте арены под 100vh с overflow:hidden
-   выше она не помещалась и обрезалась почти до нуля («что-то написано, но не видно»). Как и шапка,
-   переводим её в absolute — угол снизу свободен, а верстке #stage она больше не нужна. */
-html.ingame:not(.touch) .footer {
-  position: absolute; right: 12px; bottom: 4px;
-  margin: 0; padding: 0; z-index: 5; white-space: nowrap;
-}
+/* Угол с пингом и громкостью (#topLeftBar) в бою остаётся на месте; игровая панель встаёт с ним
+   на одну линию — отступ сверху у #app в бою меньше, чем на экранах меню. */
+html.ingame:not(.touch) #app { padding-top: 10px; }
 html.ingame:not(.touch) #stage {
   width: auto;
   height: min(calc(100vh - 230px), calc(94vw * 560 / 900), 1000px);
@@ -281,12 +273,12 @@ html.ingame:not(.touch) #stage {
 html.ingame:not(.touch) #topGameBar,
 html.ingame:not(.touch) #bottomRow,
 html.ingame:not(.touch) #hint,
-html.ingame:not(.touch) #abilityHint { max-width: 94vw; }
+html.ingame:not(.touch) #abilityRow { max-width: 94vw; }
 /* Чуть плотнее верх/низ — не в ущерб читаемости, а в пользу резерва 230px у #stage выше:
    меньше отступов здесь — меньше нужно резервировать, и арена может быть крупнее. */
 html.ingame:not(.touch) #topGameBar { margin-bottom: 4px; }
 html.ingame:not(.touch) #hint { margin-bottom: 2px; }
-html.ingame:not(.touch) #abilityHint { margin-bottom: 4px; min-height: 0; }
+html.ingame:not(.touch) #abilityRow { margin-bottom: 4px; }
 html.ingame:not(.touch) #bottomRow { margin-top: 4px; }
 canvas {
   background: linear-gradient(180deg,#dfeeff 0%, #c3ddf7 100%);
@@ -334,10 +326,21 @@ html.touch #overlayScore .scoreRow { font-size: 12px; }
 .charname.me { color: #ffe066; }
 .charname.bot { color: #6f89a8; }
 .botMark { font-size: 10px; opacity: 0.85; }
-#abilityBox { text-align:center; min-width: 190px; }
+#abilityBox { display: flex; align-items: center; gap: 8px; flex: none; }
 #abilityBtn { padding: 8px 18px; font-size: 13px; border-radius: 8px; border: 1px solid #7a5cff; background: #2a2050; color: #e6d9ff; cursor: pointer; font-weight: 700; }
 #abilityBtn:disabled { opacity: 0.4; cursor: default; }
-#abilityCd { font-size: 11px; color: #b7a6ff; margin-top: 4px; }
+/* Способность перезарядилась: кнопка (и ✦ на телефоне) мигает, пока её не применят. */
+#abilityBtn.ready { animation: abilityBlink 0.9s ease-in-out infinite; }
+#touchAbility.ready { animation: abilityBlinkTouch 0.9s ease-in-out infinite; }
+@keyframes abilityBlink {
+  0%, 100% { background: #2a2050; border-color: #7a5cff; box-shadow: 0 0 0 rgba(122,92,255,0); color: #e6d9ff; }
+  50% { background: #6a4cff; border-color: #c9b8ff; box-shadow: 0 0 14px rgba(150,120,255,0.95); color: #fff; }
+}
+@keyframes abilityBlinkTouch {
+  0%, 100% { background: rgba(42,32,80,0.85); box-shadow: 0 0 6px rgba(122,92,255,0.5); }
+  50% { background: rgba(106,76,255,0.95); box-shadow: 0 0 22px rgba(150,120,255,1); }
+}
+#abilityCd { font-size: 11px; color: #b7a6ff; min-width: 44px; }
 
 /* сенсорное управление */
 #touchLayer { position: absolute; inset: 0; z-index: 4; touch-action: none; overflow: hidden; }
@@ -367,7 +370,8 @@ html.touch .menuBtn:hover { background: #274363; }
 html.touch .menuBtn.primary:hover { background: #4aa8ff; }
 html.touch .menuBtn.ghost:hover { background: transparent; }
 html.touch.ingame #app { padding: 0; max-width: none; min-height: 100vh; min-height: 100dvh; height: 100vh; height: 100dvh; overflow: hidden; }
-html.touch.ingame h1.title, html.touch.ingame .footer, html.touch.ingame #topRightBar, html.touch.ingame #topLeftBar, html.touch.ingame #abilityBox { display: none; }
+html.touch.ingame h1.title, html.touch.ingame #abilityBox { display: none; }
+html.touch.ingame #abilityRow { margin: 0; }
 /* Подсказка о способности нужна и на телефоне, но места у арены нет — кладём поверх её верхнего
    края (не внизу: там стики) и гасим через несколько секунд. Отсчёт от #screen-game, а не от
    #app: в бою #app растянут на весь экран, и «низ» оказался бы под пальцами. */
@@ -436,14 +440,19 @@ html.touch.ingame .pip { width: 11px; height: 11px; }
   .stub-box { padding: 16px; }
   #bottomRow { flex-wrap: wrap; gap: 8px; }
 }
-/* Угол справа: громкость и мьют. Позиционирование на обёртке, кнопка внутри — обычная в строке
-   (тем же приёмом собран #topLeftBar с индикатором связи и фуллскрином). */
-#topRightBar { position:absolute; top:10px; right:10px; z-index:5; display:flex; align-items:center; gap:8px; }
+/* Угол слева сверху: пинг, громкость (кнопка и ползунок на ПК) и фуллскрин на телефоне. Один на
+   всю игру и привязан к окну (fixed), а не к #app: у #app в меню и в бою разная ширина, и угол
+   от неё прыгал. */
 #soundToggle { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; }
 #soundToggle:hover { background:#274363; }
 #volMini { width:90px; accent-color:#4aa8ff; }
 html.touch #volMini { display:none; } /* на телефоне регулировка живёт в настройках */
-#topLeftBar { position:absolute; top:12px; left:12px; z-index:5; display:flex; align-items:center; gap:8px; }
+#topLeftBar { position:fixed; top:calc(env(safe-area-inset-top) + 10px); left:calc(env(safe-area-inset-left) + 12px); z-index:5; display:flex; align-items:center; gap:8px; }
+/* На телефоне игровая панель ниже (36px), угол поднят, чтобы стоять с ней на одной линии, — на всех
+   экранах тача одинаково, чтобы не прыгал при входе в бой. */
+html.touch #topLeftBar { top:calc(env(safe-area-inset-top) + 3px); }
+/* На узком экране заголовок по центру дотягивается до угла — опускаем его под угол. */
+@media (max-width: 640px) { h1.title { margin-top: 36px; } }
 #connState { font-size: 14px; color: #6f89a8; display: flex; align-items: baseline; gap: 6px; }
 #fsTopBtn { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; }
 #fsTopBtn:hover { background:#274363; }
@@ -468,7 +477,12 @@ html.touch #volMini { display:none; } /* на телефоне регулиро�
 #replacedBanner button { padding: 4px 12px; font-size: 13px; background: #ff8a8a; color: #2a0b0b; border: 0; border-radius: 6px; font-weight: 600; cursor: pointer; }
 #replacedBanner button:hover { background: #ffb0b0; }
 #toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: #16283f; border: 1px solid #ff5b5b; color: #ffd6d6; padding: 10px 18px; border-radius: 8px; font-size: 14px; z-index: 10; max-width: 80vw; text-align: center; }
-.footer { margin-top: auto; padding-top: 24px; font-size: 11px; color: #4b6a8a; }
+/* Подпись версии — одна на всю игру: по центру нижнего края окна, на всех экранах и в бою.
+   Привязана к окну (fixed), а не к потоку #app, поэтому не скачет при входе в матч; клики
+   сквозь неё проходят. Снизу у #app запас под неё, чтобы последняя строка меню не пряталась. */
+.footer { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 4px); transform: translateX(-50%);
+  margin: 0; padding: 0; font-size: 11px; color: #4b6a8a; white-space: nowrap; pointer-events: none; z-index: 4; }
+html:not(.ingame) #app { padding-bottom: 28px; }
 
 /* Отсчёт перед стартом матча: крупная цифра поверх арены, кликов не перехватывает. */
 #countdown {
@@ -496,6 +510,11 @@ html.touch #volMini { display:none; } /* на телефоне регулиро�
 #pveInfo { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* Обучение: короткая плашка «Готово!» по центру арены вместо нижнего тоста. */
+#respawnMsg {
+  position: absolute; left: 50%; top: 40%; transform: translateX(-50%); pointer-events: none;
+  background: rgba(22, 40, 63, 0.85); color: #e6f0ff; padding: 8px 18px; border-radius: 10px;
+  font-size: 18px; font-weight: 700; white-space: nowrap;
+}
 #tutFlash {
   position: absolute; left: 50%; top: 22%; transform: translateX(-50%);
   background: rgba(22, 40, 63, 0.92); border: 1px solid #7CFFB2; color: #d6ffe8;

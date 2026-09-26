@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 )
 
 // Member — участник лобби.
@@ -26,7 +28,8 @@ type Room struct {
 	HostIP     string
 	Mode       int
 	Arena      int
-	GameMode   string // "" | "pvp" | "survival" | "defense"
+	GameMode   string // "" | "pvp" | "deathmatch" | "survival" | "defense"
+	KillLimit  int    // deathmatch: выбиваний команды для победы (нормализует hub)
 	Campaign   bool   // PvE: кампания (иначе эндлесс)
 	Difficulty int    // PvE: 0..2
 	Visibility string // "open" — видна в списке и открыта; "closed" — нужен код
@@ -39,7 +42,7 @@ type Room struct {
 }
 
 // IsPvE — комната играет кооперативный PvE (не PvP).
-func (r *Room) IsPvE() bool { return r.GameMode != "" && r.GameMode != "pvp" }
+func (r *Room) IsPvE() bool { return sim.IsPvEMode(r.GameMode) }
 
 // Section — раздел меню, к которому относится комната: "pvp" или "pve".
 func (r *Room) Section() string {
@@ -82,7 +85,7 @@ var (
 // New создаёт комнату с хостом внутри.
 func New(code, hostID, hostIP string, cfg Config, now time.Time) *Room {
 	r := &Room{Code: code, HostID: hostID, HostIP: hostIP, Mode: cfg.Mode, Arena: cfg.Arena,
-		GameMode: cfg.GameMode, Campaign: cfg.Campaign, Difficulty: cfg.Difficulty,
+		GameMode: cfg.GameMode, KillLimit: cfg.KillLimit, Campaign: cfg.Campaign, Difficulty: cfg.Difficulty,
 		Visibility: NormalizeVisibility(cfg.Visibility), CreatedAt: now}
 	r.Members = append(r.Members, &Member{ID: hostID, Team: "A", Index: 0})
 	return r
@@ -233,7 +236,7 @@ func (r *Room) SetConfig(hostID string, cfg Config, arenaCount int) error {
 	if cfg.Arena < 0 || cfg.Arena >= arenaCount {
 		return ErrBadArena
 	}
-	pve := cfg.GameMode != "" && cfg.GameMode != "pvp"
+	pve := sim.IsPvEMode(cfg.GameMode)
 	maxN := 2 * cfg.Mode
 	if pve {
 		maxN = cfg.Mode
@@ -243,9 +246,10 @@ func (r *Room) SetConfig(hostID string, cfg Config, arenaCount int) error {
 	}
 	vis := NormalizeVisibility(cfg.Visibility)
 	changed := r.Mode != cfg.Mode || r.Arena != cfg.Arena || r.GameMode != cfg.GameMode ||
-		r.Campaign != cfg.Campaign || r.Difficulty != cfg.Difficulty || r.Visibility != vis
+		r.KillLimit != cfg.KillLimit || r.Campaign != cfg.Campaign || r.Difficulty != cfg.Difficulty ||
+		r.Visibility != vis
 	r.Mode, r.Arena = cfg.Mode, cfg.Arena
-	r.GameMode, r.Campaign, r.Difficulty = cfg.GameMode, cfg.Campaign, cfg.Difficulty
+	r.GameMode, r.KillLimit, r.Campaign, r.Difficulty = cfg.GameMode, cfg.KillLimit, cfg.Campaign, cfg.Difficulty
 	r.Visibility = vis
 	// Игрок соглашался играть в другие правила — готовность снимается со всех.
 	if changed {
@@ -270,6 +274,7 @@ type Config struct {
 	Mode       int
 	Arena      int
 	GameMode   string
+	KillLimit  int
 	Campaign   bool
 	Difficulty int
 	Visibility string

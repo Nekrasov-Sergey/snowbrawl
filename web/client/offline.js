@@ -27,7 +27,7 @@ window.SBOffline = (function () {
     var seed = (Math.random() * 0xffffffff) >>> 0;
     var rng = Sim.makeRng(seed);
     var gameMode = cfg.gameMode || 'pvp';
-    var pve = gameMode !== 'pvp';
+    var pve = Sim.PVE_GAME_MODES.indexOf(gameMode) >= 0;
     var players = cfg.tutorial
       ? [{ id: 'me', team: 'A', role: cfg.role, bot: false, nick: 'Вы' }]
       : buildPlayers(cfg.mode, cfg.role, rng, pve ? cfg.difficulty : cfg.botLevel, pve);

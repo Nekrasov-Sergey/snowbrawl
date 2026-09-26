@@ -811,6 +811,57 @@ func TestPveRoomMatch(t *testing.T) {
 	host.close()
 }
 
+// TestDeathmatchRoomMatch — «Бой насмерть» в комнате: лимит по умолчанию берётся по размеру,
+// хост меняет его через room.config, матч стартует с командой B из ботов «Бот …», а лимит
+// доезжает до снапшота.
+func TestDeathmatchRoomMatch(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, nil)
+	host := s.connect(t, "Хост", "")
+
+	host.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0, GameMode: "deathmatch"})
+	var rs protocol.RoomState
+	host.expect(protocol.SRoomState, &rs)
+	if rs.GameMode != "deathmatch" || rs.KillLimit != 10 {
+		t.Fatalf("new deathmatch room 2x2: gameMode=%q killLimit=%d, want deathmatch/10", rs.GameMode, rs.KillLimit)
+	}
+
+	host.send(protocol.CRoomConfig, protocol.RoomConfig{Mode: 2, Arena: 0, GameMode: "deathmatch", KillLimit: 7})
+	host.expect(protocol.SRoomState, &rs)
+	if rs.KillLimit != 10 {
+		t.Fatalf("killLimit 7 is not allowed, want default 10, got %d", rs.KillLimit)
+	}
+	host.send(protocol.CRoomConfig, protocol.RoomConfig{Mode: 2, Arena: 0, GameMode: "deathmatch", KillLimit: 5})
+	host.expect(protocol.SRoomState, &rs)
+	if rs.KillLimit != 5 {
+		t.Fatalf("killLimit = %d, want 5", rs.KillLimit)
+	}
+
+	host.send(protocol.CRoomStart, nil)
+	var ms protocol.MatchStart
+	host.expect(protocol.SMatchStart, &ms)
+	if ms.GameMode != "deathmatch" || len(ms.Players) != 4 {
+		t.Fatalf("match.start: gameMode=%q players=%d, want deathmatch/4", ms.GameMode, len(ms.Players))
+	}
+	for _, p := range ms.Players {
+		if p.Bot && !strings.HasPrefix(p.Nick, "Бот ") {
+			t.Fatalf("deathmatch bot nick %q, want «Бот …»", p.Nick)
+		}
+	}
+	var snap protocol.Snapshot
+	host.expect(protocol.SSnapshot, &snap)
+	var ss struct {
+		KillLimit int `json:"killLimit"`
+	}
+	if err := json.Unmarshal(snap.State, &ss); err != nil {
+		t.Fatal(err)
+	}
+	if ss.KillLimit != 5 {
+		t.Fatalf("snapshot killLimit = %d, want 5", ss.KillLimit)
+	}
+	host.close()
+}
+
 func TestReconnectIntoMatch(t *testing.T) {
 	t.Parallel()
 	s := newServer(t, nil)

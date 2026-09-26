@@ -485,6 +485,7 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 		return
 	}
 	difficulty := clampDifficulty(req.Difficulty)
+	killLimit := h.killLimit(gameMode, req.Mode, req.KillLimit)
 	live := 0
 	for _, r := range h.rooms {
 		if r.HostIP == p.IP && !r.IsEmpty() {
@@ -500,7 +501,7 @@ func (h *Hub) handleRoomCreate(p *session.Player, data json.RawMessage) {
 		code = room.GenerateCode()
 	}
 	r := room.New(code, p.ID, p.IP, room.Config{Mode: req.Mode, Arena: req.Arena, GameMode: gameMode,
-		Campaign: req.Campaign, Difficulty: difficulty, Visibility: req.Visibility}, h.now())
+		KillLimit: killLimit, Campaign: req.Campaign, Difficulty: difficulty, Visibility: req.Visibility}, h.now())
 	h.rooms[code] = r
 	p.Training = false
 	p.Place, p.RoomCode = session.InRoom, code
@@ -623,7 +624,8 @@ func (h *Hub) handleRoomConfig(p *session.Player, data json.RawMessage) {
 		return
 	}
 	cfg := room.Config{Mode: req.Mode, Arena: req.Arena, GameMode: gameMode,
-		Campaign: req.Campaign, Difficulty: clampDifficulty(req.Difficulty), Visibility: req.Visibility}
+		KillLimit: h.killLimit(gameMode, req.Mode, req.KillLimit),
+		Campaign:  req.Campaign, Difficulty: clampDifficulty(req.Difficulty), Visibility: req.Visibility}
 	if err := r.SetConfig(p.ID, cfg, h.prog.ArenaCount()); err != nil {
 		h.sendErrP(p, protocol.ErrNotAllowed, err.Error())
 		return
@@ -753,7 +755,7 @@ func (h *Hub) startRoomMatch(r *room.Room) *match.Match {
 		players = append(players, protocol.MatchPlayer{ID: m.ID, Nick: mp.Nick, Team: m.Team, Index: m.Index,
 			Role: m.Role, Rank: h.rankOf(mp)})
 	}
-	m := h.launchMatch(r.Code, r.Mode, r.Arena, r.GameMode, r.Campaign, r.Difficulty, players)
+	m := h.launchMatch(r, players)
 	if m == nil {
 		return nil
 	}
@@ -771,6 +773,15 @@ func normGameMode(gm string) string {
 	return gm
 }
 
+// killLimit — лимит выбиваний комнаты: в deathmatch допустимое значение из sim.js или значение
+// по умолчанию для размера команд, в остальных режимах 0 (поле не показывается и не хранится).
+func (h *Hub) killLimit(gameMode string, mode, want int) int {
+	if gameMode != "deathmatch" {
+		return 0
+	}
+	return h.prog.KillLimitFor(mode, want)
+}
+
 // clampDifficulty ограничивает ручку сложности диапазоном 0..2. Не присланная сложность —
 // «Обычный» (1), а не «Лёгкий»: иначе забытое поле незаметно ослабляло бы ботов.
 func clampDifficulty(d *int) int {
@@ -783,8 +794,8 @@ func clampDifficulty(d *int) int {
 func (h *Hub) roomState(r *room.Room) protocol.RoomState {
 	ready, _ := r.ReadyCount(h.connectedByID)
 	st := protocol.RoomState{Code: r.Code, HostID: r.HostID, Mode: r.Mode, Arena: r.Arena,
-		GameMode: r.GameMode, Campaign: r.Campaign, Difficulty: r.Difficulty, Visibility: r.Visibility,
-		InMatch: r.InMatch, LastWinner: r.LastWinner, ReadyCount: ready}
+		GameMode: r.GameMode, KillLimit: r.KillLimit, Campaign: r.Campaign, Difficulty: r.Difficulty,
+		Visibility: r.Visibility, InMatch: r.InMatch, LastWinner: r.LastWinner, ReadyCount: ready}
 	for _, m := range r.Members {
 		p := h.byID[m.ID]
 		rp := protocol.RoomPlayer{ID: m.ID, Team: m.Team, Index: m.Index, Role: m.Role,
@@ -827,13 +838,14 @@ func (h *Hub) broadcastRoom(r *room.Room) {
 
 // ---- Матчи ----
 
-// launchMatch дополняет состав ботами, создаёт матч и переводит игроков в него.
-func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, campaign bool, difficulty int, humans []protocol.MatchPlayer) *match.Match {
-	players := h.fillTeams(mode, gameMode, difficulty, humans)
+// launchMatch дополняет состав ботами, создаёт матч по настройкам комнаты r и переводит игроков в него.
+func (h *Hub) launchMatch(r *room.Room, humans []protocol.MatchPlayer) *match.Match {
+	roomCode, mode := r.Code, r.Mode
+	players := h.fillTeams(mode, r.GameMode, r.Difficulty, humans)
 	opts := match.Options{
 		TickRate: h.cfg.TickRate, AFKTimeout: h.cfg.AFKTimeout, Countdown: h.cfg.Countdown, Log: h.log, Now: h.now,
 		TimeScale: h.cfg.TimeScale,
-		GameMode:  gameMode, Campaign: campaign, Difficulty: difficulty,
+		GameMode:  r.GameMode, KillLimit: r.KillLimit, Campaign: r.Campaign, Difficulty: r.Difficulty,
 	}
 	if h.cfg.Seed != 0 {
 		// Зерно матча — производная от h.rng, а не от cfg.Seed напрямую: иначе все матчи одного
@@ -841,7 +853,7 @@ func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, cam
 		seed := h.rng.Uint32()
 		opts.Seed = &seed
 	}
-	m, err := match.New(h.prog, roomCode, mode, arena, players, opts, h.onMatchEnd)
+	m, err := match.New(h.prog, roomCode, mode, r.Arena, players, opts, h.onMatchEnd)
 	if err != nil {
 		h.log.Error().Err(err).Msg("create match")
 		for _, hp := range humans {
@@ -874,7 +886,7 @@ func (h *Hub) launchMatch(roomCode string, mode, arena int, gameMode string, cam
 // врагов создаёт волновой планировщик в sim.js.
 func (h *Hub) fillTeams(mode int, gameMode string, difficulty int, humans []protocol.MatchPlayer) []protocol.MatchPlayer {
 	roles := h.prog.Roles()
-	pve := gameMode != "" && gameMode != "pvp"
+	pve := sim.IsPvEMode(gameMode)
 	players := make([]protocol.MatchPlayer, 0, 2*mode)
 	count := map[string]int{"A": 0, "B": 0}
 	nicks := map[string]int{}

@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.16.0';
+  var SIM_VERSION = '1.17.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -29,14 +29,21 @@
   var WALL_HP = 3;                    // снежная стена Щита: столько попаданий держит (взрыв — сразу)
   var EXPLOSION_RADIUS = 58;
   var SUBSTEP_MAX = 1 / 60;           // максимальный подшаг физики, с
+  // Труп тает CORPSE_MS: столько клиент рисует таяние, и ровно тогда выбитый боец встаёт —
+  // в «Бое насмерть» и в PvE (если у пати есть жизни). Отсчёт до возрождения — 3, 2, 1.
+  var CORPSE_MS = 3000;
+  var RESPAWN_IFRAME_MS = 3000;       // неуязвимость после возрождения — чтобы не фармили у базы
+
+  // --- PvP «Бой насмерть» (gameMode: 'deathmatch'): выбитые встают, игра до killLimit выбиваний ---
+  var DM_KILL_LIMITS = [5, 10, 15, 20];  // выбор хоста; по умолчанию — DM_KILL_LIMITS[mode-1]
+  var DM_DURATION_MS = 10 * 60 * 1000;   // запасной таймер: лимит не набран — победа по счёту
 
   // --- PvE-режим «Волны» (gameMode: 'survival' | 'defense') ---
-  var GAME_MODES = ['pvp', 'survival', 'defense'];
+  var GAME_MODES = ['pvp', 'deathmatch', 'survival', 'defense'];
+  var PVE_GAME_MODES = ['survival', 'defense'];
   var PVE_MATCH_CAP_MS = 60 * 60 * 1000; // абсолютный потолок PvE-матча (предохранитель)
   var WAVE_BREAK_MS = 12000;             // пауза между волнами
   var MAX_ENEMIES = 24;                  // потолок одновременно живых врагов (размер снапшота, стоимость goja)
-  var PVE_RESPAWN_MS = 2500;             // задержка возрождения члена пати, пока есть жизни
-  var PVE_RESPAWN_IFRAME_MS = 3000;      // неуязвимость после возрождения — чтобы не фармили у базы
   var PVE_LIVES = 3;                     // жизни на волну
   var PVE_FIRST_WAVE_MS = 1500;          // первая волна через столько после старта
   var SNOWMAN_HP = 40;
@@ -355,7 +362,8 @@
       nextFxId: 1,
       gameOver: false,
       winner: null,          // 'A' | 'B' | null (ничья/не закончен)
-      endReason: '',          // '' | 'ko' | 'timeout' | PvE: 'cleared'|'wiped'|'objective'|'expired'
+      endReason: '',          // '' | 'ko' | 'timeout' | 'kills' | PvE: 'cleared'|'wiped'|'objective'|'expired'
+      killLimit: 0,          // «Бой насмерть»: выбиваний команды для победы; 0 — в других режимах
       pve: null,
       tutorial: false,       // обучение: матч не кончается, человек не выбывает
       tutorialLockEnemy: false, // обучение: соперник не опускается ниже 1 HP (последний шаг)
@@ -369,10 +377,11 @@
 
   /**
    * config = {
-   *   gameMode?: 'pvp' | 'survival' | 'defense',   // по умолчанию 'pvp'
+   *   gameMode?: 'pvp' | 'deathmatch' | 'survival' | 'defense',   // по умолчанию 'pvp'
    *   mode: 1..4,                        // PvP — размер команды; PvE — размер пати
    *   arenaIndex: 0..ARENAS.length-1,   // PvP; в PvE арену задаёт уровень кампании
-   *   durationMs?: number,              // PvP — таймер матча (5 мин); PvE игнорируется
+   *   durationMs?: number,              // PvP — таймер матча (5 мин, в deathmatch 10); PvE игнорируется
+   *   killLimit?: number,               // deathmatch — одно из DM_KILL_LIMITS, иначе по размеру
    *   difficulty?: 0|1|2,               // PvE — ручка сложности (боты пати + сдвиг врагов)
    *   campaign?: bool,                  // PvE — true (кампания) или false (эндлесс сразу)
    *   pve?: { levels?, waves? },        // PvE — урезание для тестов
@@ -380,6 +389,8 @@
    *   players: [{ id, team, role, bot, nick?, botLevel? }]
    * }
    * PvP: ровно 2*mode бойцов, команды A/B. PvE: 1..4 бойцов, все — команда A (люди + боты).
+   * Deathmatch — тот же PvP, но выбитый встаёт на своей базе через CORPSE_MS, и матч идёт до
+   * killLimit выбиваний команды (см. updateDeathmatch и checkWin).
    *
    * Обучение (`tutorial: true`) — тот же PvP, но с тремя послаблениями: состав может быть
    * неполным (хоть один боец), матч не заканчивается ни по KO, ни по таймеру, и боец-человек
@@ -392,7 +403,8 @@
     if (GAME_MODES.indexOf(gameMode) < 0) throw new Error('sim: bad gameMode ' + gameMode);
     var n = config.mode;
     if (MODES.indexOf(n) < 0) throw new Error('sim: bad mode ' + n);
-    if (gameMode !== 'pvp') return createPveMatch(config, seed, rng, gameMode, n);
+    if (PVE_GAME_MODES.indexOf(gameMode) >= 0) return createPveMatch(config, seed, rng, gameMode, n);
+    var dm = gameMode === 'deathmatch';
 
     var arenaIndex = config.arenaIndex | 0;
     if (!ARENAS[arenaIndex]) throw new Error('sim: bad arenaIndex ' + arenaIndex);
@@ -400,8 +412,10 @@
     if (!config.players || !config.players.length) throw new Error('sim: need players');
     if (!tutorial && config.players.length !== 2 * n) throw new Error('sim: need ' + (2 * n) + ' players');
 
-    var state = baseState(seed, rng, 'pvp', n, arenaIndex, config.durationMs || DEFAULT_DURATION_MS);
+    var state = baseState(seed, rng, gameMode, n, arenaIndex,
+      config.durationMs || (dm ? DM_DURATION_MS : DEFAULT_DURATION_MS));
     state.tutorial = tutorial;
+    if (dm) state.killLimit = dmKillLimit(n, config.killLimit);
     var players = state.players, countA = 0, countB = 0, ysA = spawnYs(n), ysB = spawnYs(n);
     for (var i = 0; i < config.players.length; i++) {
       var pc = config.players[i];
@@ -421,6 +435,12 @@
       if (!tutorial) players[k].specialCooldown = startCooldown(players[k].role);
     }
     return state;
+  }
+
+  /** Лимит выбиваний «Боя насмерть»: значение из DM_KILL_LIMITS или значение по умолчанию для размера. */
+  function dmKillLimit(n, want) {
+    want = +want;
+    return DM_KILL_LIMITS.indexOf(want) >= 0 ? want : DM_KILL_LIMITS[n - 1];
   }
 
   /** PvE-матч: пати на команде A, враги волн приходят по ходу матча на команду B. */
@@ -818,11 +838,16 @@
   }
   function findNearestEnemy(state, p) {
     var best = null, bestD = Infinity;
+    // В «Бое насмерть» только что вставший неуязвим 3 с: бот выбирает его, лишь когда других нет,
+    // иначе тратит запас в пустоту у чужой базы.
+    var dm = state.killLimit > 0, bestShielded = true;
     for (var i = 0; i < state.players.length; i++) {
       var q = state.players[i];
       if (q.team === p.team || !alive(q)) continue;
       var d = Math.hypot(q.x - p.x, q.y - p.y);
-      if (d < bestD) { bestD = d; best = q; }
+      var shielded = dm && state.time < q.iframeUntil;
+      if (dm && shielded && !bestShielded) continue;
+      if (d < bestD || (dm && bestShielded && !shielded)) { bestD = d; best = q; bestShielded = shielded; }
     }
     // PvE «защита»: рядовой враг команды B идёт на снеговика, пока рядом нет игрока
     if (state.pve && state.pve.objective === 'defense' && p.team === 'B' && p.enemyType !== 'boss'
@@ -1043,7 +1068,8 @@
   function applyTaram(state, p) {
     for (var i = 0; i < state.players.length; i++) {
       var q = state.players[i];
-      if (q.team === p.team || !alive(q) || (p.taramHits && p.taramHits[q.id])) continue;
+      // Неуязвимого (рывок, возрождение) таран не сбивает: иначе вставшего тут же оглушали у базы.
+      if (q.team === p.team || !alive(q) || state.time < q.iframeUntil || (p.taramHits && p.taramHits[q.id])) continue;
       if (Math.hypot(q.x - p.x, q.y - p.y) <= p.radius + q.radius + 5) {
         var dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy) || 1;
         var kres = 1 - (q.knockResist || 0);
@@ -1260,6 +1286,11 @@
     if (state.gameOver) return;
     if (state.tutorial) return;            // обучение заканчивает клиент, когда пройден последний шаг
     if (state.pve) return;                 // исход PvE — в checkPveWin (зовётся из updatePve)
+    if (state.killLimit) {                 // «Бой насмерть»: выбитые встают, считаем выбивания
+      checkDeathmatchWin(state);
+      if (state.gameOver) emit(state, { type: 'matchEnd', winner: state.winner });
+      return;
+    }
     var aAlive = teamAlive(state, 'A').length, bAlive = teamAlive(state, 'B').length;
     if (bAlive === 0 && aAlive === 0) { state.gameOver = true; state.winner = null; state.endReason = 'timeout'; }
     else if (bAlive === 0) { state.gameOver = true; state.winner = 'A'; state.endReason = 'ko'; }
@@ -1284,14 +1315,62 @@
                                      : PVE_LEVELS[PVE_LEVELS.length - 1].arena;
   }
   // Случайная точка в прямоугольнике базы (не фиксированный слот) — иначе противник зажимает
-  // одну и ту же точку появления и фармит фраги (с 1.16.0, вместе с PVE_RESPAWN_IFRAME_MS).
-  var PVE_BASE_HALF_W = 50, PVE_BASE_MARGIN_Y = 110;
-  function pveSpawnPoint(state) {
-    var cx = state.pve.objective === 'defense' ? 180 : 160;
-    var rng = state.rng;
-    var x = cx - PVE_BASE_HALF_W + rng.next() * PVE_BASE_HALF_W * 2;
-    var y = PVE_BASE_MARGIN_Y + rng.next() * (H - PVE_BASE_MARGIN_Y * 2);
+  // одну и ту же точку появления и фармит фраги (с 1.16.0, вместе с RESPAWN_IFRAME_MS).
+  // С 1.17.0 точка не попадает в препятствие: до 20 попыток, как у pickPickupSpot.
+  var BASE_HALF_W = 50, BASE_MARGIN_Y = 110, SPAWN_CLEAR_R = 14;
+  function baseSpawnPoint(state, cx) {
+    var rng = state.rng, obs = getAllObstacles(state), x, y;
+    for (var i = 0; i < 20; i++) {
+      x = cx - BASE_HALF_W + rng.next() * BASE_HALF_W * 2;
+      y = BASE_MARGIN_Y + rng.next() * (H - BASE_MARGIN_Y * 2);
+      if (!spawnBlocked(obs, x, y)) break;
+    }
     return { x: x, y: y };
+  }
+  function spawnBlocked(obs, x, y) {
+    var r = SPAWN_CLEAR_R;
+    return wallBlocks(obs, x, y, 0) || wallBlocks(obs, x - r, y, 0) || wallBlocks(obs, x + r, y, 0) ||
+      wallBlocks(obs, x, y - r, 0) || wallBlocks(obs, x, y + r, 0);
+  }
+  function pveSpawnPoint(state) {
+    return baseSpawnPoint(state, state.pve.objective === 'defense' ? 180 : 160);
+  }
+  /** База команды в PvP: A слева, B зеркально справа — там же, где стартовые точки createMatch. */
+  function teamBaseX(team) { return team === 'A' ? 160 : W - 160; }
+  /**
+   * Поднять выбитого бойца в точке sp: полный HP и запас, неуязвимость RESPAWN_IFRAME_MS,
+   * снятые замах, рывок и взведённая способность — пока он лежал, они не должны были дожить.
+   */
+  function respawnFighter(state, p, sp) {
+    p.hp = 3; p.koed = false; p.stunTimer = 0; p.charging = false; p.respawnAt = 0;
+    p.dashUntil = 0; p.armedSpecial = null; p.pendingSpecialThrow = false; p.reloadUntil = 0;
+    p.iframeUntil = state.time + RESPAWN_IFRAME_MS; p.bubble = p.role === 'Щит';
+    // Запас — как при рестарте уровня: пока боец лежал, дозарядка не шла (она требует alive),
+    // и без этого он вставал с одним зарядом, да ещё и в секунды неуязвимости.
+    p.ammo = AMMO_MAX; p.ammoAt = 0;
+    p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y };
+  }
+  /** «Бой насмерть»: выбитый встаёт на своей базе, когда растаял его труп. */
+  function updateDeathmatch(state) {
+    for (var i = 0; i < state.players.length; i++) {
+      var p = state.players[i];
+      if (!p.koed || state.time < p.koAt + CORPSE_MS) continue;
+      respawnFighter(state, p, baseSpawnPoint(state, teamBaseX(p.team)));
+      emit(state, { type: 'respawn', id: p.id, x: p.x, y: p.y });
+    }
+  }
+  function teamKills(state, team) {
+    var k = 0;
+    for (var i = 0; i < state.players.length; i++) if (state.players[i].team === team) k += state.players[i].kills;
+    return k;
+  }
+  function checkDeathmatchWin(state) {
+    var a = teamKills(state, 'A'), b = teamKills(state, 'B'), lim = state.killLimit;
+    if (a < lim && b < lim && state.time < state.durationMs) return;
+    state.gameOver = true;
+    // Лимит в одном подшаге могут добрать обе команды — тогда решает счёт, при равенстве ничья.
+    state.winner = a > b ? 'A' : (b > a ? 'B' : null);
+    state.endReason = a >= lim || b >= lim ? 'kills' : 'timeout';
   }
   function teamMembers(state, team) {
     var r = [];
@@ -1320,12 +1399,9 @@
   function respawnParty(state) {
     var team = teamMembers(state, 'A');
     for (var i = 0; i < team.length; i++) {
-      var p = team[i], sp = pveSpawnPoint(state);
-      p.hp = 3; p.koed = false; p.stunTimer = 0; p.charging = false; p.lives = PVE_LIVES;
-      p.respawnAt = 0; p.dashUntil = 0; p.armedSpecial = null; p.pendingSpecialThrow = false;
-      p.reloadUntil = 0; p.iframeUntil = 0; p.bubble = p.role === 'Щит';
-      p.ammo = AMMO_MAX; p.ammoAt = 0;
-      p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y };
+      var p = team[i];
+      respawnFighter(state, p, pveSpawnPoint(state));
+      p.lives = PVE_LIVES; p.iframeUntil = 0;
     }
   }
   function damageSnowman(state, amount, x, y) {
@@ -1426,16 +1502,11 @@
       if (p.koed && p.respawnAt === 0 && p.lives > 0 && pve.phase === 'fighting') {
         // только что слёг: списать жизнь
         p.lives -= 1;
-        if (p.lives > 0) p.respawnAt = state.time + PVE_RESPAWN_MS;
+        if (p.lives > 0) p.respawnAt = p.koAt + CORPSE_MS; // встаёт, когда растаял труп
         emit(state, { type: 'partyDown', id: p.id, lives: p.lives });
       }
       if (p.koed && p.respawnAt > 0 && state.time >= p.respawnAt) {
-        var sp = pveSpawnPoint(state);
-        p.hp = 3; p.koed = false; p.stunTimer = 0; p.respawnAt = 0; p.iframeUntil = state.time + PVE_RESPAWN_IFRAME_MS;
-        p.x = sp.x; p.y = sp.y; p.moveTarget = { x: sp.x, y: sp.y }; p.bubble = p.role === 'Щит';
-        // Запас — как при рестарте уровня: пока боец лежал, дозарядка не шла (она требует alive),
-        // и без этого он вставал с одним зарядом, да ещё и в секунды неуязвимости.
-        p.ammo = AMMO_MAX; p.ammoAt = 0;
+        respawnFighter(state, p, pveSpawnPoint(state));
         emit(state, { type: 'partyRespawn', id: p.id });
       }
     }
@@ -1723,6 +1794,7 @@
       updateSnowballs(state, obs, sdt);
       updatePickups(state);
       if (state.pve) { updateContactDamage(state); updatePve(state); }
+      if (state.killLimit) updateDeathmatch(state);
       checkWin(state);
     }
     return state.events;
@@ -1822,6 +1894,7 @@
     };
     if (state.pickup) snap.pickup = { x: state.pickup.x, y: state.pickup.y, r: PICKUP_RADIUS };
     if (state.pve) snap.pve = pveSnapshot(state);
+    if (state.killLimit) snap.killLimit = state.killLimit;
     return snap;
   }
   function pveSnapshot(state) {
@@ -1855,6 +1928,8 @@
     W: W, H: H, GRAVITY: GRAVITY, CHARGE_FULL_MS: CHARGE_FULL_MS, KO_ANIM_MS: KO_ANIM_MS,
     ARENAS: ARENAS, ROLE_STATS: ROLE_STATS, SPECIALS: SPECIALS, ABILITIES: ABILITIES,
     RELOAD_MS: RELOAD_MS, AMMO_MAX: AMMO_MAX, SHOT_GAP_MS: SHOT_GAP_MS, MODES: MODES, GAME_MODES: GAME_MODES,
+    PVE_GAME_MODES: PVE_GAME_MODES, DM_KILL_LIMITS: DM_KILL_LIMITS, DM_DURATION_MS: DM_DURATION_MS,
+    CORPSE_MS: CORPSE_MS, RESPAWN_IFRAME_MS: RESPAWN_IFRAME_MS,
     PVE_LEVEL_COUNT: PVE_LEVELS.length,
     BOT_LEVEL_NAMES: ['Лёгкий', 'Обычный', 'Сложный'],
     HERO_DESCRIPTIONS: HERO_DESCRIPTIONS, ABILITY_HINT_TEXT: ABILITY_HINT_TEXT, ALL_ROLES: ALL_ROLES,

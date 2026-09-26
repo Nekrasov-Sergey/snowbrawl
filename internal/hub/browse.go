@@ -268,7 +268,7 @@ func (h *Hub) roomBriefs(section string) []protocol.RoomBrief {
 		humans := len(r.Members)
 		capacity := r.Capacity()
 		b := protocol.RoomBrief{
-			Code: r.Code, Section: section, GameMode: r.GameMode, Campaign: r.Campaign,
+			Code: r.Code, Section: section, GameMode: r.GameMode, KillLimit: r.KillLimit, Campaign: r.Campaign,
 			Mode: r.Mode, Arena: r.Arena, Humans: humans, Capacity: capacity,
 			InMatch: r.InMatch, Visibility: r.Visibility,
 			AgeMs: now.Sub(r.CreatedAt).Milliseconds(),

@@ -19,14 +19,13 @@
 </head>
 <body>
 <div id="app">
-  <div id="topRightBar">
-    <!-- Ползунок только на ПК: на телефоне угол тесный, там громкость в настройках -->
-    <input type="range" id="volMini" min="0" max="100" step="5" title="Громкость" aria-label="Громкость">
-    <button id="soundToggle" title="Звук">🔊</button>
-  </div>
+  <!-- Пинг, громкость и фуллскрин — один угол на всю игру: слева сверху от края окна, на всех
+       экранах и в бою одинаково (position: fixed, см. style.css). -->
   <div id="topLeftBar">
     <div id="connState" title="Соединение с сервером"><span>●</span><span id="connPing"></span></div>
-    <!-- На телефоне полезна на всех экранах, а не только в бою; в бою работает кнопка в панели -->
+    <button id="soundToggle" title="Звук">🔊</button>
+    <!-- Ползунок только на ПК: на телефоне угол тесный, там громкость в настройках -->
+    <input type="range" id="volMini" min="0" max="100" step="5" title="Громкость" aria-label="Громкость">
     <button id="fsTopBtn" title="Во весь экран" hidden>⛶</button>
   </div>
   <h1 class="title">❄️ SNOWBRAWL</h1>
@@ -156,6 +155,7 @@
     <div class="lobbyConfig">
       <label id="lobbyGameModeWrap" hidden>Игра <select id="lobbyGameMode"></select>
         <button type="button" class="heroInfoBtn" id="lobbyGameModeInfoBtn" title="Описание">i</button></label>
+      <label id="lobbyKillLimitWrap" hidden>Выбиваний для победы <select id="lobbyKillLimit"></select></label>
       <label>Размер <select id="lobbyMode"></select></label>
       <label id="lobbyArenaWrap">Арена <select id="lobbyArena"></select></label>
       <label id="lobbyCampaignWrap" hidden>Формат игры <select id="lobbyCampaign"></select>
@@ -205,21 +205,36 @@
 
   <div id="screen-game" class="panel" hidden>
     <div id="topGameBar">
-      <button id="btnToMenu">← Выйти</button>
-      <div id="hint" style="margin:0">WASD — движение. Зажать ЛКМ — замах, отпустить — бросок, над бойцом или E — отмена. Q или ПКМ — способность.</div>
-      <!-- На телефоне сюда переезжает индикатор связи из шапки: она в бою скрыта, а пинг
-           должен быть ровно в одном месте — рядом с зелёной точкой. -->
-      <span id="gameConnSlot"></span>
-      <div id="pveInfo" hidden></div>
-      <div id="matchTimer">5:00</div>
-      <button id="fsBtn" title="Во весь экран" hidden>⛶</button>
+      <!-- Сетка из трёх ячеек: левая пустая — поверх неё лежит общий угол с пингом и громкостью
+           (#topLeftBar), в центре инфо режима, справа таймер и выход из боя. -->
+      <div class="tgbLeft"></div>
+      <div class="tgbCenter">
+        <div id="pveInfo" hidden></div>
+        <!-- «Бой насмерть»: счёт выбиваний команд и лимит; считается по полю k бойцов. -->
+        <div id="dmScore" hidden></div>
+        <!-- Только обучение на телефоне: текст текущего шага (tutorial.setStep). -->
+        <div id="hint" hidden></div>
+      </div>
+      <div class="tgbRight">
+        <div id="matchTimer">5:00</div>
+        <button id="btnToMenu">В меню</button>
+      </div>
     </div>
-    <div id="abilityHint"></div>
+    <!-- Способность — наверху по центру: кнопка, перезарядка и описание в одну строку.
+         На телефоне кнопка своя (✦ справа), описание — плашкой поверх арены. -->
+    <div id="abilityRow">
+      <div id="abilityBox">
+        <button id="abilityBtn">Способность (Q)</button>
+        <div id="abilityCd">готова</div>
+      </div>
+      <div id="abilityHint"></div>
+    </div>
     <div id="gameWrap">
       <div id="stage">
         <canvas id="c" width="900" height="560"></canvas>
         <div id="countdown" hidden>3</div>
         <div id="tutFlash" hidden></div>
+        <div id="respawnMsg" hidden></div>
         <div id="overlay">
           <h2 id="overlayText">ПОБЕДА</h2>
           <div id="overlaySub"></div>
@@ -246,10 +261,6 @@
         <div id="hudA">
           <div class="teamlabel a" id="teamALabel">Команда A</div>
           <div id="teamA"></div>
-        </div>
-        <div id="abilityBox">
-          <button id="abilityBtn">Способность (Q)</button>
-          <div id="abilityCd">готова</div>
         </div>
         <div id="hudB" style="text-align:right">
           <div class="teamlabel b" id="teamBLabel">Команда B</div>

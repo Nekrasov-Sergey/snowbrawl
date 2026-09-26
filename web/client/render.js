@@ -205,25 +205,72 @@ window.SBRender = (function () {
       ctx.globalAlpha = 1;
     }
 
-    // Подбираемая «жизнь» (+1 HP): красное сердечко, медленно крутится по горизонтали —
-    // масштаб по X через cos(время) — классический fake-3D flip, дешевле настоящего 3D.
-    var HEART_PERIOD = 2000; // мс на полный оборот
+    // Подбираемая «жизнь» (+1 HP): гладкое объёмное сердце, вращается вокруг вертикальной оси
+    // всегда в одну сторону. Это настоящая 3D-поверхность — неявная функция heartField, — кадры
+    // оборота строятся трассировкой лучей в offscreen-канвас и кэшируются по пиксельному размеру:
+    // кадр считается один раз при первом обращении (несколько мс), дальше только drawImage.
+    var HEART_PERIOD = 2000;   // мс на полный оборот
+    var HEART_FRAMES = 48;     // кадров на оборот
+    var HEART_K = 3;           // сплющенность по глубине: больше — тоньше в профиль
+    var HEART_SIZE = 0.66;     // масштаб модели относительно радиуса подбора
+    var heartCache = { px: 0, frames: [] };
+    // Сердце Таубина (x² + K·y² + z² − 1)³ = x²z³ + 0,05·K·y²z³, взятое кубическим корнем: та же
+    // поверхность, но градиент не вырождается на z = 0 — иначе посередине шла тёмная полоса.
+    // x — ширина, y — глубина, z — высота (острием вниз).
+    function heartField(x, y, z) {
+      return x * x + HEART_K * y * y + z * z - 1 - z * Math.cbrt(x * x + 0.05 * HEART_K * y * y);
+    }
+    var HEART_L = (function () { var l = [-0.45, 0.66, 0.6], n = Math.hypot(l[0], l[1], l[2]); return [l[0] / n, l[1] / n, l[2] / n]; })();
+    var HEART_H = (function () { var h = [HEART_L[0], HEART_L[1] + 1, HEART_L[2]], n = Math.hypot(h[0], h[1], h[2]); return [h[0] / n, h[1] / n, h[2] / n]; })();
+    function buildHeartFrame(R, th) {
+      var S = Math.ceil(R * 2.7), c0 = S / 2, sc = R / 0.95;
+      var ct = Math.cos(th), st = Math.sin(th), STEPS = 40, T0 = -1.4, T1 = 1.4;
+      var oc = document.createElement('canvas'); oc.width = S; oc.height = S;
+      var oct = oc.getContext('2d'), img = oct.createImageData(S, S), px = img.data;
+      var L = HEART_L, Hh = HEART_H, F = heartField;
+      for (var py = 0; py < S; py++) {
+        var zc = -((py + 0.5 - c0) / sc) + 0.1;
+        if (zc < -1.05 || zc > 1.3) continue;
+        for (var pxi = 0; pxi < S; pxi++) {
+          var u = (pxi + 0.5 - c0) / sc;
+          if (Math.abs(u) > 1.3) continue;
+          // Луч идёт от зрителя в глубину; модель повёрнута на th вокруг вертикали.
+          var hit = -1;
+          for (var i = 0; i <= STEPS; i++) {
+            var t = T0 + (T1 - T0) * i / STEPS;
+            if (F(u * ct - t * st, u * st + t * ct, zc) <= 0) { hit = i; break; }
+          }
+          if (hit < 0) continue;
+          var lo = hit === 0 ? T0 : T0 + (T1 - T0) * (hit - 1) / STEPS, hi = T0 + (T1 - T0) * hit / STEPS;
+          for (var b = 0; b < 14; b++) {
+            var mid = (lo + hi) / 2;
+            if (F(u * ct - mid * st, u * st + mid * ct, zc) <= 0) hi = mid; else lo = mid;
+          }
+          var X = u * ct - hi * st, Y = u * st + hi * ct, e = 2e-3;
+          var gx = F(X + e, Y, zc) - F(X - e, Y, zc), gy = F(X, Y + e, zc) - F(X, Y - e, zc), gz = F(X, Y, zc + e) - F(X, Y, zc - e);
+          var gl = Math.hypot(gx, gy, gz) || 1; gx /= gl; gy /= gl; gz /= gl;
+          var sx = gx * ct + gy * st, sd = gx * st - gy * ct; // нормаль в осях экрана: вправо, к зрителю
+          var lam = Math.max(0, sx * L[0] + sd * L[1] + gz * L[2]);
+          var sp = Math.pow(Math.max(0, sx * Hh[0] + sd * Hh[1] + gz * Hh[2]), 36);
+          var sh = 0.34 + 0.76 * lam, q = (py * S + pxi) * 4;
+          px[q] = Math.min(255, 236 * sh + 191 * sp); px[q + 1] = Math.min(255, 54 * sh + 191 * sp);
+          px[q + 2] = Math.min(255, 72 * sh + 191 * sp); px[q + 3] = 255;
+        }
+      }
+      oct.putImageData(img, 0, 0);
+      return oc;
+    }
     function drawHeartPickup(h) {
       var r = h.r || (Sim.PICKUP_RADIUS || 14);
-      ctx.save();
       ctx.beginPath(); ctx.ellipse(h.x, h.y + r * 0.7, r * 0.9, r * 0.32, 0, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fill();
-      var flip = Math.cos(h.time / HEART_PERIOD * Math.PI * 2);
-      ctx.translate(h.x, h.y); ctx.scale(Math.max(0.12, Math.abs(flip)), 1);
-      ctx.beginPath();
-      ctx.moveTo(0, r * 0.55);
-      ctx.bezierCurveTo(r * 1.15, -r * 0.15, r * 0.55, -r * 1.05, 0, -r * 0.35);
-      ctx.bezierCurveTo(-r * 0.55, -r * 1.05, -r * 1.15, -r * 0.15, 0, r * 0.55);
-      ctx.fillStyle = '#ff5b6a'; ctx.fill();
-      ctx.lineWidth = 1.4; ctx.strokeStyle = '#c23a48'; ctx.stroke();
-      ctx.beginPath(); ctx.arc(-r * 0.3, -r * 0.5, r * 0.22, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fill();
-      ctx.restore();
+      var R = Math.max(4, Math.round(r * HEART_SIZE * RS));
+      if (heartCache.px !== R) { heartCache.px = R; heartCache.frames = []; }
+      var turn = ((h.time % HEART_PERIOD) + HEART_PERIOD) % HEART_PERIOD / HEART_PERIOD;
+      var idx = Math.floor(turn * HEART_FRAMES) % HEART_FRAMES;
+      var fr = heartCache.frames[idx] || (heartCache.frames[idx] = buildHeartFrame(R, idx / HEART_FRAMES * Math.PI * 2));
+      var size = fr.width / RS;
+      ctx.drawImage(fr, h.x - size / 2, h.y - size / 2 - r * 0.05, size, size);
     }
 
     // Снежинка-«астерикс» для ауры Фризера: 3 луча + боковые засечки + яркое ядро в центре —
@@ -297,10 +344,10 @@ window.SBRender = (function () {
       rc.prevX = p.x;
       var throwT = (now - rc.throwAt) / THROW_MS;
       var abilT = (now - rc.abilAt) / ABIL_MS;
-      // Труп тает 4 с и стартует полупрозрачным — одинаково у PvE-мобов, союзников в PvE и
-      // бойцов PvP (раньше PvP-труп просто лежал до конца раунда без затухания).
+      // Труп тает Sim.CORPSE_MS (3 с) и стартует полупрозрачным — одинаково у PvE-мобов, союзников
+      // в PvE и бойцов PvP; к концу таяния выбитый боец и встаёт (deathmatch, PvE с жизнями).
       var dissolve = true;
-      var koMs = dissolve ? 4000 : (Sim.KO_ANIM_MS || 500), hitAge = snap.time - p.hitAt;
+      var koMs = dissolve ? Sim.CORPSE_MS : (Sim.KO_ANIM_MS || 500), hitAge = snap.time - p.hitAt;
       var mode = 'idle';
       if (p.koed) mode = 'ko';
       else if (hitAge >= 0 && hitAge < HIT_MS) mode = 'hit';
@@ -326,6 +373,15 @@ window.SBRender = (function () {
       };
     }
 
+    // Путь скруглённого прямоугольника на заданном контексте (roundRectPath выше рисует только
+    // на арене): для полосок HP в спрайте подписи и боезапаса.
+    function roundRectOn(c, x, y, w, h, rad) {
+      rad = Math.max(0, Math.min(rad, w / 2, h / 2));
+      c.beginPath();
+      if (c.roundRect) { c.roundRect(x, y, w, h, rad); return; }
+      c.moveTo(x + rad, y); c.arcTo(x + w, y, x + w, y + h, rad); c.arcTo(x + w, y + h, x, y + h, rad);
+      c.arcTo(x, y + h, x, y, rad); c.arcTo(x, y, x + w, y, rad); c.closePath();
+    }
     function labelOf(p, isMe, myTeam) {
       var base = nickOf(p), rank = rankOf(p);
       var maxHp = p.mhp || 3, hp = Math.max(0, Math.min(maxHp, p.hp));
@@ -339,7 +395,7 @@ window.SBRender = (function () {
       var oc = document.createElement('canvas'), c = oc.getContext('2d');
       c.font = (isMe ? 'bold ' : '') + '10px Segoe UI, Arial';
       var w = Math.ceil(Math.max(c.measureText(nick).width, 20)) + 8;
-      var NICK_H = 12, BAR_H = 9, GAP = 2;     // ник сверху, под ним полоска
+      var NICK_H = 12, BAR_H = 9, BAR_R = 3, GAP = 2;     // ник сверху, под ним полоска
       if (bar) w = Math.max(w, 38);
       var h = NICK_H + (bar ? GAP + BAR_H : 0);
       // Спрайт подписи растеризуем во внутреннем разрешении канваса (RS), рисуется он с явным
@@ -358,13 +414,17 @@ window.SBRender = (function () {
         // Ширина полоски — фиксированная (как у ника из 1-2 букв, минимальный случай), не от
         // длины ника: иначе у длинных имён/эмодзи бота полоска растягивалась заметно длиннее,
         // хотя HP у всех бойцов одного порядка.
+        // Края полоски скруглены; заливка обрезается той же формой, поэтому её край тоже круглый.
         var bw = BAR_W, bx = (w - bw) / 2, by = NICK_H + GAP;
-        c.fillStyle = 'rgba(11,22,34,0.62)';
-        c.fillRect(bx, by, bw, BAR_H);
+        roundRectOn(c, bx, by, bw, BAR_H, BAR_R);
+        c.fillStyle = 'rgba(11,22,34,0.62)'; c.fill();
+        c.save();
+        roundRectOn(c, bx + 1, by + 1, bw - 2, BAR_H - 2, BAR_R - 1); c.clip();
         c.fillStyle = col;
         c.fillRect(bx + 1, by + 1, Math.max(0, (bw - 2) * (hp / maxHp)), BAR_H - 2);
-        c.strokeStyle = 'rgba(11,22,34,0.85)'; c.lineWidth = 1;
-        c.strokeRect(bx + 0.5, by + 0.5, bw - 1, BAR_H - 1);
+        c.restore();
+        roundRectOn(c, bx + 0.5, by + 0.5, bw - 1, BAR_H - 1, BAR_R - 0.5);
+        c.strokeStyle = 'rgba(11,22,34,0.85)'; c.lineWidth = 1; c.stroke();
         c.font = 'bold 8px Segoe UI, Arial';
         c.lineWidth = 2.5; c.strokeStyle = 'rgba(11,22,34,0.9)';
         c.strokeText(String(hp), w / 2, by + BAR_H - 2);
@@ -408,6 +468,42 @@ window.SBRender = (function () {
     // дорого на телефоне, а 20 drawImage маленького буфера — нет. Буфер один на модуль и растёт
     // только при необходимости (как arenaCache).
     var HALO = 4, HALO_PAD = 10, AURA_COLOR = '#8ee6b4';
+
+    // Неуязвимый боец (рывок, возрождение — p.iframe) рисуется наполовину прозрачным. Прямо
+    // globalAlpha на основном канвасе нельзя: риг — это тело, руки, шапка отдельными фигурами, и
+    // они просвечивали бы друг сквозь друга. Поэтому модель рисуется в буфер размером с канвас
+    // (тем же преобразованием), а на арену переносится только её прямоугольник с альфой 0.5.
+    // На время отрисовки модели ctx подменяется буфером — так же рисуют и вложенные помощники.
+    var GHOST_ALPHA = 0.5;
+    var ghostBuf = null, ghostCtx = null;
+    function beginGhost(p, r) {
+      if (!ghostBuf) { ghostBuf = document.createElement('canvas'); ghostCtx = ghostBuf.getContext('2d'); }
+      if (ghostBuf.width !== canvas.width || ghostBuf.height !== canvas.height) {
+        ghostBuf.width = canvas.width; ghostBuf.height = canvas.height;
+      }
+      var m = ctx.getTransform();
+      // Коробка модели в единицах арены: с запасом на высокие модели (риг, големы).
+      var x0 = p.x - r * 3 - 12, x1 = p.x + r * 3 + 12, y0 = p.y - r * 5 - 24, y1 = p.y + r * 2 + 12;
+      var rx = Math.max(0, Math.floor(m.a * x0 + m.e)), ry = Math.max(0, Math.floor(m.d * y0 + m.f));
+      var rw = Math.min(ghostBuf.width, Math.ceil(m.a * x1 + m.e)) - rx;
+      var rh = Math.min(ghostBuf.height, Math.ceil(m.d * y1 + m.f)) - ry;
+      if (rw <= 0 || rh <= 0) return null;
+      ghostCtx.setTransform(1, 0, 0, 1, 0, 0);
+      ghostCtx.clearRect(rx, ry, rw, rh);
+      ghostCtx.setTransform(m);
+      ghostCtx.globalAlpha = 1; ghostCtx.globalCompositeOperation = 'source-over';
+      var g = { main: ctx, rx: rx, ry: ry, rw: rw, rh: rh };
+      ctx = ghostCtx;
+      return g;
+    }
+    function endGhost(g) {
+      ctx = g.main;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = GHOST_ALPHA;
+      ctx.drawImage(ghostBuf, g.rx, g.ry, g.rw, g.rh, g.rx, g.ry, g.rw, g.rh);
+      ctx.restore();
+    }
     var auraBuf = null, auraCtx = null;
     function drawAuraRig(p, r, rs, color, A, R) {
       var top = Rig.topOf(r, p.role, RIG_SCALE), bottom = Rig.bottomOf(r, p.role, RIG_SCALE);
@@ -836,7 +932,7 @@ window.SBRender = (function () {
     function drawGolem(ctx, p, snap) {
       var rc = rigC(p.id);
       var r = radiusOf(p), kind = p.et, boss = kind === 'boss';
-      var dead = p.koed ? Math.min(1, (snap.time - (p.koAt || snap.time)) / 4000) : -1;
+      var dead = p.koed ? Math.min(1, (snap.time - (p.koAt || snap.time)) / Sim.CORPSE_MS) : -1;
       var now = dead >= 0 ? 0 : performance.now() + rc.ph * 3; // труп не дёргается
       var hitAge = snap.time - p.hitAt;
       var hitT = (dead < 0 && hitAge >= 0 && hitAge < 260) ? hitAge / 260 : -1;
@@ -851,7 +947,7 @@ window.SBRender = (function () {
       ctx.translate(p.x + recoil, feet);
       ctx.fillStyle = 'rgba(20,40,70,0.18)';
       ctx.beginPath(); ctx.ellipse(0, -2, r * 1.05, r * 0.34, 0, 0, TAU2); ctx.fill();
-      if (dead >= 0) { // труп: оседает, заваливается, тает за 4 с (и уже стартует прозрачным)
+      if (dead >= 0) { // труп: оседает, заваливается, тает за CORPSE_MS (и уже стартует прозрачным)
         ctx.translate(0, dead * 6); ctx.rotate(dead * 0.5);
         ctx.globalAlpha *= Math.max(0, 0.6 - dead * 0.6);
       }
@@ -1015,9 +1111,9 @@ window.SBRender = (function () {
       var aimX = isMe && local && local.charging ? local.aimX : p.aimX;
       var aimY = isMe && local && local.charging ? local.aimY : p.aimY;
       var alive = p.hp > 0 && !p.koed;
-      // Труп истаял (см. koFade / drawGolem, 4 с) — кадр на него не тратим. Правило общее для
+      // Труп истаял (см. koFade / drawGolem, Sim.CORPSE_MS) — кадр на него не тратим. Правило общее для
       // PvE-моба, союзника в PvE (p.lives) и бойца PvP.
-      if (p.koed && (snap.time - (p.koAt || snap.time)) > 4400) return;
+      if (p.koed && (snap.time - (p.koAt || snap.time)) > Sim.CORPSE_MS) return;
       if (p.moving && alive) vy -= Math.abs(Math.sin(p.anim)) * 2;
       if (charging) {
         var dx = aimX - p.x, dy = aimY - p.y, d = Math.hypot(dx, dy) || 1;
@@ -1031,15 +1127,15 @@ window.SBRender = (function () {
 
       ctx.save();
       if (p.koed && !useRig && !golemKind) {
-        // Труп тает 4 с у всех, кто попадает в эту ветку (без рига и не голем) — см. dissolve в
-        // rigStateFor, здесь та же логика для не-ригованной модели.
-        var progress = Math.min(1, (snap.time - p.koAt) / 4000);
+        // Труп тает CORPSE_MS у всех, кто попадает в эту ветку (без рига и не голем) — см. dissolve
+        // в rigStateFor, здесь та же логика для не-ригованной модели.
+        var progress = Math.min(1, (snap.time - p.koAt) / Sim.CORPSE_MS);
         ctx.globalAlpha = 1 - 0.6 * progress;
         ctx.translate(p.x, p.y); ctx.rotate(progress * Math.PI / 2.2); ctx.translate(-p.x, -p.y);
       }
       ctx.beginPath(); ctx.ellipse(p.x, p.y + r * 0.6, r * 0.9, r * 0.35, 0, 0, Math.PI * 2);
       // Тень тает вместе с трупом (тело гасит koFade/drawGolem) — у любого павшего.
-      var shA = p.koed ? 0.15 * Math.max(0, 1 - (snap.time - (p.koAt || snap.time)) / 4000) : 0.15;
+      var shA = p.koed ? 0.15 * Math.max(0, 1 - (snap.time - (p.koAt || snap.time)) / Sim.CORPSE_MS) : 0.15;
       ctx.fillStyle = 'rgba(0,0,0,' + shA + ')'; ctx.fill();
 
       // Щит, пассив «Закалка»: свечение по контуру модели (drawAuraRig), рисуется под ригом.
@@ -1074,8 +1170,8 @@ window.SBRender = (function () {
 
       var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
 
-      // Рывок/таран: призрачный след и приподнятая прозрачность корпуса.
-      if (p.dash || p.iframe) {
+      // Рывок/таран: призрачный след. Неуязвимость — полупрозрачная модель, см. beginGhost.
+      if (p.dash) {
         var bdx = Math.cos(faceAng), bdy = Math.sin(faceAng);
         for (var gi = 1; gi <= 3; gi++) {
           ctx.globalAlpha = 0.16 * (4 - gi);
@@ -1091,45 +1187,49 @@ window.SBRender = (function () {
         slowIced = _c === 'frost' || _c === 'aura';
       }
 
-      if (golemKind) {
-        try { drawGolem(ctx, p, snap); }
-        catch (e) {
-          if (!drawGolem._warned) { console.error('drawGolem failed:', e); drawGolem._warned = 1; }
-          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 2; ctx.stroke();
-        }
-        if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.35)'; ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill(); }
-      } else if (useRig) {
-        try { Rig.drawFighter(ctx, p.x, p.y + r * 0.9, r, rs); }
-        catch (e) { Rig = null; drawRoleModel(ctx, p.role, vx, vy, r, faceAng); }
-        if (p.slow) {
-          ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.42)' : 'rgba(150,216,255,0.30)';
-          ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill();
-        }
-      } else {
-        ctx.save();
-        if (p.iframe) ctx.globalAlpha *= 0.6;
-        ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
-        ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
-        ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
-        // Замедление: наледь и аура Фризера — это ледяная корка со снежинками, лёд арены —
-        // прежний слабый тон. Различать важно: иначе в уроке Фризера не понять, что сработало.
-        if (p.slow) {
-          ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.55)' : 'rgba(150,216,255,0.42)';
-          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill();
-          if (slowIced) {
-            ctx.strokeStyle = 'rgba(200,240,255,0.9)'; ctx.lineWidth = 1.5;
-            ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.stroke();
-            ctx.fillStyle = 'rgba(235,250,255,0.95)';
-            for (var fl = 0; fl < 3; fl++) {
-              var fa2 = snap.time / 420 + fl * Math.PI * 2 / 3;
-              ctx.beginPath(); ctx.arc(vx + Math.cos(fa2) * (r + 5), vy + Math.sin(fa2) * (r + 5) * 0.6, 1.6, 0, Math.PI * 2);
-              ctx.fill();
+      var ghost = (p.iframe && alive) ? beginGhost(p, r) : null;
+      try {
+        if (golemKind) {
+          try { drawGolem(ctx, p, snap); }
+          catch (e) {
+            if (!drawGolem._warned) { console.error('drawGolem failed:', e); drawGolem._warned = 1; }
+            ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 2; ctx.stroke();
+          }
+          if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.35)'; ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill(); }
+        } else if (useRig) {
+          try { Rig.drawFighter(ctx, p.x, p.y + r * 0.9, r, rs); }
+          catch (e) { Rig = null; drawRoleModel(ctx, p.role, vx, vy, r, faceAng); }
+          if (p.slow) {
+            ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.42)' : 'rgba(150,216,255,0.30)';
+            ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill();
+          }
+        } else {
+          ctx.save();
+          ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
+          ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
+          ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
+          // Замедление: наледь и аура Фризера — это ледяная корка со снежинками, лёд арены —
+          // прежний слабый тон. Различать важно: иначе в уроке Фризера не понять, что сработало.
+          if (p.slow) {
+            ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.55)' : 'rgba(150,216,255,0.42)';
+            ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill();
+            if (slowIced) {
+              ctx.strokeStyle = 'rgba(200,240,255,0.9)'; ctx.lineWidth = 1.5;
+              ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.stroke();
+              ctx.fillStyle = 'rgba(235,250,255,0.95)';
+              for (var fl = 0; fl < 3; fl++) {
+                var fa2 = snap.time / 420 + fl * Math.PI * 2 / 3;
+                ctx.beginPath(); ctx.arc(vx + Math.cos(fa2) * (r + 5), vy + Math.sin(fa2) * (r + 5) * 0.6, 1.6, 0, Math.PI * 2);
+                ctx.fill();
+              }
             }
           }
-        }
-        ctx.restore();
+          ctx.restore();
 
-        drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
+          drawRoleModel(ctx, p.role, vx, vy, r, faceAng);
+        }
+      } finally {
+        if (ghost) endGhost(ghost); // ctx обязан вернуться к арене даже при сбое модели
       }
 
       // PvE-босс: корона рисуется в drawGolem; здесь только кольцо ярости в фазе 2.
@@ -1151,18 +1251,6 @@ window.SBRender = (function () {
         ctx.globalAlpha = 0.35 + 0.15 * Math.sin(snap.time / 90);
         ctx.beginPath(); ctx.arc(vx, vy, r + 14, 0, Math.PI * 2);
         ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
-        ctx.restore();
-      }
-      // Неуязвимость (рывок или возрождение в PvE, см. p.iframeUntil в sim.js) — отдельное
-      // пульсирующее кольцо поверх модели, видное всем: иначе противник не поймёт, почему урон
-      // не проходит, особенно на все 3 с после возрождения в PvE.
-      if (p.iframe && alive) {
-        ctx.save();
-        ctx.globalAlpha = 0.55 + 0.25 * Math.sin(snap.time / 130);
-        ctx.beginPath(); ctx.arc(vx, vy, r + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = '#bfe6f5'; ctx.lineWidth = 3;
-        ctx.shadowColor = '#bfe6f5'; ctx.shadowBlur = 6;
-        ctx.stroke();
         ctx.restore();
       }
       var lb = labelOf(p, isMe, myTeam);
@@ -1190,28 +1278,29 @@ window.SBRender = (function () {
       if (charging && isMe) drawAim(snap, p, aimX, aimY, power);
     }
 
-    var AMMO_H = 5, AMMO_GAP = 2, AMMO_CELL_GAP = 2, AMMO_FILL = '#ff9f2e', AMMO_PENDING = '#7CFFB2';
-    /** pending — нажатие ждёт заряда: подсвечиваем то отделение, которого игрок дожидается.
-        Без этого нажатие с пустым запасом не давало вообще никакой обратной связи: прежняя
-        зелёная дуга убрана, а обучение по-прежнему обещает, что бросок встанет в очередь. */
+    var AMMO_H = 6, AMMO_R = 2, AMMO_GAP = 2, AMMO_FILL = '#ff9f2e', AMMO_PENDING = '#7CFFB2';
+    /** Боезапас — одна скруглённая капсула шириной с полоску HP, внутри AMMO_MAX отделений встык,
+        разделённых тонкими тёмными чертами. pending — нажатие ждёт заряда: отделение, которого
+        игрок дожидается, подсвечено зелёным — без этого нажатие с пустым запасом не давало никакой
+        обратной связи, а обучение обещает, что бросок встанет в очередь. */
     function drawAmmoBar(p, x, y, w, pending) {
       var n = Sim.AMMO_MAX || 3;
       var full = Math.floor(p.am + 1e-6), frac = p.am - full;
+      ctx.save();
+      roundRectOn(ctx, x, y, w, AMMO_H, AMMO_R);
+      ctx.fillStyle = 'rgba(11,22,34,0.62)'; ctx.fill();
+      ctx.clip();
       for (var i = 0; i < n; i++) {
-        // Границы отделений считаем округлением от общей ширины, а не дробным шагом: остаток от
-        // деления уходит в последнее отделение, кромки остаются на целых пикселях, а суммарная
-        // ширина — ровно w, то есть в точности длина полоски HP.
-        var cx = x + Math.round(i * (w + AMMO_CELL_GAP) / n);
-        var cw = x + Math.round((i + 1) * (w + AMMO_CELL_GAP) / n) - AMMO_CELL_GAP - cx;
-        ctx.fillStyle = 'rgba(11,22,34,0.62)'; ctx.fillRect(cx, y, cw, AMMO_H);
+        // Границы отделений — округлением от общей ширины: кромки на целых пикселях, сумма ровно w.
+        var cx = x + Math.round(i * w / n), cw = x + Math.round((i + 1) * w / n) - cx;
         var fw = i < full ? cw : (i === full ? cw * frac : 0);
         if (fw > 0) { ctx.fillStyle = AMMO_FILL; ctx.fillRect(cx, y, fw, AMMO_H); }
-        var waited = pending && i === full;
-        ctx.strokeStyle = waited ? AMMO_PENDING : 'rgba(11,22,34,0.85)';
-        ctx.lineWidth = waited ? 1.5 : 1;
-        ctx.strokeRect(cx + 0.5, y + 0.5, cw - 1, AMMO_H - 1);
+        if (pending && i === full) { ctx.fillStyle = 'rgba(124,255,178,0.45)'; ctx.fillRect(cx, y, cw, AMMO_H); }
+        if (i > 0) { ctx.fillStyle = 'rgba(11,22,34,0.85)'; ctx.fillRect(cx - 0.5, y, 1, AMMO_H); }
       }
-      ctx.lineWidth = 1;
+      ctx.restore();
+      roundRectOn(ctx, x + 0.5, y + 0.5, w - 1, AMMO_H - 1, AMMO_R - 0.5);
+      ctx.strokeStyle = pending ? AMMO_PENDING : 'rgba(11,22,34,0.85)'; ctx.lineWidth = 1; ctx.stroke();
     }
     // Единый y-sorted проход: «высокие» объекты (укрытия, ёлки, разрушаемые, стены, бойцы,
     // мобы) рисуются в порядке нижней кромки — кто ниже по экрану, тот ближе и рисуется поверх.
@@ -1374,7 +1463,9 @@ window.SBRender = (function () {
       // рисовался големом и с чужой полоской HP.
       for (var kp in o) if (!(kp in pb)) delete o[kp];
       for (var k in pb) o[k] = pb[k];
-      if (pa) {
+      // Возрождение («Бой насмерть», PvE) переносит бойца от трупа на базу за один тик: такой
+      // переход не интерполируем, иначе он проезжал бы через всю арену.
+      if (pa && pa.koed === pb.koed) {
         o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
         o.anim = pa.anim + (pb.anim - pa.anim) * t;
         o.power = pa.power + (pb.power - pa.power) * t;

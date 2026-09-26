@@ -21,11 +21,11 @@
 |---|---|---|
 | `hello` | `{token?, nick, build, proto}` | первое сообщение после подключения; **пустой `nick`** у игрока без аккаунта — просьба выдать имя («Играть гостем»), сервер отвечает случайным `welcome.nick` |
 | `pong` | `{seq}` | ответ на зонд `ping` от сервера (см. ниже): по нему сервер считает задержку |
-| `room.create` | `{mode, arena, gameMode?, campaign?, difficulty?, visibility?}` | создать комнату, стать хостом |
+| `room.create` | `{mode, arena, gameMode?, killLimit?, campaign?, difficulty?, visibility?}` | создать комнату, стать хостом |
 | `room.join` | `{code, section?}` | войти по коду (четыре цифры `1234`; старый префикс `SNB-` отбрасывается); можно и в комнату с идущим матчем. `section` — раздел, из которого игрок вошёл: комната другого раздела отдаст `wrong_section` |
 | `room.slot` | `{team: "A"\|"B", index}` | занять слот команды (в PvE только `"A"`) |
 | `room.role` | `{role}` | выбрать бойца |
-| `room.config` | `{mode, arena, gameMode?, campaign?, difficulty?, visibility?}` | хост меняет настройки комнаты |
+| `room.config` | `{mode, arena, gameMode?, killLimit?, campaign?, difficulty?, visibility?}` | хост меняет настройки комнаты |
 | `room.ready` | `{ready}` | отметить готовность; когда готовы все люди в комнате, матч стартует сам |
 | `room.kick` | `{playerId}` | хост выгоняет |
 | `room.start` | — | хост стартует матч независимо от готовности, пустые слоты займут боты |
@@ -55,14 +55,14 @@
 | `error` | `{code, msg?}` | ошибка обработки; коды ниже |
 | `reload` | — | клиент устарел (другая сборка или протокол): `location.reload()` |
 | `drain` | `{active, inSeconds?}` | сервер готовится к перезапуску (баннер) |
-| `room.state` | `{code, hostId, mode, arena, gameMode?, campaign?, difficulty?, visibility, players[], inMatch, readyCount, lastWinner?}` | полное состояние лобби при любом изменении; у участника есть `ping?` |
+| `room.state` | `{code, hostId, mode, arena, gameMode?, killLimit?, campaign?, difficulty?, visibility, players[], inMatch, readyCount, lastWinner?}` | полное состояние лобби при любом изменении; у участника есть `ping?` |
 | `room.left` | `{code?: "kicked"}` | вы вышли/вас выгнали |
 | `room.list` | `{section, page, pages, total, rooms[]}` | страница списка комнат; пока игрок подписан, сервер сам присылает её заново при изменениях |
 | `room.match` | `{code, timeLeftMs, slots[]}` | состояние идущего матча для тех, кто сидит в лобби этой комнаты; уходит при изменении |
 | `match.start` | `{matchId, mode, arena, gameMode?, players[], yourId, tickRate, roomCode?}` | матч начался, вы переподключились или вошли за бойца своего слота |
 | `match.roster` | `{players[]}` | состав матча изменился: кто-то занял место бота или вышел |
 | `snapshot` | `{tick, s: <снапшот sim.js>, e?: [события шага], cd?: мс до старта}` | каждый тик (20/с) |
-| `match.end` | `{winner: "A"\|"B"\|"", yourTeam, reason, roomCode?}` | `reason` PvP ∈ `ko\|timeout\|abandoned\|shutdown`, PvE ∈ `cleared\|wiped\|objective\|expired` |
+| `match.end` | `{winner: "A"\|"B"\|"", yourTeam, reason, roomCode?}` | `reason` PvP ∈ `ko\|kills\|timeout\|abandoned\|shutdown`, PvE ∈ `cleared\|wiped\|objective\|expired` |
 | `ping` | `{seq}` | зонд задержки раз в 2 с; клиент обязан ответить `pong` с тем же номером. Самого числа зонд не несёт |
 | `self.ping` | `{ms}` | задержка самого адресата; уходит при изменении, в любом состоянии игрока. `0` — неизвестна |
 | `room.ping` | `{code, pings: [{id, ping}]}` | задержки участников лобби; уходит при изменении, отдельно от `room.state` |
@@ -84,7 +84,7 @@
 фиксируется на момент старта, в `room.state` и `chat.msg` он всегда актуальный.
 `room.match.slots[]`: `{team, index, nick, role, bot, hp, koed}` — `bot: true` значит, что бойца
 сейчас ведёт бот: слот свободен или его человек ушёл в лобби.
-`room.list.rooms[]`: `{code, section, gameMode?, campaign?, mode, arena, humans, bots, capacity,
+`room.list.rooms[]`: `{code, section, gameMode?, killLimit?, campaign?, mode, arena, humans, bots, capacity,
 inMatch, visibility, hostNick, ageMs, joinable, needCode?}`. Комнаты идут по времени создания,
 старые первыми, по 25 на страницу. У закрытой комнаты `code` пустой и `needCode: true` — иначе
 список сам выдавал бы то, что защищает код.
@@ -94,6 +94,12 @@ inMatch, visibility, hostNick, ageMs, joinable, needCode?}`. Комнаты ид
 снапшоте остаётся ботовским (симуляция не умеет переименовывать бойцов), поэтому имена в
 интерфейсе клиент берёт из состава матча. Выход из боя (`match.leave`) оставляет игрока в комнате,
 и место держится за ним, пока он в комнате: ушёл из комнаты или истекла сессия — слот свободен.
+
+`gameMode` ∈ `pvp` (на выбывание; пустое значение — тоже он) | `deathmatch` (бой насмерть) |
+`survival` | `defense`; два последних — PvE-раздел, остальные — PvP. `killLimit` есть только у
+deathmatch: сервер принимает значение из `DM_KILL_LIMITS` sim.js (5/10/15/20), а 0 или любое
+другое заменяет значением по умолчанию для размера команд (1×1 → 5 … 4×4 → 20). Смена лимита, как
+и любая настройка, снимает готовность. В `match.end` причина `kills` — команда набрала лимит.
 
 `snapshot.cd` > 0 — идёт отсчёт перед началом матча: симуляция стоит, `input` сервером не
 применяется, клиент рисует «3, 2, 1». Поля нет — матч идёт.
