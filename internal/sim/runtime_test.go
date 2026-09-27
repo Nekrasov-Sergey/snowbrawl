@@ -591,8 +591,8 @@ func TestTutorialShortCooldown(t *testing.T) {
 	cd := func(tutorial bool) float64 {
 		cfg := sim.MatchConfig{Mode: 1, ArenaIndex: 0, Tutorial: tutorial}
 		cfg.Players = []sim.PlayerConfig{{ID: "me", Team: "A", Role: "Щит"}}
-		if !tutorial { // обычный матч требует полного состава
-			cfg.Players = append(cfg.Players, sim.PlayerConfig{ID: "b0", Team: "B", Role: "Танк", Bot: true})
+		if !tutorial { // обычный матч требует полного состава; соперник стоит, чтобы не оглушить до Q
+			cfg.Players = append(cfg.Players, sim.PlayerConfig{ID: "b0", Team: "B", Role: "Танк"})
 		}
 		m, err := p.NewMatch(cfg, 11)
 		if err != nil {
@@ -646,7 +646,7 @@ func TestTutorialShortCooldown(t *testing.T) {
 		t.Fatalf("в обучении кулдаун %.1f с, ожидалось не больше 2", got)
 	}
 	if got := cd(false); got < 10 {
-		t.Fatalf("в обычном матче кулдаун стены %.1f с, ожидалось около 13.5", got)
+		t.Fatalf("в обычном матче кулдаун щита %.1f с, ожидалось около 13.5", got)
 	}
 }
 

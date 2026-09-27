@@ -14,7 +14,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SIM_VERSION = '1.17.0';
+  var SIM_VERSION = '1.18.0';
 
   // ============================================================
   // ДАННЫЕ ИГРЫ: роли, арены, способности
@@ -26,8 +26,9 @@
   var DEFAULT_DURATION_MS = 5 * 60 * 1000;
   var KO_ANIM_MS = 500;
   var WALL_LIFETIME_MS = 6000;
-  var WALL_HP = 3;                    // снежная стена Щита: столько попаданий держит (взрыв — сразу)
-  var EXPLOSION_RADIUS = 58;
+  var WALL_HP = 3;                    // ледяная стена босса: столько попаданий держит (взрыв — сразу)
+  var EXPLOSION_RADIUS = 66;          // взрывной снежок Бомбера (актив); с 1.18.0, было 58
+  var BOMBER_SPLASH_R = 26;           // пассив Бомбера «Осколки»: площадь обычного снежка
   var SUBSTEP_MAX = 1 / 60;           // максимальный подшаг физики, с
   // Труп тает CORPSE_MS: столько клиент рисует таяние, и ровно тогда выбитый боец встаёт —
   // в «Бое насмерть» и в PvE (если у пати есть жизни). Отсчёт до возрождения — 3, 2, 1.
@@ -63,18 +64,31 @@
 
   // --- Способности (пассив + актив у каждой роли), константы игрового баланса ---
   var DASH_DIST = 118, DASH_MS = 170, DASH_IFRAME_MS = 250, DASH_CD = 6;        // Раннер: Рывок
-  var TARAM_DIST = 150, TARAM_MS = 380, TARAM_CD = 10.5, TARAM_KNOCK = 64, TARAM_STUN = 0.8; // Танк: Таран
+  var TARAM_DIST = 150, TARAM_MS = 380, TARAM_KNOCK = 64, TARAM_STUN = 0.8; // таран босса PvE (у Танка — до 1.18.0)
+  // Танк: Удар оземь. Откат слабеет к краю круга: SLAM_KNOCK_NEAR у самого Танка, SLAM_KNOCK_FAR на
+  // границе SLAM_R. Радиус большой (почти треть высоты арены), поэтому замах дольше — от края успеть выйти.
+  var SLAM_WINDUP_MS = 450, SLAM_R = 160, SLAM_KNOCK_NEAR = 60, SLAM_KNOCK_FAR = 25, SLAM_STUN = 1, SLAM_CD = 12;
   var SNIPE_CD = 9;                                                             // Снайпер: Прицельный выстрел
   var BOMB_CD = 11.25;                                                          // Бомбер: Взрывной снежок
-  var FROST_R = 54, FROST_MS = 3000, FROST_SLOW = 0.40, FREEZER_CD = 9;         // Фризер: Ледяная волна
-  var FREEZER_AURA_R = 110, FREEZER_AURA_SLOW = 0.12;                           // Фризер: пассив «Стужа»
+  // Фризер: замедление от наледи (актив «Ледяная волна») и от ауры (пассив «Стужа») одно и то же,
+  // FREEZER_SLOW, и не складывается: в наледи внутри ауры враг всё равно медленнее ровно вдвое.
+  // С 1.18.0; до этого наледь давала 40 %, аура 12 %, и вместе они перемножались.
+  var FREEZER_SLOW = 0.5;
+  var FROST_R = 54, FROST_MS = 3000, FROST_SLOW = FREEZER_SLOW, FREEZER_CD = 9;  // Фризер: Ледяная волна
+  var FREEZER_AURA_R = 110, FREEZER_AURA_SLOW = FREEZER_SLOW;                   // Фризер: пассив «Стужа»
   var FREEZER_AURA_RELOAD = 0.25;   // в ауре у врага медленнее идут перезарядка и кулдаун
-  var WALL_CD = 13.5;                                                           // Щит: Снежная стена
-  var WALL_LONG = 55, WALL_THIN = 16;                                           // Щит: габариты стены (длинной стороной поперёк броска)
+  // Щит: поворотный снежный щит. ARC — половина сектора, TURN — рад/с доворота к прицелу (скорость
+  // и ширину подобрали на прототипе: 180° за ~0,8 с, сектор 110°). R — на каком расстоянии от
+  // корпуса щит ловит снежок, H — выше этой высоты снежок пролетает над щитом.
+  var BASTION_MS = 2500, BASTION_CD = 13.5, BASTION_SLOW = 0.5;
+  var BASTION_R = 30, BASTION_ARC = 55 * Math.PI / 180, BASTION_H = 24, BASTION_TURN = 4;
   var BUBBLE_REGEN_MS = 12000;                                                  // Щит: пассив «Закалка» (реген пузыря)
   var TUTORIAL_CD = 2;                                                          // обучение: кулдаун любой способности не больше этого
   var RUNNER_LOWHP_SPEEDUP = 1.20;                                             // Раннер: пассив «Второе дыхание»
-  var TANK_STUN_FACTOR = 0.5;                                                   // Танк: пассив «Броня»
+  var TANK_CC_FACTOR = 0.5;                                                     // Танк: пассив «Броня» — контроль вдвое короче
+  // Попадание: короткая запинка сбивает замах и рывок, но не держит цель под добивание (с 1.18.0;
+  // раньше 0,5–1 с по остатку HP). Заморозка — только прямое попадание ледяным снежком Фризера.
+  var HIT_FLINCH = 0.2, FREEZE_STUN = 1;
   var SNIPE_FLIGHT = 0.32, SNIPE_TRAVEL = 620;                                  // настильный быстрый выстрел
 
   // Перезарядка выстрела: пауза после броска, пока нельзя начать новый замах.
@@ -93,11 +107,11 @@
   // Актив на Q. needsDir — направленная (по прицелу), иначе «заряжает» следующий бросок.
   var ABILITIES = {
     'Раннер':  { active: { id: 'dash',      cooldown: DASH_CD,    needsDir: true  }, passive: 'lowhp_speed' },
-    'Танк':    { active: { id: 'taram',     cooldown: TARAM_CD,   needsDir: true  }, passive: 'armor' },
+    'Танк':    { active: { id: 'slam',      cooldown: SLAM_CD,    needsDir: false }, passive: 'armor' },
     'Снайпер': { active: { id: 'snipe',     cooldown: SNIPE_CD,   needsDir: false }, passive: 'precision' },
-    'Бомбер':  { active: { id: 'explosive', cooldown: BOMB_CD,    needsDir: false }, passive: 'sapper' },
+    'Бомбер':  { active: { id: 'explosive', cooldown: BOMB_CD,    needsDir: false }, passive: 'splash' },
     'Фризер':  { active: { id: 'frost',     cooldown: FREEZER_CD, needsDir: false }, passive: 'chill' },
-    'Щит':     { active: { id: 'wall',      cooldown: WALL_CD,    needsDir: true  }, passive: 'bubble' }
+    'Щит':     { active: { id: 'bastion',   cooldown: BASTION_CD, needsDir: true  }, passive: 'bubble' }
   };
 
   // Старт матча: способность не готова, а только начинает заряжаться — иначе первый же тик
@@ -190,20 +204,20 @@
 
   var HERO_DESCRIPTIONS = {
     'Раннер':  'Пассив «Второе дыхание»: при 1 HP скорость +20%. Актив (Q): рывок с короткой неуязвимостью — уворот от снежка.',
-    'Танк':    'Пассив «Броня»: оглушение от попаданий вдвое короче. Актив (Q): таран вперёд — сбивает и оглушает врага на пути.',
+    'Танк':    'Пассив «Броня»: попадания не сбивают замах, заморозка и оглушение вдвое короче. Актив (Q): удар оземь — отбрасывает врагов вокруг и оглушает на 1 с, гасит снежки рядом.',
     'Снайпер': 'Пассив «Точность»: снежок летит быстрее и настильнее. Актив (Q): прицельный выстрел по прямой на всю дистанцию.',
-    'Бомбер':  'Пассив «Сапёр»: взрывы ломают ящики и чужую снежную стену. Актив (Q): взрывной снежок — урон по площади.',
-    'Фризер':  'Пассив «Стужа»: враги рядом двигаются медленнее. Актив (Q): ледяная волна — наледь на земле замедляет врагов.',
-    'Щит':     'Пассив «Закалка»: щитовой пузырь гасит одно попадание, восстанавливается без урона 12 с. Актив (Q): снежная стена с прочностью.'
+    'Бомбер':  'Пассив «Осколки»: каждый снежок бьёт по небольшой площади. Актив (Q): взрывной снежок — большой взрыв ломает ящики и щиты.',
+    'Фризер':  'Пассив «Стужа»: враги рядом двигаются на 50% медленнее. Актив (Q): ледяная волна — прямое попадание замораживает на 1 с, наледь на земле замедляет врагов на 50%.',
+    'Щит':     'Пассив «Закалка»: щитовой пузырь гасит одно попадание, восстанавливается без урона 12 с. Актив (Q): снежный щит спереди гасит снежки 2,5 с и поворачивается за прицелом.'
   };
 
   var ABILITY_HINT_TEXT = {
     'Раннер':  '🏃 Способность (Q): рывок в сторону прицела, короткая неуязвимость.',
-    'Танк':    '🛡️ Способность (Q): таран вперёд — сбивает и оглушает врага.',
+    'Танк':    '🛡️ Способность (Q): удар оземь — отбрасывает врагов вокруг и оглушает на 1 с.',
     'Снайпер': '🎯 Способность (Q): следующий бросок летит по прямой на максимум.',
-    'Бомбер':  '💣 Способность (Q): взрывной снежок — урон по площади, ломает ящики.',
-    'Фризер':  '❄️ Способность (Q): наледь на земле — замедляет врагов в зоне.',
-    'Щит':     '🧱 Способность (Q): снежная стена перед собой, держит попадания.'
+    'Бомбер':  '💣 Способность (Q): взрывной снежок — большой взрыв, ломает ящики и щиты.',
+    'Фризер':  '❄️ Способность (Q): ледяной снежок замораживает на 1 с, наледь замедляет врагов на 50%.',
+    'Щит':     '🧱 Способность (Q): снежный щит спереди, поворачивается за прицелом.'
   };
 
   var ALL_ROLES = Object.keys(ROLE_STATS);
@@ -307,9 +321,11 @@
       specialCooldown: 0, pendingSpecialThrow: false, armedSpecial: null, reloadUntil: 0,
       // Боезапас: ammo — целые заряды, ammoAt — когда дозаполнится текущее отделение (0 — запас полон).
       ammo: AMMO_MAX, ammoAt: 0,
-      // способности: рывок/таран, неуязвимость, замедление, щитовой пузырь Щита
+      // способности: рывок (и таран босса), неуязвимость, замедление, щитовой пузырь Щита
       dashUntil: 0, dashVX: 0, dashVY: 0, dashKind: null, taramHits: null,
       iframeUntil: 0, slowUntil: 0, slowMul: 1, lastDamagedAt: -1e9,
+      slamAt: 0,                          // Танк: когда ударит оземь (0 — замаха нет)
+      bastionUntil: 0, bastionAng: 0,     // Щит: до какого времени поднят щит и куда смотрит
       bubble: role === 'Щит' && !es, bubbleReadyAt: 0,
       // PvE
       enemyType: et, bossKind: et === 'boss' ? (opts.bossKind || 'golem') : null,
@@ -522,12 +538,13 @@
         p.moveTarget = { x: x, y: y };
         return true;
       case 'chargeStart':
-        if (p.stunTimer > 0 || p.charging || state.time < p.reloadUntil || p.ammo < 1) return false;
+        if (p.stunTimer > 0 || p.charging || p.slamAt > 0 || state.time < p.reloadUntil || p.ammo < 1) return false;
         p.charging = true; p.chargeStart = state.time; p.aimX = x; p.aimY = y;
         emit(state, { type: 'chargeStart', playerId: p.id });
         return true;
       case 'aim':
-        if (!p.charging) return false;
+        // Прицел без замаха нужен поднятому щиту: он доворачивает к этой точке (с 1.18.0).
+        if (!p.charging && !shieldUp(state, p)) return false;
         p.aimX = x; p.aimY = y;
         return true;
       case 'throw':
@@ -602,6 +619,7 @@
       x: p.x, y: p.y, z: 0, vx: dirX * speedH, vy: dirY * speedH, vz: vz0, t: 0, flightDuration: flightDuration,
       team: p.team, ownerId: p.id, radius: armed === 'explosive' ? 9 : 6,
       explosive: armed === 'explosive', freeze: armed === 'frost', frost: armed === 'frost',
+      splash: p.role === 'Бомбер' && armed !== 'explosive', // пассив «Осколки»
       flat: flat, sniped: armed === 'snipe'
     });
     // Выстрел тратит отделение боезапаса; идущее заполнение бросок не сбрасывает — иначе
@@ -627,20 +645,25 @@
     var ab = ABILITIES[p.role];
     if (!ab || p.specialCooldown > 0) return false;
     var id = ab.active.id;
-    if (id === 'wall') {
-      placeShieldWall(state, p, aimX, aimY);
-    } else if (id === 'dash' || id === 'taram') {
-      var dx = aimX - p.x, dy = aimY - p.y, d = Math.hypot(dx, dy) || 1;
-      var isTaram = id === 'taram';
-      var dur = (isTaram ? TARAM_MS : DASH_MS) / 1000;
-      var reach = isTaram ? TARAM_DIST : DASH_DIST;
+    if (id === 'bastion') {
+      // Щит встаёт сразу по прицелу, дальше доворачивает к нему плавно (turnBastion).
+      p.bastionUntil = state.time + BASTION_MS;
+      p.bastionAng = Math.atan2(aimY - shieldCY(p), aimX - p.x);
+      p.aimX = aimX; p.aimY = aimY;
+      emit(state, { type: 'bastion', playerId: p.id });
+    } else if (id === 'slam') {
       p.charging = false;
-      p.dashVX = (dx / d) * (reach / dur);
-      p.dashVY = (dy / d) * (reach / dur);
-      p.dashUntil = state.time + (isTaram ? TARAM_MS : DASH_MS);
+      p.slamAt = state.time + SLAM_WINDUP_MS;
+      emit(state, { type: 'slamStart', playerId: p.id });
+    } else if (id === 'dash') {
+      var dx = aimX - p.x, dy = aimY - p.y, d = Math.hypot(dx, dy) || 1;
+      var dur = DASH_MS / 1000;
+      p.charging = false;
+      p.dashVX = (dx / d) * (DASH_DIST / dur);
+      p.dashVY = (dy / d) * (DASH_DIST / dur);
+      p.dashUntil = state.time + DASH_MS;
       p.dashKind = id;
-      if (isTaram) { p.taramHits = {}; }
-      else { p.iframeUntil = state.time + DASH_IFRAME_MS; }
+      p.iframeUntil = state.time + DASH_IFRAME_MS;
       emit(state, { type: 'dash', playerId: p.id, kind: id });
     } else {
       // 'explosive' | 'snipe' | 'frost' — заряжает следующий бросок
@@ -649,24 +672,56 @@
     }
     // В обучении способность возвращается быстро: шаг про способность иначе превращается в
     // ожидание до 13 секунд. Math.min — чтобы обучение не сделало кулдаун ДОЛЬШЕ обычного.
-    // Только ученику (команда A): с коротким кулдауном соперник-Танк таранит каждые 2 секунды,
+    // Только ученику (команда A): с коротким кулдауном соперник-Танк бьёт оземь каждые 2 секунды,
     // и шаги «дайте сопернику попасть» превращаются в непрерывное оглушение.
     var short = state.tutorial && p.team === 'A';
     p.specialCooldown = short ? Math.min(TUTORIAL_CD, ab.active.cooldown) : ab.active.cooldown;
     emit(state, { type: 'special', playerId: p.id, special: id });
     return true;
   }
-  function placeShieldWall(state, p, aimX, aimY) {
-    var dx = aimX - p.x, dy = aimY - p.y, dist = Math.hypot(dx, dy) || 1;
-    var dirX = dx / dist, dirY = dy / dist;
-    // Стена встаёт длинной стороной ПОПЕРЁК направления броска — как щит перед собой. Повернуть
-    // её на произвольный угол нельзя: препятствия в симуляции только по осям (obstacleBlocksPoint),
-    // поэтому ориентация выбирается по преобладающей оси прицела.
-    var across = Math.abs(dirX) >= Math.abs(dirY);
-    var w = across ? WALL_THIN : WALL_LONG, h = across ? WALL_LONG : WALL_THIN;
-    state.dynamicObstacles.push({ type:'rect', x: p.x + dirX * 45, y: p.y + dirY * 45, w: w, h: h, height:20,
-      expiresAt: state.time + WALL_LIFETIME_MS, team: p.team, hp: WALL_HP, maxHp: WALL_HP, mat: 'wood' });
-    emit(state, { type: 'wallPlaced', playerId: p.id });
+  function shieldUp(state, p) { return state.time < p.bastionUntil && alive(p); }
+  function angleWrap(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
+  /** Поднятый щит доворачивает к прицелу по кратчайшей дуге не быстрее BASTION_TURN. */
+  function turnBastion(state, p, dt) {
+    if (!shieldUp(state, p)) return;
+    var want = Math.atan2(p.aimY - shieldCY(p), p.aimX - p.x), diff = angleWrap(want - p.bastionAng), stepA = BASTION_TURN * dt;
+    p.bastionAng = Math.abs(diff) <= stepA ? want : angleWrap(p.bastionAng + (diff > 0 ? stepA : -stepA));
+  }
+  // Центр щита — корпус бойца (как круг корпуса в hitTest), а не точка у ног: иначе снежок снизу
+  // задевал бы ноги раньше, чем долетал до щита.
+  function shieldCY(q) { return q.y + q.radius * HIT_TORSO_DY; }
+  /** Точка (x,y) — в секторе поднятого щита бойца q (без проверки расстояния). */
+  function inBastionArc(q, x, y) {
+    var a = Math.atan2(y - shieldCY(q), x - q.x);
+    return Math.abs(angleWrap(a - q.bastionAng)) <= BASTION_ARC;
+  }
+  /** Удар оземь Танка: по окончании замаха отбрасывает и оглушает врагов в SLAM_R, гасит снежки. */
+  function applySlam(state, p) {
+    p.slamAt = 0;
+    for (var i = 0; i < state.players.length; i++) {
+      var q = state.players[i];
+      if (q.team === p.team || !alive(q) || state.time < q.iframeUntil) continue;
+      var dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy);
+      if (d > SLAM_R + q.radius) continue;
+      if (d < 0.01) { dx = 1; dy = 0; d = 1; }
+      var kres = 1 - (q.knockResist || 0);
+      var knock = SLAM_KNOCK_NEAR + (SLAM_KNOCK_FAR - SLAM_KNOCK_NEAR) * Math.min(1, d / SLAM_R);
+      if (!q.scripted) {
+        var kc = clampToArena(q.x + (dx / d) * knock * kres, q.y + (dy / d) * knock * kres, q.radius);
+        q.x = kc.x; q.y = kc.y;
+        resolveObstacleCollisions(getAllObstacles(state), q);
+        q.dashUntil = 0;
+      }
+      q.stunTimer = Math.max(q.stunTimer, SLAM_STUN * kres * (q.role === 'Танк' ? TANK_CC_FACTOR : 1));
+      q.charging = false;
+      emit(state, { type: 'knockback', targetId: q.id, x: q.x, y: q.y });
+    }
+    for (var k = state.snowballs.length - 1; k >= 0; k--) {
+      var s = state.snowballs[k];
+      if (s.team === p.team || s.z > HIT_Z || Math.hypot(s.x - p.x, s.y - p.y) > SLAM_R) continue;
+      state.snowballs.splice(k, 1);
+    }
+    emit(state, { type: 'slam', playerId: p.id, x: p.x, y: p.y });
   }
 
   // ============================================================
@@ -892,9 +947,26 @@
     }
     return false;
   }
+  /** Летит ли в бойца вражеский снежок: по курсу пройдёт ближе 30 px и ещё не пролетел мимо. */
+  function incomingBall(state, p) {
+    for (var i = 0; i < state.snowballs.length; i++) {
+      var s = state.snowballs[i];
+      if (s.team === p.team) continue;
+      var rx = p.x - s.x, ry = p.y - s.y, v = Math.hypot(s.vx, s.vy) || 1;
+      var along = (rx * s.vx + ry * s.vy) / v;
+      if (along <= 0 || along > 300) continue;
+      if (Math.abs(rx * s.vy - ry * s.vx) / v < 30) return true;
+    }
+    return false;
+  }
   function updateAI(state, obs, p) {
     var now = state.time, rng = state.rng, lvl = botLvl(p);
     if (!alive(p) || p.stunTimer > 0) { p.charging = false; return; }
+    if (p.slamAt > 0) return; // Танк замахнулся для удара оземь — стоит и ждёт
+    if (shieldUp(state, p) && !p.charging) { // поднятый щит бот держит на ближайшем враге
+      var se = findNearestEnemy(state, p);
+      if (se) { p.aimX = se.x; p.aimY = se.y; }
+    }
     if (checkDodge(state, p)) return;
     var enemy = findNearestEnemy(state, p);
     if (!enemy) return;
@@ -934,14 +1006,22 @@
     var canAbil = p.specialCooldown <= 0 && rng.next() < lvl.useAbility;
     var canShoot = now >= p.reloadUntil && p.ammo >= 1; // пауза между выстрелами и запас
 
-    // Способности по ситуации: стена при опасности, таран для сближения, снайп издалека.
-    if (spec.id === 'wall' && p.hp <= 2 && dist < 260 && p.specialCooldown <= 0) {
+    // Способности по ситуации: щит, когда в бота целятся, удар оземь вплотную, снайп издалека.
+    if (spec.id === 'bastion' && canAbil && dist < 320 && (enemy.charging || incomingBall(state, p))) {
       useSpecial(state, p, enemy.x, enemy.y);
-      p.ai.nextDecisionAt = now + 400; return;
+      p.ai.nextDecisionAt = now + 250; return;
     }
-    if (spec.id === 'taram' && canAbil && dist > 90 && dist < TARAM_DIST + 60) {
+    if (spec.id === 'slam' && canAbil && dist < SLAM_R - 10) {
       useSpecial(state, p, enemy.x, enemy.y);
-      p.ai.nextDecisionAt = now + 350; return;
+      p.ai.nextDecisionAt = now + SLAM_WINDUP_MS + 100; return;
+    }
+    // Удар готов — Танк идёт вплотную и отстреливается на ходу. Без этого он держался на
+    // обычной дистанции и не бил оземь вовсе. Уровень бота решает, как часто он так делает.
+    if (spec.id === 'slam' && p.specialCooldown <= 0 && !lowHp && dist < SLAM_R + 100 && rng.next() < lvl.useAbility * 2) {
+      p.moveTarget = clampToArena(enemy.x, enemy.y, p.radius);
+      p.ai.nextDecisionAt = now + 250;
+      tryShoot(true);
+      return;
     }
     if (spec.id === 'snipe' && canAbil && canShoot && dist > 300 && canHitTarget(obs, p, enemy.x, enemy.y, 1)) {
       useSpecial(state, p, enemy.x, enemy.y);
@@ -1052,17 +1132,18 @@
   /** На льду «Реки» (полоса `state.ice.y0..y1`) — там разгон и скольжение, см. moveCharacter. */
   function onIce(state, p) { return !!(state.ice && p.y >= state.ice.y0 && p.y <= state.ice.y1); }
 
-  /** Множитель скорости: пассив Раннера, наледь Фризера, лёд «Реки» (разгон), аура вражеского Фризера. */
+  /** Множитель скорости: пассив Раннера, наледь Фризера, лёд «Реки» (разгон), аура вражеского Фризера, поднятый щит. */
   function speedMul(state, p) {
     var mul = 1;
     if (p.role === 'Раннер' && p.hp === 1) mul *= RUNNER_LOWHP_SPEEDUP;
-    var g = state.groundFx;
-    for (var i = 0; i < g.length; i++) {
+    var chilled = inFreezerAura(state, p), g = state.groundFx;
+    for (var i = 0; i < g.length && !chilled; i++) {
       var f = g[i];
-      if (f.expiresAt > state.time && f.team !== p.team && Math.hypot(p.x - f.x, p.y - f.y) <= f.r) { mul *= (1 - FROST_SLOW); break; }
+      if (f.expiresAt > state.time && f.team !== p.team && Math.hypot(p.x - f.x, p.y - f.y) <= f.r) chilled = true;
     }
+    if (chilled) mul *= (1 - FREEZER_SLOW); // наледь и аура — одно замедление, не складываются
     if (onIce(state, p)) mul *= (1 + state.ice.speedup);
-    if (inFreezerAura(state, p)) mul *= (1 - FREEZER_AURA_SLOW);
+    if (shieldUp(state, p)) mul *= BASTION_SLOW;
     return mul;
   }
   function applyTaram(state, p) {
@@ -1085,6 +1166,7 @@
   function moveCharacter(state, obs, p, dt) {
     var rolling = p.dashKind === 'roll' && state.time < p.dashUntil;
     if (!alive(p) || (p.stunTimer > 0 && !rolling)) { p.isMoving = false; if (!rolling) p.dashUntil = 0; return; }
+    if (p.slamAt > 0) { p.isMoving = false; return; } // замах удара оземь: Танк стоит
     // Рывок/таран/ком: скриптованное движение вместо хода к цели.
     if (state.time < p.dashUntil) {
       p.isMoving = true;
@@ -1157,14 +1239,34 @@
         || Math.hypot(x - p.x, y - (p.y + p.radius * HIT_TORSO_DY)) <= p.radius * HIT_TORSO_R + ex
         || Math.hypot(x - p.x, y - (p.y + p.radius * HIT_LEGS_DY)) <= p.radius * HIT_LEGS_R + ex;
   }
-  /** killerId — чей снаряд или взрыв; контактный урон мобов приходит без него и фрага не даёт. */
-  function applyHit(state, target, freezeBonus, x, y, killerId) {
+  /**
+   * Контроль от попадания (с 1.18.0). Заморозка — прямое попадание ледяным снежком: FREEZE_STUN,
+   * сбивает замах и удар оземь. Обычное попадание — запинка HIT_FLINCH со сбитым замахом.
+   * Пассив Танка «Броня»: обычное попадание его не сбивает вовсе, заморозка вдвое короче.
+   */
+  function hitStun(target, freeze) {
+    var tank = target.role === 'Танк';
+    if (freeze) {
+      target.stunTimer = Math.max(target.stunTimer, FREEZE_STUN * (tank ? TANK_CC_FACTOR : 1));
+      target.charging = false; target.slamAt = 0;
+    } else if (!tank) {
+      target.stunTimer = Math.max(target.stunTimer, HIT_FLINCH);
+      target.charging = false;
+    }
+  }
+  /**
+   * killerId — чей снаряд или взрыв; контактный урон мобов приходит без него и фрага не даёт.
+   * splash — урон пассивом Бомбера «Осколки» (флаг уходит в событие hit).
+   */
+  function applyHit(state, target, freeze, x, y, killerId, splash) {
     if (target.bubble) { // Щит: пассив «Закалка» гасит одно попадание целиком
       target.bubble = false; target.bubbleReadyAt = state.time + BUBBLE_REGEN_MS;
-      target.stunTimer = Math.max(target.stunTimer, 0.2); target.hitAt = state.time; target.charging = false;
+      target.stunTimer = Math.max(target.stunTimer, HIT_FLINCH); target.hitAt = state.time; target.charging = false;
       emit(state, { type: 'bubblePop', targetId: target.id, x: x, y: y });
       return;
     }
+    var hitEv = { type: 'hit', targetId: target.id, x: x, y: y, freeze: !!freeze, hp: target.hp };
+    if (splash) hitEv.splash = true;
     // Обучение: попадание по ученику (команда A) считается и оглушает, но последнее HP не
     // снимается — новичок не должен вылетать из обучения из-за того, что соперник его добил.
     // На последнем шаге то же правило защищает и соперника (команда B, tutorialLockEnemy):
@@ -1172,25 +1274,39 @@
     if (state.tutorial && target.hp <= 1 &&
         (target.team === 'A' || (target.team === 'B' && state.tutorialLockEnemy))) {
       target.hitAt = state.time; target.lastDamagedAt = state.time;
-      target.charging = false; target.dashUntil = 0;
-      target.stunTimer = (target.role === 'Танк' ? TANK_STUN_FACTOR : 1) * (1.0 + (freezeBonus || 0));
-      emit(state, { type: 'hit', targetId: target.id, x: x, y: y, freeze: !!freezeBonus, hp: target.hp });
+      target.dashUntil = 0;
+      hitStun(target, freeze);
+      emit(state, hitEv);
       return;
     }
     target.hp -= 1;
     target.hitAt = state.time; target.lastDamagedAt = state.time;
-    target.charging = false; target.dashUntil = 0; // после попадания боец теряет атаку и рывок
+    target.dashUntil = 0; // после попадания боец теряет рывок
     if (target.hp <= 0) {
       target.hp = 0; target.koed = true; target.stunTimer = 0; target.koAt = state.time;
+      target.charging = false; target.slamAt = 0; target.bastionUntil = 0;
       var killer = killerId ? findPlayer(state, killerId) : null;
       if (killer && killer.team !== target.team) killer.kills += 1;
       emit(state, { type: 'ko', targetId: target.id, x: x, y: y, killerId: killer ? killer.id : null });
     } else {
-      var base = (target.hp === 2 ? 0.5 : 1.0) + (freezeBonus || 0);
-      if (target.role === 'Танк') base *= TANK_STUN_FACTOR; // пассив «Броня»
-      target.stunTimer = base;
-      emit(state, { type: 'hit', targetId: target.id, x: x, y: y, freeze: !!freezeBonus, hp: target.hp });
+      hitStun(target, freeze);
+      hitEv.hp = target.hp;
+      emit(state, hitEv);
     }
+  }
+  /** Вражеский щит, поймавший снежок s: ближе BASTION_R к корпусу, в секторе и не выше BASTION_H. */
+  function blockingShield(state, s) {
+    if (s.z > BASTION_H) return null;
+    for (var i = 0; i < state.players.length; i++) {
+      var q = state.players[i];
+      if (q.team === s.team || !shieldUp(state, q)) continue;
+      if (Math.hypot(s.x - q.x, s.y - shieldCY(q)) <= BASTION_R && inBastionArc(q, s.x, s.y)) return q;
+    }
+    return null;
+  }
+  /** Центр взрыва закрыт поднятым щитом бойца q: взрыв перед щитом его не ранит. */
+  function shieldCovers(state, q, x, y) {
+    return shieldUp(state, q) && inBastionArc(q, x, y);
   }
   function updateSnowballs(state, obs, dt) {
     for (var i = state.snowballs.length - 1; i >= 0; i--) {
@@ -1198,15 +1314,19 @@
       s.t += dt; s.x += s.vx * dt; s.y += s.vy * dt;
       s.z = s.flat ? 0 : (s.vz * s.t - 0.5 * GRAVITY * s.t * s.t);
 
-      var dead = false, hitWall = false, directHit = false;
+      var dead = false, hitWall = false, directHit = false, directId = null, shielded = false;
       if (s.t >= s.flightDuration || (!s.flat && s.z < 0) || s.x < 0 || s.x > W || s.y < 0 || s.y > H) dead = true;
       if (!dead && wallBlocks(obs, s.x, s.y, s.z)) { dead = true; hitWall = true; }
+      if (!dead) { // поднятый щит ловит снежок раньше, чем тот долетит до бойца или союзника за ним
+        var bq = blockingShield(state, s);
+        if (bq) { dead = true; shielded = true; emit(state, { type: 'shieldBlock', targetId: bq.id, x: s.x, y: s.y }); }
+      }
       if (!dead && s.z <= HIT_Z) {
         for (var k = 0; k < state.players.length; k++) {
           var p = state.players[k];
           if (p.team === s.team || !alive(p) || state.time < p.iframeUntil) continue;
           if (hitTest(p, s.x, s.y, s.radius)) {
-            applyHit(state, p, s.freeze ? 1.0 : 0, s.x, s.y, s.ownerId); dead = true; directHit = true; break;
+            applyHit(state, p, s.freeze, s.x, s.y, s.ownerId); dead = true; directHit = true; directId = p.id; break;
           }
         }
         // защита объекта: вражеский снежок бьёт снеговика
@@ -1223,14 +1343,34 @@
           for (var m = 0; m < state.players.length; m++) {
             var q = state.players[m];
             if (q.team === s.team || !alive(q) || state.time < q.iframeUntil) continue;
-            if (Math.hypot(q.x - s.x, q.y - s.y) <= EXPLOSION_RADIUS) applyHit(state, q, 0, s.x, s.y, s.ownerId);
+            if (Math.hypot(q.x - s.x, q.y - s.y) > EXPLOSION_RADIUS) continue;
+            if (shieldCovers(state, q, s.x, s.y)) { // щит принял взрыв на себя и разлетелся
+              q.bastionUntil = 0;
+              emit(state, { type: 'bastionBreak', playerId: q.id });
+              continue;
+            }
+            applyHit(state, q, false, s.x, s.y, s.ownerId);
           }
-          // пассив «Сапёр»: взрыв ломает разрушаемые укрытия и мгновенно сносит чужую стену
+          // взрыв ломает разрушаемые укрытия и мгновенно сносит чужую стену
           for (var d = 0; d < obs.length; d++) {
             var ob = obs[d];
             if (Math.hypot(ob.x - s.x, ob.y - s.y) > EXPLOSION_RADIUS + (ob.r || Math.max(ob.w, ob.h) / 2)) continue;
             if (ob.team && ob.team !== s.team) damageObstacle(state, ob, WALL_HP);
             else if (ob.maxHp != null) damageObstacle(state, ob, 3);
+          }
+        } else if (s.splash) {
+          // пассив Бомбера «Осколки»: снежок бьёт по небольшой площади, укрытий не ломает
+          emit(state, { type: 'splash', x: s.x, y: s.y });
+          for (var sp = 0; sp < state.players.length; sp++) {
+            var sq = state.players[sp];
+            if (sq.team === s.team || sq.id === directId || !alive(sq) || state.time < sq.iframeUntil) continue;
+            if (Math.hypot(sq.x - s.x, sq.y - s.y) > BOMBER_SPLASH_R || shieldCovers(state, sq, s.x, s.y)) continue;
+            applyHit(state, sq, false, s.x, s.y, s.ownerId, true);
+          }
+          if (hitWall) {
+            var swob = firstBlocking(obs, s.x, s.y, s.z);
+            if (swob && swob.team && swob.team !== s.team) damageObstacle(state, swob, 1);
+            emit(state, { type: 'wallHit', x: s.x, y: s.y });
           }
         } else if (s.frost) {
           state.groundFx.push({ id: state.nextFxId++, kind: 'frost', x: s.x, y: s.y, r: FROST_R, team: s.team, expiresAt: state.time + FROST_MS });
@@ -1239,7 +1379,7 @@
           var wob = firstBlocking(obs, s.x, s.y, s.z);
           if (wob && wob.team && wob.team !== s.team) damageObstacle(state, wob, 1);
           emit(state, { type: 'wallHit', x: s.x, y: s.y });
-        } else if (!directHit) {
+        } else if (!directHit && !shielded) {
           emit(state, { type: 'miss', x: s.x, y: s.y });
         }
         state.snowballs.splice(i, 1);
@@ -1256,6 +1396,10 @@
   }
   function updateTimers(state, p, dt) {
     if (p.stunTimer > 0) p.stunTimer = Math.max(0, p.stunTimer - dt);
+    if (p.slamAt > 0 && (!alive(p) || p.stunTimer > 0)) p.slamAt = 0; // выбит или заморожен — удара не будет
+    if (p.slamAt > 0 && state.time >= p.slamAt) applySlam(state, p);
+    if (p.bastionUntil > 0 && !alive(p)) p.bastionUntil = 0;
+    turnBastion(state, p, dt);
     // Пассив Фризера «Стужа» замедляет не только шаг: в его ауре у врага медленнее течёт время
     // перезарядки и кулдауна. Именно растяжение времени, а не удлинение в момент броска — вышел
     // из радиуса, и всё снова идёт нормально. Оглушение не трогаем: оно и так против игрока.
@@ -1344,6 +1488,7 @@
   function respawnFighter(state, p, sp) {
     p.hp = 3; p.koed = false; p.stunTimer = 0; p.charging = false; p.respawnAt = 0;
     p.dashUntil = 0; p.armedSpecial = null; p.pendingSpecialThrow = false; p.reloadUntil = 0;
+    p.slamAt = 0; p.bastionUntil = 0;
     p.iframeUntil = state.time + RESPAWN_IFRAME_MS; p.bubble = p.role === 'Щит';
     // Запас — как при рестарте уровня: пока боец лежал, дозарядка не шла (она требует alive),
     // и без этого он вставал с одним зарядом, да ещё и в секунды неуязвимости.
@@ -1841,6 +1986,9 @@
         iframe: state.time < p.iframeUntil,
         dash: state.time < p.dashUntil,
         bubble: !!p.bubble,
+        slam: p.slamAt > 0 ? Math.round(Math.max(0, p.slamAt - state.time) / 10) / 100 : 0, // с до удара оземь
+        bst: shieldUp(state, p) ? round1((p.bastionUntil - state.time) / 1000) : 0,    // с до конца щита
+        bsa: Math.round(p.bastionAng * 100) / 100,                                        // угол щита, рад
         // Поле есть у всех ролей: клиент переиспользует объекты бойцов при интерполяции, и
         // пропущенный ключ сохранил бы прошлое значение (так уже выходит с mhp и lives).
         bb: bubbleLeft(state, p),
@@ -1941,6 +2089,8 @@
     FROST_R: FROST_R, FROST_SLOW: FROST_SLOW,
     PICKUP_RADIUS: PICKUP_RADIUS,
     EXPLOSION_RADIUS: EXPLOSION_RADIUS, BUBBLE_REGEN_MS: BUBBLE_REGEN_MS,
+    BOMBER_SPLASH_R: BOMBER_SPLASH_R, SLAM_R: SLAM_R, SLAM_WINDUP_MS: SLAM_WINDUP_MS,
+    BASTION_R: BASTION_R, BASTION_ARC: BASTION_ARC, BASTION_MS: BASTION_MS, HIT_TORSO_DY: HIT_TORSO_DY,
     WALL_LIFETIME_MS: WALL_LIFETIME_MS,
     HIT_Z: HIT_Z,
     canHitTarget: canHitTarget, // чистая функция: упрётся ли снежок в препятствие (ею целятся боты)

@@ -196,7 +196,7 @@ window.SBRender = (function () {
       ctx.beginPath(); ctx.ellipse(cx, cy - r * 0.72, r * 0.9, r * 0.5, 0, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     }
-    // Снежная стена Щита — блок как укрытие, но с кантом в цвет команды и трещинами по HP.
+    // Ледяная стена босса PvE — блок как укрытие, но с кантом в цвет команды и трещинами по HP.
     function drawWall(wl) {
       var x0 = wl.x - wl.w / 2, y0 = wl.y - wl.h / 2;
       ctx.globalAlpha = 0.55 + (wl.ttl / wl.life) * 0.45;
@@ -335,7 +335,137 @@ window.SBRender = (function () {
     var rigCache = {};
     var HIT_MS = 200, THROW_MS = 300, ABIL_MS = 420;
     function rigC(id) {
-      return rigCache[id] || (rigCache[id] = { flip: 1, throwAt: -1e9, abilAt: -1e9, popAt: -1e9, readyAt: -1e9, prevX: null, ph: (parseInt(id, 36) || 0) % 997 });
+      return rigCache[id] || (rigCache[id] = { flip: 1, throwAt: -1e9, abilAt: -1e9, popAt: -1e9, readyAt: -1e9, frozenAt: -1e9, prevX: null, ph: (parseInt(id, 36) || 0) % 997 });
+    }
+    /** Заморожен ли боец: оглушён, и последнее попадание было ледяным (заморозка 1 с, запас на сеть). */
+    function isFrozen(p) { return p.stun > 0 && !p.koed && performance.now() - rigC(p.id).frozenAt < 1300; }
+    // Ледяная глыба вокруг замороженного бойца: неровный гранёный кристалл по габаритам модели.
+    // Вершины — доли полуширины и полувысоты глыбы; нижние (y > 0) опущены к ногам.
+    var ICE_BLOCK = [[-1.25, 0.25], [-1.4, -0.35], [-1.05, -0.85], [-0.45, -1.1], [0.2, -1.0],
+                     [0.95, -1.12], [1.35, -0.6], [1.3, 0.1], [0.9, 0.4], [-0.7, 0.42]];
+    function iceBlockGeom(p, r, useRig) {
+      var ay = p.y + r * 0.9;
+      var top = useRig ? Rig.topOf(r, p.role, RIG_SCALE) : r * 1.4, bot = useRig ? Rig.bottomOf(r, p.role, RIG_SCALE) : r * 0.4;
+      return { x: p.x, cy: ay - (top - bot) * 0.45, hx: r * 1.2, hy: (top + bot) * 0.55, bot: bot };
+    }
+    function drawIceBlock(p, r, useRig) {
+      var g = iceBlockGeom(p, r, useRig);
+      ctx.save();
+      ctx.beginPath();
+      for (var i = 0; i < ICE_BLOCK.length; i++) {
+        var v = ICE_BLOCK[i], px = g.x + v[0] * g.hx, py = g.cy + v[1] * g.hy + (v[1] > 0 ? g.bot * 0.6 : 0);
+        if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(190,230,255,0.42)'; ctx.fill();
+      ctx.lineJoin = 'round'; ctx.lineWidth = 1.4; ctx.strokeStyle = 'rgba(120,185,235,0.95)'; ctx.stroke();
+      // две грани-блика: без них глыба читается как плоская заливка
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(g.x - g.hx * 0.9, g.cy - g.hy * 0.3); ctx.lineTo(g.x - g.hx * 0.3, g.cy - g.hy * 0.95);
+      ctx.moveTo(g.x + g.hx * 0.2, g.cy - g.hy * 0.9); ctx.lineTo(g.x + g.hx * 0.9, g.cy - g.hy * 0.2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    /** Глыба треснула: ледяные осколки разлетаются от её краёв. */
+    function shatterIce(p, r, useRig) {
+      var g = iceBlockGeom(p, r, useRig);
+      for (var i = 0; i < 14; i++) {
+        var a = Math.random() * Math.PI * 2, spd = 60 + Math.random() * 110;
+        particles.push({ x: g.x + Math.cos(a) * g.hx * 0.9, y: g.cy + Math.sin(a) * g.hy * 0.9,
+          vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 60, life: 0.45 + Math.random() * 0.15, maxLife: 0.55,
+          color: 'rgba(235,248,255,0.95)', size: 2.5 + Math.random() * 3, shard: true, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 12 });
+      }
+    }
+    /**
+     * Поворотный щит Щита: снежная дуга вокруг корпуса по углу bsa. Центр и радиус — те же, что у
+     * проверки в sim.js (корпус бойца, BASTION_R), чтобы видимая дуга совпадала с настоящей.
+     */
+    function drawBastion(p, r) {
+      var cx = p.x, cy = p.y + r * Sim.HIT_TORSO_DY, R = Sim.BASTION_R, half = Sim.BASTION_ARC;
+      var a0 = p.bsa - half, a1 = p.bsa + half, fade = Math.min(1, p.bst / 0.4);
+      ctx.save();
+      ctx.globalAlpha = 0.9 * fade;
+      ctx.fillStyle = 'rgba(160,210,245,0.18)';
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, a0, a1); ctx.closePath(); ctx.fill();
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = '#6fa8d8'; ctx.lineWidth = 7;
+      ctx.beginPath(); ctx.arc(cx, cy, R, a0, a1); ctx.stroke();
+      ctx.strokeStyle = '#f2f9ff'; ctx.lineWidth = 3.5;
+      ctx.beginPath(); ctx.arc(cx, cy, R, a0, a1); ctx.stroke();
+      ctx.restore();
+    }
+    // Удар оземь Танка. Круг — на уровне тени (p.y + 0.6r): проверка в sim.js сравнивает те же
+    // точки бойцов, поэтому враг задет ровно тогда, когда его тень внутри круга.
+    var SLAM_CRACKS = 9, SLAM_CRACK_SEGS = 6, SLAM_FADE_MS = 600;
+    function slamCenter(p) { return { x: p.x, y: p.y + radiusOf(p) * 0.6 }; }
+    /** Ломаные трещин от центра к краю круга: свои на каждый удар, чтобы не повторялись. */
+    function makeCracks() {
+      var out = [];
+      for (var i = 0; i < SLAM_CRACKS; i++) {
+        var a = i / SLAM_CRACKS * Math.PI * 2 + Math.random() * 0.4, pts = [];
+        for (var k = 1; k <= SLAM_CRACK_SEGS; k++) pts.push(a + (Math.random() - 0.5) * 0.35);
+        out.push(pts);
+      }
+      return out;
+    }
+    /** Трещины до доли k радиуса. */
+    function strokeCracks(c, cracks, k, R) {
+      var upto = k * SLAM_CRACK_SEGS;
+      for (var i = 0; i < cracks.length; i++) {
+        var pts = cracks[i], px = c.x, py = c.y;
+        ctx.beginPath(); ctx.moveTo(px, py);
+        for (var j = 0; j < SLAM_CRACK_SEGS && j < upto; j++) {
+          var rr = R * (j + 1) / SLAM_CRACK_SEGS, nx = c.x + Math.cos(pts[j]) * rr, ny = c.y + Math.sin(pts[j]) * rr;
+          var f = Math.min(1, upto - j); // последний отрезок — частью, пока трещина растёт
+          ctx.lineTo(px + (nx - px) * f, py + (ny - py) * f);
+          px = nx; py = ny;
+        }
+        ctx.stroke();
+      }
+    }
+    function drawCrackSet(c, cracks, k, R, alpha) {
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(80,120,170,' + (0.75 * alpha) + ')'; ctx.lineWidth = 2.2; strokeCracks(c, cracks, k, R);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.8 * alpha) + ')'; ctx.lineWidth = 0.8; strokeCracks(c, cracks, k, R);
+    }
+    /**
+     * Снежная дымка зоны удара без чёткой границы, как у ауры Фризера. Белая на снегу арены не
+     * видна, поэтому голубая, и к краю плотнее — снежный вал: зона читается по краю, а не по линии.
+     */
+    function slamDisk(c, R, alpha) {
+      var g = ctx.createRadialGradient(c.x, c.y, 4, c.x, c.y, R);
+      g.addColorStop(0, 'rgba(150,190,235,' + (alpha * 0.45) + ')');
+      g.addColorStop(0.8, 'rgba(130,175,230,' + (alpha * 0.8) + ')');
+      g.addColorStop(0.93, 'rgba(120,165,225,' + alpha + ')');
+      g.addColorStop(1, 'rgba(120,165,225,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(c.x, c.y, R, 0, Math.PI * 2); ctx.fill();
+    }
+    /**
+     * Замах: дымка густеет, по краю кружат снежинки, трещины бегут от Танка и доходят до края
+     * ровно к удару — так видно и зону, и сколько осталось. После удара трещины гаснут SLAM_FADE_MS.
+     */
+    function drawSlam(p, snapTime) {
+      var rc = rigC(p.id), c = slamCenter(p), R = Sim.SLAM_R, now = performance.now();
+      if (p.slam > 0) {
+        if (!rc.slamOn || !rc.cracks) { rc.cracks = makeCracks(); rc.slamOn = true; }
+        var k = Math.max(0, Math.min(1, 1 - p.slam / (Sim.SLAM_WINDUP_MS / 1000)));
+        ctx.save();
+        slamDisk(c, R, 0.22 + 0.2 * k);
+        var n = Math.round(R / 14);
+        for (var i = 0; i < n; i++) {
+          var a = i / n * Math.PI * 2 + snapTime / 900;
+          drawFrostFleck(ctx, c.x + Math.cos(a) * R, c.y + Math.sin(a) * R, 5 + 2 * k, 'rgba(120,165,215,0.9)', snapTime / 260 + i);
+        }
+        drawCrackSet(c, rc.cracks, k, R, 1);
+        ctx.restore();
+        return;
+      }
+      rc.slamOn = false;
+      var age = now - (rc.slamAt || -1e9);
+      if (rc.cracks && age < SLAM_FADE_MS) {
+        ctx.save(); drawCrackSet(c, rc.cracks, 1, R, 1 - age / SLAM_FADE_MS); ctx.restore();
+      }
     }
     function rigStateFor(snap, p, isMe, local) {
       var rc = rigC(p.id);
@@ -371,7 +501,7 @@ window.SBRender = (function () {
         mode: mode, t: now, role: p.role, flip: rc.flip,
         // Любой не-A читается как враг (красный): в сетевом снапшоте team у врага иногда пуст,
         // и без этого модель оставалась серой.
-        team: p.team === 'A' ? 'A' : 'B', corpse: dissolve, stun: p.stun > 0,
+        team: p.team === 'A' ? 'A' : 'B', corpse: dissolve, stun: p.stun > 0, frozen: isFrozen(p),
         corrupt: p.et === 'core' || p.et === 'swarm', lod: p.et === 'swarm',
         aimLocal: rc.flip < 0 ? Math.PI - aim : aim, aimScreen: aim,
         power: power, speed: 1, outline: 2.4, scaleMul: 1.32, variantB: false, back: false, noShadow: true,
@@ -480,6 +610,37 @@ window.SBRender = (function () {
     // дорого на телефоне, а 20 drawImage маленького буфера — нет. Буфер один на модуль и растёт
     // только при необходимости (как arenaCache).
     var HALO = 4, HALO_PAD = 10, AURA_COLOR = '#8ee6b4';
+    // Изморозь замедленного бойца. Белая на снегу арены не видна, поэтому холодный голубой —
+    // заметно насыщеннее снега и не путается с зелёной аурой Щита.
+    var FROST_RIM_COLOR = '#9ad9ff';
+    /**
+     * Искорки инея на контуре замедленного бойца: четыре искры на уровне головы, плеч и колен,
+     * по очереди вспыхивают и гаснут. Места — от габаритов рига, чтобы садились на силуэт; у
+     * голема рига нет, и его высоту над якорем и низ под ним передают top и bot.
+     */
+    function drawFrostSparkles(p, r, t, top, bot) {
+      var ay = p.y + r * 0.9;
+      if (top == null) { top = Rig.topOf(r, p.role, RIG_SCALE); bot = Rig.bottomOf(r, p.role, RIG_SCALE); }
+      var spots = [[-0.75, -top * 0.8], [0.8, -top * 0.55], [-1.05, -top * 0.2], [0.95, bot * 0.5]];
+      ctx.save();
+      for (var i = 0; i < spots.length; i++) {
+        var ph = (t / 700 + i * 0.25) % 1, a = Math.sin(ph * Math.PI);
+        ctx.globalAlpha = 0.35 + 0.65 * a;
+        var fx0 = p.x + spots[i][0] * r, fy0 = ay + spots[i][1], fr = 1.6 + 1.4 * a;
+        // Искра инея: четырёхлучевая звёздочка тонкими линиями. Снежинка drawFrostFleck на таком
+        // размере сливалась в белую кляксу, похожую на снежок. Голубая подложка — чтобы была видна на снегу.
+        for (var pass = 0; pass < 2; pass++) {
+          ctx.strokeStyle = pass ? 'rgba(250,253,255,1)' : 'rgba(70,150,215,0.85)';
+          ctx.lineWidth = pass ? 0.8 : 2; ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(fx0 - fr, fy0); ctx.lineTo(fx0 + fr, fy0); ctx.moveTo(fx0, fy0 - fr); ctx.lineTo(fx0, fy0 + fr);
+          var dg = fr * 0.45;
+          ctx.moveTo(fx0 - dg, fy0 - dg); ctx.lineTo(fx0 + dg, fy0 + dg); ctx.moveTo(fx0 - dg, fy0 + dg); ctx.lineTo(fx0 + dg, fy0 - dg);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
 
     // Неуязвимый боец (рывок, возрождение — p.iframe) рисуется наполовину прозрачным. Прямо
     // globalAlpha на основном канвасе нельзя: риг — это тело, руки, шапка отдельными фигурами, и
@@ -517,16 +678,20 @@ window.SBRender = (function () {
       ctx.restore();
     }
     var auraBuf = null, auraCtx = null;
-    function drawAuraRig(p, r, rs, color, A, R) {
-      var top = Rig.topOf(r, p.role, RIG_SCALE), bottom = Rig.bottomOf(r, p.role, RIG_SCALE);
+    /**
+     * Силуэт рига одним цветом в auraBuf: модель в позе rs с якорем (ax, ay) и заливка через
+     * source-in. Возвращает, куда и какого размера переносить буфер на арену (sw×sh пикселей
+     * буфера в dw×dh единиц арены с угла dx, dy). Буфер живёт до следующего вызова.
+     */
+    function rigSilhouette(role, ax, ay, r, rs, color) {
+      var top = Rig.topOf(r, role, RIG_SCALE), bottom = Rig.bottomOf(r, role, RIG_SCALE);
       var bw = r * 3.2 + HALO_PAD * 2, bh = top + bottom + HALO_PAD * 2; // единицы арены
       var pw = Math.ceil(bw * RS), ph = Math.ceil(bh * RS);
       if (!auraBuf) { auraBuf = document.createElement('canvas'); auraCtx = auraBuf.getContext('2d'); }
       if (auraBuf.width < pw || auraBuf.height < ph) {
         auraBuf.width = Math.max(auraBuf.width, pw); auraBuf.height = Math.max(auraBuf.height, ph);
       }
-      var ax = p.x, ay = p.y + r * 0.9;   // якорь модели на арене
-      var ox = bw / 2, oy = HALO_PAD + top; // и он же в буфере
+      var ox = bw / 2, oy = HALO_PAD + top; // якорь в буфере
       var o = auraCtx;
       o.setTransform(1, 0, 0, 1, 0, 0); o.globalCompositeOperation = 'source-over';
       o.clearRect(0, 0, auraBuf.width, auraBuf.height);
@@ -534,16 +699,44 @@ window.SBRender = (function () {
       Rig.drawFighter(o, ax, ay, r, rs);
       o.setTransform(1, 0, 0, 1, 0, 0); o.globalCompositeOperation = 'source-in';
       o.fillStyle = color; o.fillRect(0, 0, pw, ph);
-      var dx0 = ax - ox, dy0 = ay - oy, dw = pw / RS, dh = ph / RS;
+      return { sw: pw, sh: ph, dx: ax - ox, dy: ay - oy, dw: pw / RS, dh: ph / RS };
+    }
+    function drawAuraRig(p, r, rs, color, A, R) {
+      var s = rigSilhouette(p.role, p.x, p.y + r * 0.9, r, rs, color);
       ctx.globalAlpha = Math.min(1, A * 0.2);
       for (var i = 0; i < 12; i++) {
         var a = i * Math.PI / 6;
-        ctx.drawImage(auraBuf, 0, 0, pw, ph, dx0 + Math.cos(a) * R, dy0 + Math.sin(a) * R, dw, dh);
+        ctx.drawImage(auraBuf, 0, 0, s.sw, s.sh, s.dx + Math.cos(a) * R, s.dy + Math.sin(a) * R, s.dw, s.dh);
       }
       ctx.globalAlpha = Math.min(1, A * 0.34);
       for (var j = 0; j < 8; j++) {
         var b = j * Math.PI / 4;
-        ctx.drawImage(auraBuf, 0, 0, pw, ph, dx0 + Math.cos(b) * R * 0.5, dy0 + Math.sin(b) * R * 0.5, dw, dh);
+        ctx.drawImage(auraBuf, 0, 0, s.sw, s.sh, s.dx + Math.cos(b) * R * 0.5, s.dy + Math.sin(b) * R * 0.5, s.dw, s.dh);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // След рывка: силуэты модели там, где боец был DASH_TRAIL_STEP, ×2, ×3 мс назад. После конца
+    // рывка след догоняет модель и гаснет за DASH_TRAIL_MS. Раньше за бойцом тянулись три круга.
+    var DASH_TRAIL_STEP = 30, DASH_TRAIL_MS = 140, DASH_TRAIL_A = [0.42, 0.29, 0.16];
+    var DASH_TRAIL_COLOR = { A: '#4f9dff', B: '#ff6b6b' };
+    function drawDashTrail(p, r, rs, dashing, color) {
+      var rc = rigC(p.id), now = performance.now(), tr = rc.dashTrail || (rc.dashTrail = []);
+      if (dashing) { tr.push({ x: p.x, y: p.y, t: now }); rc.dashEnd = now; }
+      var keep = DASH_TRAIL_STEP * 3 + 20;
+      while (tr.length && now - tr[0].t > keep + DASH_TRAIL_MS) tr.shift();
+      if (!tr.length) return;
+      var fade = dashing ? 1 : 1 - (now - rc.dashEnd) / DASH_TRAIL_MS;
+      if (fade <= 0) { tr.length = 0; return; }
+      // Точка следа — самая свежая не моложе нужного возраста. Пока рывок идёт, возраст считаем
+      // от «сейчас», после — от его конца: так силуэты не догоняют модель, а гаснут на месте.
+      var base = dashing ? now : rc.dashEnd;
+      for (var g = 3; g >= 1; g--) {
+        var want = base - g * DASH_TRAIL_STEP, pt = null;
+        for (var i = tr.length - 1; i >= 0; i--) if (tr[i].t <= want) { pt = tr[i]; break; }
+        if (!pt || Math.hypot(pt.x - p.x, pt.y - p.y) < 2) continue;
+        var s = rigSilhouette(p.role, pt.x, pt.y + r * 0.9, r, rs, color);
+        ctx.globalAlpha = DASH_TRAIL_A[g - 1] * fade;
+        ctx.drawImage(auraBuf, 0, 0, s.sw, s.sh, s.dx, s.dy, s.dw, s.dh);
       }
       ctx.globalAlpha = 1;
     }
@@ -580,11 +773,15 @@ window.SBRender = (function () {
           if (e.type === 'throw') rigC(e.playerId).throwAt = performance.now();
           else if (e.type === 'dash' || e.type === 'special' || e.type === 'wallPlaced') rigC(e.playerId).abilAt = performance.now();
         }
+        // Заморозку снапшот отдельно не несёт: это оглушение от попадания с freeze, клиент помнит его сам.
+        if (e.type === 'hit') rigC(e.targetId).frozenAt = e.freeze ? performance.now() : -1e9;
         switch (e.type) {
           case 'throw': audio.throwWhoosh(e.power || 0); break;
           case 'hit':
             audio.hitPoof(); audio.stunSound(); if (e.freeze) audio.freezeChime();
-            spawnParticles(e.x, e.y, '#eaf4ff', 7, 40, 100, 2, 4, 0.4); triggerShake(4, 120); break;
+            if (e.freeze) spawnParticles(e.x, e.y, '#bfe8ff', 14, 30, 110, 2, 4, 0.55);
+            else spawnParticles(e.x, e.y, '#eaf4ff', 7, 40, 100, 2, 4, 0.4);
+            triggerShake(4, 120); break;
           case 'ko':
             audio.hitPoof(); audio.koSound(); spawnParticles(e.x, e.y, '#eaf4ff', 9, 40, 100, 2, 4, 0.5); triggerShake(5, 150); break;
           case 'wallHit': audio.wallThud(); spawnParticles(e.x, e.y, '#cfe2fb', 7, 40, 100, 2, 4, 0.4); break;
@@ -593,8 +790,30 @@ window.SBRender = (function () {
             explosions.push({ x: e.x, y: e.y, start: performance.now(), duration: 320, maxR: Sim.EXPLOSION_RADIUS });
             spawnParticles(e.x, e.y, '#ffb347', 16, 80, 200, 3, 6, 0.5); break;
           case 'special':
-            if (e.special === 'wall') audio.shieldThud();
-            else if (e.special === 'frost' || e.special === 'snipe') audio.uiClick();
+            if (e.special === 'frost' || e.special === 'snipe') audio.uiClick();
+            break;
+          case 'splash': // пассив Бомбера «Осколки»: маленький снежный разлёт
+            explosions.push({ x: e.x, y: e.y, start: performance.now(), duration: 200, maxR: Sim.BOMBER_SPLASH_R, rgb: '235,245,255' });
+            spawnParticles(e.x, e.y, '#eaf4ff', 6, 30, 90, 1.5, 3, 0.3); break;
+          case 'bastion': audio.shieldThud(); break;
+          case 'shieldBlock':
+            audio.wallThud(); spawnParticles(e.x, e.y, '#dff1ff', 8, 40, 110, 2, 4, 0.4); break;
+          case 'bastionBreak':
+            audio.shieldThud(); triggerShake(5, 150);
+            var br = findPlayer(lastSnap, e.playerId);
+            if (br) spawnParticles(br.x, br.y + radiusOf(br) * Sim.HIT_TORSO_DY, '#dff1ff', 18, 60, 170, 2, 5, 0.5);
+            break;
+          case 'slamStart': audio.throwWhoosh(0.3); break;
+          case 'slam':
+            audio.explosionBoom(); triggerShake(8, 220);
+            var sp0 = findPlayer(lastSnap, e.playerId), sc = sp0 ? slamCenter(sp0) : { x: e.x, y: e.y };
+            rigC(e.playerId).slamAt = performance.now();
+            explosions.push({ x: sc.x, y: sc.y, start: performance.now(), duration: 350, maxR: Sim.SLAM_R, rgb: '255,255,255' });
+            // Снежные брызги по всему кругу, а не из центра: удар накрывает всю зону разом.
+            for (var si = 0; si < 26; si++) {
+              var sa = Math.random() * Math.PI * 2, sr = Math.random() * Sim.SLAM_R * 0.9;
+              spawnParticles(sc.x + Math.cos(sa) * sr, sc.y + Math.sin(sa) * sr, '#eef6ff', 1, 60, 180, 2, 5, 0.5);
+            }
             break;
           case 'dash': audio.throwWhoosh(e.kind === 'taram' ? 0.9 : 0.5); break;
           case 'knockback':
@@ -704,7 +923,7 @@ window.SBRender = (function () {
         }
         ctx.restore();
       }
-      // Разрушаемые укрытия и стены Щита теперь рисует y-sorted слой в frame().
+      // Разрушаемые укрытия и стены босса теперь рисует y-sorted слой в frame().
       // Режим «Защита»: снеговик-объект.
       var pv = snap.pve;
       if (pv && pv.objX != null) {
@@ -859,7 +1078,7 @@ window.SBRender = (function () {
       c2.restore();
     }
 
-    // Препятствия арены плюс живые стены Щита в формате sim.js — для проверки луча прицела.
+    // Препятствия арены плюс живые стены босса в формате sim.js — для проверки луча прицела.
     // Собирается только когда я замахиваюсь (один вызов за кадр).
     function obstaclesOf(snap) {
       var obs = [];
@@ -955,6 +1174,13 @@ window.SBRender = (function () {
       if (dead >= 0) { // труп — обесцвеченный, светлее: сразу видно, что это не живой
         MAT = { fill: boss ? '#575d6b' : '#7b7d88', hi: boss ? '#6d7488' : '#9498a2', ink: '#2b2f38', vein: false };
       }
+      // Замедленный Фризером голем покрывается льдом: модель уходит в голубой, как замороженный
+      // риг (s.frozen в rig.js). Раньше поверх лежал голубой круг, не совпадавший с формой.
+      var iced = dead < 0 && !!p.slow;
+      if (iced) {
+        MAT = boss ? { fill: '#2f4f73', hi: '#5f8fbf', ink: '#0a1626', vein: true }
+                   : { fill: '#7fa6c6', hi: '#c4e0f5', ink: '#1a3148', vein: false };
+      }
       ctx.save();
       ctx.translate(p.x + recoil, feet);
       ctx.fillStyle = 'rgba(20,40,70,0.18)';
@@ -992,7 +1218,7 @@ window.SBRender = (function () {
         // раньше bk с сервера просто не читался тут, и любой босс выглядел как «Снеговик-голем»
         // независимо от никнейма (нашли по репорту: «Йети-вожак» со скином голема).
         var dxy = rc.prevX == null ? 0 : p.x - rc.prevX; rc.prevX = p.x;
-        var FUR = dead >= 0 ? '#c2cad2' : '#eef4f8', FINK = dead >= 0 ? '#4a525c' : '#26323e';
+        var FUR = dead >= 0 ? '#c2cad2' : iced ? '#b9dcf5' : '#eef4f8', FINK = dead >= 0 ? '#4a525c' : iced ? '#1d3c58' : '#26323e';
         var sway = Math.sin(now * 0.003 + rc.ph) * 0.05 + (dxy > 0.4 ? 0.05 : dxy < -0.4 ? -0.05 : 0);
         var breathe = Math.sin(now * 0.004 + rc.ph) * r * 0.03;
         ctx.rotate(sway);
@@ -1107,13 +1333,27 @@ window.SBRender = (function () {
         }
       }
       if (hitT >= 0 && kind !== 'tank' && !(boss && p.bk === 'yeti')) {
+        // Вспышка по самой форме: ком катуна или шары снеговика (у Йети — своя, по шерсти выше).
+        // Раньше был общий белый круг, который у высокого снеговика не совпадал с моделью.
         ctx.globalAlpha = 0.5 * (1 - hitT); ctx.fillStyle = '#fff';
-        ctx.beginPath(); ctx.arc(0, -r, r * 1.2, 0, TAU2); ctx.fill(); ctx.globalAlpha = 1;
+        ctx.beginPath();
+        if (kind === 'roller') ctx.arc(0, 0, R, 0, TAU2);
+        else for (var fi = 0, fy = 0; fi < n; fi++) {
+          var fr = sz[fi]; fy -= fr;
+          ctx.moveTo(lean * (fi / n) + fr, fy); ctx.arc(lean * (fi / n), fy, fr, 0, TAU2);
+          fy -= fr - fr * 0.35;
+        }
+        ctx.fill(); ctx.globalAlpha = 1;
         ctx.fillStyle = MAT.fill; ctx.strokeStyle = MAT.ink; ctx.lineWidth = 2;
         var chd = hitT * 22;
         ctx.beginPath(); ctx.arc(r * 0.5 + chd, -r * 1.3 - chd * 0.5, 5 * (1 - hitT * 0.5), 0, TAU2); ctx.fill(); ctx.stroke();
       }
       ctx.restore();
+    }
+
+    /** Высота макушки голема над его центром p.y: у моделей разный рост, см. drawGolem. */
+    function golemAbove(p, r) {
+      return p.et === 'boss' ? (p.bk === 'yeti' ? r * 2.6 : r * 4.6) : p.et === 'tank' ? r * 2.5 : r * 1.2;
     }
 
     function drawCharacter(snap, p, isMe, local, myTeam) {
@@ -1180,23 +1420,34 @@ window.SBRender = (function () {
         }
       }
 
+      if (alive) drawSlam(p, snap.time);
       var faceAng = charging ? Math.atan2(aimY - p.y, aimX - p.x) : (p.team === 'A' ? 0 : Math.PI);
 
-      // Рывок/таран: призрачный след. Неуязвимость — полупрозрачная модель, см. beginGhost.
-      if (p.dash) {
-        var bdx = Math.cos(faceAng), bdy = Math.sin(faceAng);
-        for (var gi = 1; gi <= 3; gi++) {
-          ctx.globalAlpha = 0.16 * (4 - gi);
-          ctx.beginPath(); ctx.arc(vx - bdx * gi * 6, vy - bdy * gi * 6, r * (1 - gi * 0.12), 0, Math.PI * 2);
-          ctx.fillStyle = color; ctx.fill();
-        }
-        ctx.globalAlpha = 1;
+      // Рывок: след из силуэтов модели (drawDashTrail). Неуязвимость — полупрозрачная модель, см.
+      // beginGhost. Таран босса-голема следа не оставляет: силуэта у голема нет, хватает анимации.
+      if (rs) {
+        try { drawDashTrail(p, r, rs, !!p.dash && alive, DASH_TRAIL_COLOR[p.team] && !p.et ? DASH_TRAIL_COLOR[p.team] : color); }
+        catch (e) { ctx.globalAlpha = 1; }
       }
 
+      // Заморозка: модель внутри ледяной глыбы. Круг замедления поверх неё не рисуем — наледь под
+      // замороженным и так видна, а круг с глыбой давали кашу. Конец заморозки — глыба трескается.
+      var frozenNow = alive && isFrozen(p) && !golemKind, rcF = rigC(p.id);
+      if (rcF.wasFrozen && !frozenNow && alive) shatterIce(p, r, useRig);
+      rcF.wasFrozen = frozenNow;
       var slowIced = false;
       if (p.slow) {
         var _c = slowCause(snap, p);
         slowIced = _c === 'frost' || _c === 'aura';
+      }
+
+      // Замедление наледью или аурой Фризера — изморозь по контуру модели (ореол под ригом) и
+      // искорки инея поверх. Раньше поверх модели лежал полупрозрачный круг: он читался как
+      // посторонний предмет, а не как холод. Замедление щитом Щита отдельно не показываем.
+      var hoarfrost = slowIced && alive && !frozenNow && !!rs;
+      if (hoarfrost) {
+        try { drawAuraRig(p, r, rs, FROST_RIM_COLOR, 0.9 + 0.1 * Math.sin(snap.time / 240), HALO * 1.15); }
+        catch (e) { hoarfrost = false; }
       }
 
       var ghost = (p.iframe && alive) ? beginGhost(p, r) : null;
@@ -1207,22 +1458,19 @@ window.SBRender = (function () {
             if (!drawGolem._warned) { console.error('drawGolem failed:', e); drawGolem._warned = 1; }
             ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 2; ctx.stroke();
           }
-          if (p.slow) { ctx.fillStyle = 'rgba(150,216,255,0.35)'; ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill(); }
+          // Лёд замедленного голема — в drawGolem, здесь искорки инея по его габаритам.
+          if (p.slow && alive) drawFrostSparkles(p, r, snap.time, golemAbove(p, r) + r * 0.9, r * 0.1);
         } else if (useRig) {
           try { Rig.drawFighter(ctx, p.x, p.y + r * 0.9, r, rs); }
           catch (e) { Rig = null; drawRoleModel(ctx, p.role, vx, vy, r, faceAng); }
-          if (p.slow) {
-            ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.42)' : 'rgba(150,216,255,0.30)';
-            ctx.beginPath(); ctx.arc(vx, vy, r * 1.1, 0, Math.PI * 2); ctx.fill();
-          }
         } else {
           ctx.save();
           ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2);
-          ctx.fillStyle = flashing ? '#ffffff' : (p.stun > 0 ? '#888' : color);
+          ctx.fillStyle = flashing ? '#ffffff' : (isFrozen(p) ? '#9fd8ff' : p.stun > 0 ? '#888' : color);
           ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#0b1622'; ctx.stroke();
           // Замедление: наледь и аура Фризера — это ледяная корка со снежинками, лёд арены —
           // прежний слабый тон. Различать важно: иначе в уроке Фризера не понять, что сработало.
-          if (p.slow) {
+          if (p.slow && !frozenNow) {
             ctx.fillStyle = slowIced ? 'rgba(150,216,255,0.55)' : 'rgba(150,216,255,0.42)';
             ctx.beginPath(); ctx.arc(vx, vy, r, 0, Math.PI * 2); ctx.fill();
             if (slowIced) {
@@ -1243,33 +1491,15 @@ window.SBRender = (function () {
       } finally {
         if (ghost) endGhost(ghost); // ctx обязан вернуться к арене даже при сбое модели
       }
+      if (frozenNow) drawIceBlock(p, r, useRig);
+      if (hoarfrost) drawFrostSparkles(p, r, snap.time);
+      if (alive && p.bst > 0) drawBastion(p, r);
 
-      // PvE-босс: корона рисуется в drawGolem; здесь только кольцо ярости в фазе 2.
-      if (p.et === 'boss' && !golemKind) {
-        ctx.save();
-        ctx.translate(vx, vy);
-        ctx.fillStyle = '#ffd24a'; ctx.strokeStyle = '#0b1622'; ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        for (var sp2 = 0; sp2 < 5; sp2++) {
-          var aa = -Math.PI / 2 + sp2 * (Math.PI * 2 / 5);
-          ctx.lineTo(Math.cos(aa) * (r + 6), Math.sin(aa) * (r + 6));
-          ctx.lineTo(Math.cos(aa + Math.PI / 5) * (r + 1), Math.sin(aa + Math.PI / 5) * (r + 1));
-        }
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        ctx.restore();
-      }
-      if (p.et === 'boss' && p.bph === 2) {
-        ctx.save();
-        ctx.globalAlpha = 0.35 + 0.15 * Math.sin(snap.time / 90);
-        ctx.beginPath(); ctx.arc(vx, vy, r + 14, 0, Math.PI * 2);
-        ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.stroke();
-        ctx.restore();
-      }
+      // Корону и ярость 2-й фазы босса (красные глаза, трещины, кружащие комья) рисует drawGolem.
       var lb = labelOf(p, isMe, myTeam);
       // Подпись встаёт НАД макушкой, а не над центром бойца: модели разной высоты (риг втрое
       // выше прежнего кружка, Йети и босс ещё выше), и от центра ник с полоской ложились на лицо.
-      var above = golemKind === 'boss' ? (p.bk === 'yeti' ? r * 2.6 : r * 4.6) : golemKind === 'tank' ? r * 2.5
-                : golemKind === 'roller' ? r * 1.2
+      var above = golemKind ? golemAbove(p, r)
                 : (useRig && Rig.topOf ? Rig.topOf(r, p.role, RIG_SCALE) - r * 0.9 : r + 4);
       // Свой боезапас идёт третьей строкой стека, поэтому весь стек поднимается на её высоту:
       // так полоска встаёт под полоской HP и всё равно не задевает макушку модели.
@@ -1370,7 +1600,7 @@ window.SBRender = (function () {
       for (var i = 0; i < explosions.length; i++) {
         var e = explosions[i], progress = (now - e.start) / e.duration, r = e.maxR * progress;
         ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,150,50,' + (1 - progress) + ')'; ctx.lineWidth = 4; ctx.stroke();
+        ctx.strokeStyle = 'rgba(' + (e.rgb || '255,150,50') + ',' + (1 - progress) + ')'; ctx.lineWidth = 4; ctx.stroke();
       }
     }
     function drawParticles(dt) {
@@ -1379,6 +1609,14 @@ window.SBRender = (function () {
         p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 250 * dt; p.life -= dt;
         if (p.life <= 0) { particles.splice(i, 1); continue; }
         ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+        if (p.shard) { // ледяной осколок — вращающийся треугольник с кромкой, а не снежный комок
+          p.rot += p.vr * dt;
+          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+          ctx.beginPath(); ctx.moveTo(-p.size, 0); ctx.lineTo(0, -p.size * 1.8); ctx.lineTo(p.size, 0); ctx.closePath();
+          ctx.fillStyle = p.color; ctx.fill(); ctx.lineWidth = 0.8; ctx.strokeStyle = 'rgba(90,160,215,0.9)'; ctx.stroke();
+          ctx.restore();
+          continue;
+        }
         ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -1481,6 +1719,11 @@ window.SBRender = (function () {
         o.x = pa.x + (pb.x - pa.x) * t; o.y = pa.y + (pb.y - pa.y) * t;
         o.anim = pa.anim + (pb.anim - pa.anim) * t;
         o.power = pa.power + (pb.power - pa.power) * t;
+        if (pa.bst > 0 && pb.bst > 0) { // угол щита — по кратчайшей дуге, иначе на ±π он крутился бы кругом
+          var dA = pb.bsa - pa.bsa;
+          if (dA > Math.PI) dA -= 2 * Math.PI; else if (dA < -Math.PI) dA += 2 * Math.PI;
+          o.bsa = pa.bsa + dA * t;
+        }
       }
     }
     var balls = o2.balls; balls.length = b.balls.length;

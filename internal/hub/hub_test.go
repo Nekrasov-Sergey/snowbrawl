@@ -864,7 +864,11 @@ func TestDeathmatchRoomMatch(t *testing.T) {
 
 func TestReconnectIntoMatch(t *testing.T) {
 	t.Parallel()
-	s := newServer(t, nil)
+	// Общие для тестов 200 мс на переподключение сюда не годятся: под -race и параллельными
+	// тестами новое соединение с hello не всегда успевало, сессия истекала, и сервер выдавал
+	// новый id — тест падал через раз. Окно с запасом, а истечение ниже ждём дольше него.
+	const ttl = 2 * time.Second
+	s := newServer(t, func(c *config.Config) { c.ReconnectTTL = ttl })
 	p := s.connect(t, "Игрок", "")
 	p.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 1, Arena: 1})
 	p.expect(protocol.SRoomState, nil)
@@ -873,7 +877,13 @@ func TestReconnectIntoMatch(t *testing.T) {
 	p.expect(protocol.SMatchStart, &ms)
 	p.expect(protocol.SSnapshot, nil)
 	p.close()
-	time.Sleep(100 * time.Millisecond)
+	// Возвращаемся, когда сервер уже увидел обрыв: проверяем именно возврат в держащуюся сессию,
+	// а не подмену живого соединения.
+	for deadline := time.Now().Add(ttl / 2); s.hub.Stats().Online > 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not notice the disconnect: %+v", s.hub.Stats())
+		}
+	}
 
 	// Возвращаемся по токену: сервер снова присылает match.start того же матча и снапшоты.
 	p2 := s.connect(t, "Игрок", p.Token)
@@ -889,7 +899,7 @@ func TestReconnectIntoMatch(t *testing.T) {
 	p2.close()
 
 	// Без реконнекта дольше TTL сессия истекает, матч без людей уничтожается.
-	deadline := time.Now().Add(6 * time.Second)
+	deadline := time.Now().Add(ttl + 6*time.Second)
 	for time.Now().Before(deadline) {
 		st := s.hub.Stats()
 		if st.MatchesLive == 0 && st.Players == 0 {

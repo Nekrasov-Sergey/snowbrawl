@@ -58,6 +58,18 @@ window.SBIntent = (function () {
     function speedOf(p) { return (Sim.ROLE_STATS[p.role] || { speed: 150 }).speed; }
     function chargePower() { return Math.min((now() - local.start) / Sim.CHARGE_FULL_MS, 1); }
     function aimPoint(dir, p) { return { x: p.x + dir.x * AIM_LEAD, y: p.y + dir.y * AIM_LEAD }; }
+    // Поднятый щит Щита доворачивает к прицелу, поэтому прицел нужен серверу и без замаха.
+    function shielding() { var p = me(); return !!(p && p.bst > 0); }
+    function sendAim(x, y) {
+      var t = now();
+      if (t - lastAimSend < AIM_MIN_MS) return;
+      // Прицел абсолютный, сервер держит последний — страховочный повтор не нужен. На точность
+      // броска порог не влияет: throw несёт свои x/y и сам выставляет прицел в симуляции,
+      // промежуточные aim нужны, чтобы ДРУГИЕ видели, куда целится боец, и чтобы повернуть щит.
+      if (sentAimPt && Math.hypot(x - sentAimPt.x, y - sentAimPt.y) < AIM_PX) return;
+      lastAimSend = t; sentAimPt = { x: x, y: y };
+      send('aim', x, y);
+    }
     function beginCharge(x, y) {
       local.charging = true; local.start = now(); local.aimX = x; local.aimY = y; local.power = 0;
       sentAimPt = { x: x, y: y }; lastAimSend = now(); // chargeStart уже сообщил прицел
@@ -114,17 +126,14 @@ window.SBIntent = (function () {
         return true;
       },
       aimAt: function (x, y) {
-        if (pending) { if (!pending.dir) { pending.x = x; pending.y = y; } return; }
-        if (!local.charging) return;
-        local.aimX = x; local.aimY = y;
-        var t = now();
-        if (t - lastAimSend < AIM_MIN_MS) return;
-        // Прицел абсолютный, сервер держит последний — страховочный повтор не нужен. На точность
-        // броска порог не влияет: throw несёт свои x/y и сам выставляет прицел в симуляции,
-        // промежуточные aim нужны лишь для того, чтобы ДРУГИЕ видели, куда целится боец.
-        if (sentAimPt && Math.hypot(x - sentAimPt.x, y - sentAimPt.y) < AIM_PX) return;
-        lastAimSend = t; sentAimPt = { x: x, y: y };
-        send('aim', x, y);
+        if (pending) {
+          if (!pending.dir) { pending.x = x; pending.y = y; }
+          if (shielding()) sendAim(x, y);
+          return;
+        }
+        if (local.charging) { local.aimX = x; local.aimY = y; }
+        else if (!shielding()) return;
+        sendAim(x, y);
       },
       throwAt: function (x, y) {
         if (pending) { clearPending(); return; } // отпустил раньше, чем закончилась перезарядка
@@ -177,8 +186,8 @@ window.SBIntent = (function () {
       setAimDir: function (dir) {
         var p = me();
         if (!p || !dir) return;
-        if (pending) { lastAimDir = dir; return; }
-        if (!local.charging) return;
+        if (pending) { lastAimDir = dir; if (shielding()) sendAim(aimPoint(dir, p).x, aimPoint(dir, p).y); return; }
+        if (!local.charging && !shielding()) return;
         lastAimDir = dir;
         var pt = aimPoint(dir, p);
         api.aimAt(pt.x, pt.y);
