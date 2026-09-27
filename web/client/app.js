@@ -2062,8 +2062,9 @@
     // Задержку показывает единственный индикатор — точка соединения (на телефоне она в бою
     // переезжает в игровую панель). Здесь только джиттер снапшотов: он в indicator не входит,
     // но именно он делает бой рваным, поэтому при RTT > 200 мс или джиттере > 100 мс дольше
-    // трёх секунд один раз в минуту показываем тост про VPN.
-    var net = { badSince: 0, lastWarn: 0 };
+    // трёх секунд один раз в минуту показываем тост про VPN. lastWarn — -Infinity, а не 0:
+    // performance.now() считается от загрузки страницы, и с нулём первую минуту тост молчал.
+    var net = { badSince: 0, lastWarn: -Infinity };
     var statTimer = setInterval(function () {
       if (g.over || app.screen !== 'game') return;
       var jitter = buffer.jitter(), now = performance.now();
