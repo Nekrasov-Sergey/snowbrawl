@@ -99,11 +99,13 @@ window.SBRig = (function () {
     ctx.translate(0, bob);
     koFade(ctx, s);
     // тело
-    ctx.beginPath();
-    ctx.moveTo(0, -BH * 0.45);
-    ctx.bezierCurveTo(BW * 0.42, -BH * 0.45, BW * 0.46, BH * 0.5 - 10, 0, BH * 0.5);
-    ctx.bezierCurveTo(-BW * 0.46, BH * 0.5 - 10, -BW * 0.42, -BH * 0.45, 0, -BH * 0.45);
-    ctx.closePath();
+    function lodBody() {
+      ctx.moveTo(0, -BH * 0.45);
+      ctx.bezierCurveTo(BW * 0.42, -BH * 0.45, BW * 0.46, BH * 0.5 - 10, 0, BH * 0.5);
+      ctx.bezierCurveTo(-BW * 0.46, BH * 0.5 - 10, -BW * 0.42, -BH * 0.45, 0, -BH * 0.45);
+      ctx.closePath();
+    }
+    ctx.beginPath(); lodBody();
     ctx.fillStyle = body; ctx.fill();
     ctx.lineWidth = ow; ctx.strokeStyle = INK; ctx.lineJoin = "round"; ctx.stroke();
     // рваный нижний край
@@ -124,9 +126,11 @@ window.SBRig = (function () {
     ctx.strokeStyle = "#1b1622"; ctx.lineWidth = 3; ctx.lineCap = "round";
     ctx.beginPath(); ctx.moveTo(-8, headCY + 3); ctx.lineTo(-3, headCY + 4);
     ctx.moveTo(3, headCY + 4); ctx.lineTo(8, headCY + 3); ctx.stroke();
-    if (s.mode === "hit" && s.hitT < 1) {
+    if (s.mode === "hit" && s.hitT < 1) { // вспышка по силуэту тела и головы, а не овалом поверх
       ctx.globalAlpha = 0.5 * (1 - s.hitT); ctx.fillStyle = "#fff";
-      ctx.beginPath(); ctx.ellipse(0, -6, BW * 0.5, BH * 0.55, 0, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.beginPath(); lodBody();
+      ctx.moveTo(HR * 0.82, headCY + 4); ctx.arc(0, headCY + 4, HR * 0.82, 0, TAU);
+      ctx.fill(); ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
@@ -157,7 +161,8 @@ window.SBRig = (function () {
       body = mix(body, TCOL[s.team], TMIX[s.team]);
       shade = TSHD[s.team];
     }
-    if (s.stun) { body = mix(body, [140, 140, 148], 0.55); shade = "rgba(90,90,100,0.4)"; }  // оглушение — серый
+    if (s.frozen) { body = mix(body, [150, 214, 255], 0.65); shade = "rgba(40,110,170,0.45)"; }  // заморозка Фризера — лёд
+    else if (s.stun) { body = mix(body, [140, 140, 148], 0.55); shade = "rgba(90,90,100,0.4)"; }  // оглушение — серый
     var ow = s.outline;
     var k = R / 46 * s.scaleMul * (g.big || 1);
 

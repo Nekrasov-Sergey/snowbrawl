@@ -1274,7 +1274,8 @@
     if (Device.isTouch() || app.screen !== 'game' || !app.game) return;
     // Кнопку отпустили вне окна: mouseup до нас не дошёл, лечим по состоянию кнопок мыши.
     if (mouseDown && e.buttons === 0) { releaseMouse(); intent.cancelCharge(); return; }
-    if (local.charging) intent.aimAt(pt.x, pt.y);
+    // Без замаха прицел нужен только поднятому щиту Щита — intent.aimAt сам это проверит.
+    intent.aimAt(pt.x, pt.y);
   });
   window.addEventListener('mouseup', function (e) {
     var was = mouseDown;

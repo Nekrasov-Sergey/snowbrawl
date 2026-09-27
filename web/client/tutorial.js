@@ -1,8 +1,8 @@
 /* Обучение: скриптованные бои один на один в режиме tutorial симуляции (см. SIM_CONTRACT).
  *
  * Сценариев семь: «Основы» (всегда Раннер, шесть шагов) плюс по одному на каждого героя —
- * четыре шага одной формы: применить способность → применить её осмысленно → почувствовать
- * пассивку → настоящий бой с добиванием. Последний шаг одинаков не ради симметрии: именно в нём
+ * шаги одной формы: применить способность → применить её осмысленно → почувствовать
+ * пассивку → настоящий бой с добиванием (у Бомбера перед пассивкой ещё снос ящика). Последний шаг одинаков не ради симметрии: именно в нём
  * игрок впервые чувствует темп перезарядки своего героя и цену промаха.
  *
  * Движок один, различаются только таблицы шагов. Игрока добить нельзя — правило «не ниже 1 HP»
@@ -10,7 +10,7 @@
  * на шаге боя: без замка упражнение можно сделать невыполнимым, добив соперника раньше времени.
  *
  * Шаги проверяются по снапшоту и по событиям step(). События applyInput (special, dash,
- * wallPlaced) до клиента НЕ доходят — step обнуляет state.events, — поэтому применение
+ * bastion, slamStart) до клиента НЕ доходят — step обнуляет state.events, — поэтому применение
  * способности определяется по фронту поля cd в снапшоте: этот признак работает и с мыши, и с
  * сенсорной кнопки, в отличие от хука onSpecial, который зависит от пути ввода.
  */
@@ -101,8 +101,8 @@ window.SBTutorial = (function () {
 
   // ---- Геройские сценарии: четыре шага одной формы ----
   // Последний шаг у всех героев одинаков по смыслу — настоящий бой с добиванием. Соперник
-  // подобран так, чтобы способность в нём решала: Бомберу — Щит (бот ставит стену при низком
-  // HP, а взрыв сносит её целиком), Фризеру — Раннер (замедление отбирает его главное).
+  // подобран так, чтобы способность в нём решала: Бомберу — Щит (бот поднимает щит, а взрыв
+  // его ломает), Фризеру — Раннер (замедление отбирает его главное).
   // Метки шага, где нужно попасть в манекена: сначала место для игрока, потом сам манекен.
   // Без метки игрок бросает от спавна и не понимает, почему снежок исчезает в колонне.
   function laneMarks(c) { return c.enemy ? [WALK_MARK, markAt(c.enemy)] : [WALK_MARK]; }
@@ -161,22 +161,30 @@ window.SBTutorial = (function () {
 
   var TANK = [
     {
-      text: t('Нажмите Q: таран несёт бойца вперёд — это и разгон, и удар.'),
-      check: function (c) { return !!c.me && c.me.dash; }
+      text: t('Нажмите Q: Танк замахивается и бьёт оземь вокруг себя.'),
+      check: function (c) { return c.event('slam', function (ev) { return ev.playerId === c.meId; }); }
     },
     {
-      text: t('Таран сбивает с ног и оглушает. Подойдите к сопернику и протараньте его.'),
+      text: t('Удар оземь отбрасывает и оглушает всех рядом. Подойдите вплотную к сопернику и ударьте.'),
       enemy: { role: 'Танк', x: DUMMY.x, y: DUMMY.y, awake: false },
-      marks: laneMarks,
+      marks: function (c) { return c.enemy ? [WALK_MARK, markAt(c.enemy, Sim.SLAM_R)] : [WALK_MARK]; },
       check: function (c) { return c.event('knockback', function (ev) { return ev.targetId === c.enemyId; }); },
-      hint: function (c) { return c.inStep > 15000 ? ' ' + t('Подойдите ближе и цельтесь прямо в него: таран идёт по прицелу.') : ''; }
+      hint: function (c) { return c.inStep > 15000 ? ' ' + t('Удар накрывает круг вокруг Танка: соперник должен быть внутри него.') : ''; }
     },
     {
-      text: t('Пассив «Броня»: попадания оглушают Танка вдвое короче, чем других. Встаньте на метку, дайте Снайперу попасть и сразу идите дальше.'),
+      text: t('Пассив «Броня»: попадание не сбивает замах Танка. Встаньте на метку, зажмите бросок, дождитесь попадания Снайпера и бросьте.'),
       enemy: { role: 'Снайпер', x: SHOOTER.x, y: SHOOTER.y, awake: true, level: 2 },
       marks: function (c) { return c.enemy ? [WALK_MARK, markAt(c.enemy)] : [WALK_MARK]; },
-      check: function (c) { return c.event('hit', function (ev) { return ev.targetId === c.meId; }); },
-      hint: function (c) { return c.inStep > 15000 ? ' ' + t('Стойте на открытом месте: из-за ящика соперник не бросит.') : ''; }
+      // Два события по порядку: попадание во время замаха, затем бросок этого же замаха.
+      check: function (c) {
+        if (c.me && c.me.charging && c.flags.heldHit == null &&
+            c.event('hit', function (ev) { return ev.targetId === c.meId; })) c.flags.heldHit = c.flags.throws || 0;
+        return c.flags.heldHit != null && (c.flags.throws || 0) > c.flags.heldHit;
+      },
+      hint: function (c) {
+        if (c.flags.heldHit != null) return ' ' + t('Замах цел — отпустите бросок.');
+        return c.inStep > 15000 ? ' ' + t('Держите замах, пока снежок не попадёт: из-за ящика соперник не бросит.') : '';
+      }
     },
     fightStep('Снайпер')
   ];
@@ -216,7 +224,7 @@ window.SBTutorial = (function () {
       check: function (c) { return !!c.me && c.me.armed === 'explosive'; }
     },
     {
-      text: t('Взрыв бьёт по площади — точное попадание не нужно. Бросьте взрывной снежок рядом с соперником.'),
+      text: t('Взрыв бьёт по большой площади — точное попадание не нужно. Бросьте взрывной снежок рядом с соперником.'),
       enemy: { role: 'Танк', x: DUMMY.x, y: DUMMY.y, awake: false },
       marks: function (c) { return c.enemy ? [WALK_MARK, markAt(c.enemy, Sim.EXPLOSION_RADIUS)] : [WALK_MARK]; },
       check: function (c) {
@@ -227,7 +235,7 @@ window.SBTutorial = (function () {
       hint: laneHint
     },
     {
-      text: t('Пассив «Сапёр»: взрывы ломают дерево, а обычные снежки — нет. Разнесите ящик: он держит два взрыва.'),
+      text: t('Взрыв ломает дерево, а обычные снежки — нет. Разнесите ящик: он держит два взрыва.'),
       marks: function () { return [CRATE]; },
       // Соперника на этом шаге нет: он попал бы в радиус взрыва и ушёл в KO, а шаг тогда
       // пришлось бы проходить между респавнами. Условие — по состоянию ящика, а не по событию
@@ -239,12 +247,21 @@ window.SBTutorial = (function () {
         return c.inStep > 20000 ? ' ' + t('Взрыв должен накрыть ящик, попадать точно в него не обязательно.') : '';
       }
     },
+    {
+      text: t('Пассив «Осколки»: обычный снежок Бомбера тоже бьёт по небольшой площади. Бросьте обычный снежок рядом с соперником, а не в него.'),
+      enemy: { role: 'Танк', x: DUMMY.x, y: DUMMY.y, awake: false },
+      marks: function (c) { return c.enemy ? [WALK_MARK, markAt(c.enemy, Sim.BOMBER_SPLASH_R)] : [WALK_MARK]; },
+      check: function (c) { return c.event('hit', function (ev) { return ev.targetId === c.enemyId && ev.splash; }); },
+      hint: function (c) {
+        return laneHint(c) || (c.inStep > 15000 ? ' ' + t('Осколки достают на шаг от точки падения: целиться можно чуть мимо.') : '');
+      }
+    },
     fightStep('Щит')
   ];
 
   var FREEZER = [
     {
-      text: t('Нажмите Q: следующий снежок оставит на земле наледь.'),
+      text: t('Нажмите Q: следующий снежок при прямом попадании заморозит врага на 1 с и оставит на земле наледь.'),
       check: function (c) { return !!c.me && c.me.armed === 'frost'; }
     },
     {
@@ -286,29 +303,17 @@ window.SBTutorial = (function () {
 
   var SHIELD = [
     {
-      text: t('Нажмите Q: перед вами встанет снежная стена. Она держит несколько попаданий и растает через несколько секунд.'),
-      check: function (c) { return c.walls('A').length > 0; }
+      text: t('Нажмите Q: перед вами встанет снежный щит. Он держится несколько секунд, а вы пока идёте медленнее.'),
+      check: function (c) { return !!c.me && c.me.bst > 0; }
     },
     {
-      text: t('Стена — переносное укрытие. Встаньте так, чтобы она перекрыла линию между вами и соперником.'),
-      enemy: { role: 'Танк', x: DUMMY.x, y: DUMMY.y, awake: false },
-      marks: laneMarks,
-      // Два условия. Порог 30, а не 60: стена ставится в 45 px по прицелу, и с широким порогом
-      // засчитывалась даже стена, выставленная вбок от линии броска. И стена должна быть
-      // поставлена в этом шаге (возраст меньше времени шага): та, что осталась с шага 1, уже
-      // стояла как надо, и одно нажатие Q закрывало оба шага подряд.
-      check: function (c) {
-        if (!c.me || !c.enemy) return false;
-        var walls = c.walls('A');
-        for (var i = 0; i < walls.length; i++) {
-          var age = walls[i].life - walls[i].ttl;
-          if (age <= c.inStep && c.segDist(c.me, c.enemy, walls[i]) <= 30) return true;
-        }
-        return false;
-      },
+      text: t('Щит поворачивается за курсором и гасит снежки спереди. Встаньте на метку, поднимите щит и примите бросок Снайпера на щит.'),
+      enemy: { role: 'Снайпер', x: SHOOTER.x, y: SHOOTER.y, awake: true, level: 2 },
+      marks: function (c) { return c.enemy ? [WALK_MARK, markAt(c.enemy)] : [WALK_MARK]; },
+      check: function (c) { return c.event('shieldBlock', function (ev) { return ev.targetId === c.meId; }); },
       hint: function (c) {
-        if (c.walls('A').length === 0) return ' ' + t('Поставьте стену (Q) между собой и соперником.');
-        return c.inStep > 12000 ? ' ' + t('Стена встаёт поперёк прицела: наведитесь на соперника и нажмите Q.') : '';
+        if (c.me && c.me.bst > 0) return ' ' + t('Держите курсор на Снайпере — щит доворачивает не сразу.');
+        return c.inStep > 12000 ? ' ' + t('Щит поднимают на Q, когда Снайпер замахивается.') : '';
       }
     },
     {
@@ -329,12 +334,7 @@ window.SBTutorial = (function () {
           return ' ' + t('Пузырь восстанавливается: {n} с. Спрячьтесь и подождите — под обстрелом реген не идёт.',
             { n: Math.ceil(c.me.bb * Sim.BUBBLE_REGEN_MS / 1000) });
         }
-        var walls = c.walls('A');
-        if (c.me && c.enemy) {
-          for (var i = 0; i < walls.length; i++) {
-            if (c.segDist(c.me, c.enemy, walls[i]) <= 60) return ' ' + t('Отойдите от своей стены — из-за неё соперник не бросит.');
-          }
-        }
+        if (c.me && c.me.bst > 0) return ' ' + t('Щит пока принимает снежки на себя — дождитесь, когда он опустится.');
         return '';
       }
     },
@@ -346,11 +346,11 @@ window.SBTutorial = (function () {
     // раскрывают геройские уроки.
     { id: 'basics', title: t('Основы'), role: 'Раннер', about: t('Движение, замах, перезарядка, укрытия и первый бой'), steps: BASICS },
     { id: 'dash', title: t('Раннер: рывок'), role: 'Раннер', about: t('Рывок с неуязвимостью, второе дыхание и бой'), steps: RUNNER },
-    { id: 'taram', title: t('Танк: таран'), role: 'Танк', about: t('Таран, броня против оглушения и бой'), steps: TANK },
+    { id: 'taram', title: t('Танк: удар оземь'), role: 'Танк', about: t('Удар оземь, броня и бой'), steps: TANK },
     { id: 'snipe', title: t('Снайпер: прицельный выстрел'), role: 'Снайпер', about: t('Настильный выстрел, дальность и бой'), steps: SNIPER },
-    { id: 'explosive', title: t('Бомбер: взрывной снежок'), role: 'Бомбер', about: t('Урон по площади, снос укрытий и бой'), steps: BOMBER },
+    { id: 'explosive', title: t('Бомбер: взрывной снежок'), role: 'Бомбер', about: t('Большой взрыв, снос укрытий, осколки и бой'), steps: BOMBER },
     { id: 'frost', title: t('Фризер: ледяная волна'), role: 'Фризер', about: t('Наледь, аура холода и бой'), steps: FREEZER },
-    { id: 'wall', title: t('Щит: снежная стена'), role: 'Щит', about: t('Стена-укрытие, щитовой пузырь и бой'), steps: SHIELD }
+    { id: 'wall', title: t('Щит: снежный щит'), role: 'Щит', about: t('Поворотный щит, щитовой пузырь и бой'), steps: SHIELD }
   ];
 
   function scenarioById(id) {
@@ -395,7 +395,7 @@ window.SBTutorial = (function () {
 
     /**
      * Привести соперника к тому, что описано в шаге: нет — поставить, добили — поставить нового,
-     * неподвижного оттащили тараном — вернуть на место. Одно место вместо «инициализации в enter»:
+     * неподвижного отбросило ударом оземь — вернуть на место. Одно место вместо «инициализации в enter»:
      * именно из-за неё шаг «укройтесь» когда-то зависал навсегда.
      */
     function syncEnemy(snap) {
@@ -469,11 +469,6 @@ window.SBTutorial = (function () {
           return false;
         },
         obstacles: function () { return cfg.obstacles(snap); },
-        walls: function (team) {
-          var out = [], list = (snap && snap.walls) || [];
-          for (var i = 0; i < list.length; i++) if (!team || list[i].team === team) out.push(list[i]);
-          return out;
-        },
         fx: function (kind, team) {
           var out = [], list = (snap && snap.fx) || [];
           for (var i = 0; i < list.length; i++) {
@@ -498,13 +493,6 @@ window.SBTutorial = (function () {
             if (Math.hypot(list[i].x - me.x, list[i].y - me.y) <= radius) return true;
           }
           return false;
-        },
-        // Расстояние от точки p до отрезка a—b: нужно проверке «стена перекрыла линию броска».
-        segDist: function (a, b, p) {
-          var dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
-          if (!len2) return Math.hypot(p.x - a.x, p.y - a.y);
-          var t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
-          return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
         }
       };
       c.hitEnemy = function () {

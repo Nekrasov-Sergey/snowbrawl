@@ -188,8 +188,8 @@ func TestBubbleFieldAlwaysPresent(t *testing.T) {
 }
 
 // TestTutorialCooldownScope — укороченный кулдаун обучения достаётся только ученику. С коротким
-// кулдауном у соперника Танк уровня 2 таранит каждые 2 секунды, и шаги «дайте сопернику попасть»
-// превращаются в непрерывное оглушение.
+// кулдауном соперник-Танк уровня 2 бил бы оземь каждые 2 секунды, и шаги «дайте сопернику попасть»
+// превращались бы в непрерывное оглушение.
 func TestTutorialCooldownScope(t *testing.T) {
 	t.Parallel()
 	p := loadProgram(t)
@@ -219,9 +219,9 @@ func TestTutorialCooldownScope(t *testing.T) {
 	}
 }
 
-// TestSapperBreaksCrate — пассив «Сапёр»: ящик «Классики» держит 4 HP, взрыв снимает 3, значит
-// на снос нужно ровно два попадания. На этом стоит шаг обучения Бомбера.
-func TestSapperBreaksCrate(t *testing.T) {
+// TestExplosionBreaksCrate — взрывной снежок Бомбера: ящик «Классики» держит 4 HP, взрыв снимает 3,
+// значит на снос нужно ровно два попадания. На этом стоит шаг обучения Бомбера.
+func TestExplosionBreaksCrate(t *testing.T) {
 	t.Parallel()
 	p := loadProgram(t)
 	// Боец стоит на чистой линии y=150: у спавна колонна, и подойти к ящику «в лоб» нельзя —

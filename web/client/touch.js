@@ -1,6 +1,6 @@
 /* Сенсорное управление: два плавающих стика и кнопка способности поверх SBIntent.
  * Левая зона — движение, правая — замах/прицел/бросок (отпустить в мёртвой зоне — отмена).
- * Для Щита кнопка способности работает как мини-стик: отвёл — поставил стену по направлению. */
+ * Для направленной способности кнопка работает как мини-стик: отвёл — применил по направлению. */
 window.SBTouch = (function () {
   var RADIUS = 60;   // CSS px: ход ручки стика
   var DEAD = 12;     // CSS px: мёртвая зона (в ней стик «не отклонён»)
@@ -77,7 +77,7 @@ window.SBTouch = (function () {
       move: function (e) {
         if (!R || e.pointerId !== R.id) return;
         read(R, o.stickR, e);
-        if (R.charging && R.dir) o.intent.setAimDir(R.dir);
+        if (R.dir) o.intent.setAimDir(R.dir); // без замаха intent пропустит — кроме поднятого щита
       },
       up: function (e, cancelled) {
         if (!R || e.pointerId !== R.id) return;
