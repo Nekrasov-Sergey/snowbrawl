@@ -14,25 +14,37 @@ window.SBRender = (function () {
     var coarse = false;
     try { coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches; } catch (e) { /* игнор */ }
 
-    // Внутреннее разрешение канваса тянем под фактический размер на экране (×DPR): при крупной
-    // арене на ПК рисование в 900×560 и апскейл браузером мылит спрайты и текст. RS — множитель
-    // бэкстора; вся отрисовка остаётся в логических координатах 900×560 через setTransform(RS).
-    var RS = 1;
+    // Бэкстор канваса — ровно физические пиксели его места на экране: любое несовпадение, даже на
+    // несколько процентов, браузер растягивает билинейно, и на мониторе с DPR 1–1.25 мылятся
+    // обводки, полоски и подписи (на Retina то же растяжение почти не видно). Место канваса —
+    // #stage: канвас в нём абсолютный (см. style.css), края прижаты к сетке физических пикселей,
+    // CSS-размер выставлен ровно бэкстор/DPR. RS и RSY — масштабы бэкстора по осям; вся отрисовка
+    // остаётся в логических координатах 900×560 через setTransform(RS, 0, 0, RSY).
+    var RS = 1, RSY = 1;
+    var MAX_RS = 4; // защита от абсурдных размеров; 4K-монитору (~2.7) не мешает
     // Ширина полоски HP над бойцом; ею же меряется полоска боезапаса под ней, чтобы обе строки
     // стека были одной длины.
     var BAR_W = 30;
-    function computeRS() {
-      var dpr = window.devicePixelRatio || 1;
-      var cssW = canvas.clientWidth || (canvas.getBoundingClientRect && canvas.getBoundingClientRect().width) || W;
-      var want = Math.max(1, Math.min(2.5, cssW * dpr / W));
-      return Math.round(want * 4) / 4; // шаг 0.25 — реже пересобираем кэши арены и подписей
-    }
+    var placed = '';
     function applyRS() {
-      var next = computeRS();
-      if (next === RS && canvas.width === Math.round(W * next)) return;
-      RS = next;
-      canvas.width = Math.round(W * RS);
-      canvas.height = Math.round(H * RS);
+      var box = canvas.parentElement;
+      if (!box || !box.getBoundingClientRect) return;
+      var r = box.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return; // экран боя скрыт: оставляем прежний размер
+      var dpr = window.devicePixelRatio || 1;
+      var L = Math.ceil(r.left * dpr - 1e-3), T = Math.ceil(r.top * dpr - 1e-3);
+      var bw = Math.floor(r.right * dpr + 1e-3) - L, bh = Math.floor(r.bottom * dpr + 1e-3) - T;
+      bw = Math.max(1, Math.min(bw, Math.round(W * MAX_RS)));
+      bh = Math.max(1, Math.min(bh, Math.round(H * MAX_RS)));
+      var key = bw + 'x' + bh + '@' + (L / dpr - r.left).toFixed(3) + ',' + (T / dpr - r.top).toFixed(3) + '/' + dpr;
+      if (key === placed) return;
+      placed = key;
+      var st = canvas.style;
+      st.width = bw / dpr + 'px'; st.height = bh / dpr + 'px';
+      st.left = (L / dpr - r.left) + 'px'; st.top = (T / dpr - r.top) + 'px';
+      if (canvas.width === bw && canvas.height === bh) return; // сдвинулись, но размер тот же
+      canvas.width = bw; canvas.height = bh;
+      RS = bw / W; RSY = bh / H;
       arenaCache.index = -1; labels = {};
     }
     try { window.addEventListener('resize', applyRS); } catch (e) { /* игнор */ }
@@ -48,9 +60,9 @@ window.SBRender = (function () {
     // shadowBlur на каждое препятствие каждый кадр на телефонах стоят дороже всего остального.
     var arenaCache = { index: -1, canvas: null };
     function buildArena(index) {
-      var oc = document.createElement('canvas'); oc.width = Math.round(W * RS); oc.height = Math.round(H * RS);
+      var oc = document.createElement('canvas'); oc.width = canvas.width; oc.height = canvas.height;
       var c = oc.getContext('2d');
-      c.setTransform(RS, 0, 0, RS, 0, 0);
+      c.setTransform(RS, 0, 0, RSY, 0, 0);
       var bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#dfeeff'); bg.addColorStop(1, '#c3ddf7');
       c.fillStyle = bg; c.fillRect(0, 0, W, H);
       // Крапинка снега — убирает «мёртвую» заливку, помогает силуэтам. Запекается один раз.
@@ -1388,7 +1400,7 @@ window.SBRender = (function () {
       applyRS(); // подстроить внутреннее разрешение под текущий размер канваса
       var shakeX = 0, shakeY = 0;
       if (now < shake.until) { var rem = (shake.until - now) / shake.total; shakeX = (Math.random() - 0.5) * shake.mag * rem; shakeY = (Math.random() - 0.5) * shake.mag * rem; }
-      ctx.setTransform(RS, 0, 0, RS, 0, 0);
+      ctx.setTransform(RS, 0, 0, RSY, 0, 0);
       ctx.save(); ctx.translate(shakeX, shakeY);
       var myTeam = null;
       for (var t = 0; t < snap.players.length; t++) if (snap.players[t].id === meId) { myTeam = snap.players[t].team; break; }

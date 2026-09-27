@@ -280,10 +280,15 @@ html.ingame:not(.touch) #topGameBar { margin-bottom: 4px; }
 html.ingame:not(.touch) #hint { margin-bottom: 2px; }
 html.ingame:not(.touch) #abilityRow { margin-bottom: 4px; }
 html.ingame:not(.touch) #bottomRow { margin-top: 4px; }
+/* Канвас вне потока #stage: размер #stage задают только его правила (высота/ширина +
+   aspect-ratio), а рендер (render.js, applyRS) ставит канвасу точный размер и сдвиг в CSS-px,
+   прижатые к физическим пикселям, — чтобы бэкстор совпал с экраном 1:1 и арена не мылилась.
+   100% — дефолт до первого кадра. */
 canvas {
   background: linear-gradient(180deg,#dfeeff 0%, #c3ddf7 100%);
-  border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); cursor: crosshair; display: block; max-width: 100%; height: 100%; width: 100%;
+  border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); cursor: crosshair; display: block; height: 100%; width: 100%;
 }
+#stage > canvas { position: absolute; left: 0; top: 0; }
 #overlay {
   position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
   flex-direction: column; background: rgba(5,10,20,0.72); border-radius: 10px; gap: 10px;
@@ -457,7 +462,9 @@ html.touch #topLeftBar { top:calc(env(safe-area-inset-top) + 3px); }
 #fsTopBtn { background:#16283f; border:1px solid #3a5a80; color:#cfe2fb; padding:5px 10px; border-radius:6px; cursor:pointer; font-size:14px; }
 #fsTopBtn:hover { background:#274363; }
 /* Задержка рядом с точкой: цвет не зависит от состояния соединения, красный — только про лаг. */
-#connPing { font-size: 12px; color: #a9c2e0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Ширина зарезервирована под «9999 мс» жирным: иначе смена числа цифр двигала ползунок громкости.
+   В em, а не ch: ch зависит от жирности и прыгал бы при переходе в .bad. */
+#connPing { font-size: 12px; color: #a9c2e0; font-variant-numeric: tabular-nums; white-space: nowrap; display: inline-block; min-width: 4em; }
 #connPing.bad { color: #ff6b6b; font-weight: 600; }
 #connState.on { color: #7CFFB2; }
 #connState.off { color: #ff5b5b; }
