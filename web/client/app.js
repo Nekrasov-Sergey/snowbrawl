@@ -662,20 +662,28 @@
     card.className = 'heroCard' + (selected ? ' selected' : '');
     card.innerHTML = '<div class="heroSwatch" style="background:' + stats.color + '"></div>' +
       '<div class="heroName">' + t(role) + '</div><button type="button" class="heroInfoBtn" title="' + t('Описание') + '">i</button>';
-    card.onclick = onClick;
+    var descHtml = '<b>' + t(role) + '.</b> ' + t(Sim.HERO_DESCRIPTIONS[role]);
+    // Открытое описание переключается на выбранного бойца, иначе под сеткой остаётся прошлый.
+    card.onclick = function (e) {
+      if (infoEl && !infoEl.hidden) showInfo(infoEl, role, descHtml);
+      onClick(e);
+    };
     card.querySelector('.heroInfoBtn').onclick = function (e) {
       e.stopPropagation(); Audio_.uiClick();
-      toggleInfo(infoEl, role, '<b>' + t(role) + '.</b> ' + t(Sim.HERO_DESCRIPTIONS[role]));
+      toggleInfo(infoEl, role, descHtml);
     };
     return card;
+  }
+  function showInfo(el, key, html) {
+    el.setAttribute('data-key', key);
+    el.innerHTML = html;
+    el.hidden = false;
   }
   // Один блок описания на экран: повторный клик по той же «i» его сворачивает.
   function toggleInfo(el, key, html) {
     if (!el) return;
     if (!el.hidden && el.getAttribute('data-key') === key) { el.hidden = true; return; }
-    el.setAttribute('data-key', key);
-    el.innerHTML = html;
-    el.hidden = false;
+    showInfo(el, key, html);
   }
   function mapCard(i, selected, onClick) {
     var arena = Sim.ARENAS[i];
