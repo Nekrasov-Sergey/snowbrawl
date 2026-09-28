@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -407,8 +408,10 @@ func TestSearch(t *testing.T) {
 	t.Parallel()
 	s := testStore(t)
 	now := time.Now()
+	// Ники по порядку, а не protocol.FallbackNick: у «Игрок NNNN» девять тысяч вариантов, и среди
+	// 55 случайных два совпадают примерно в каждом шестом прогоне — так упал релиз v0.25.0.
 	for i := 0; i < SearchPage+5; i++ {
-		if _, err := s.EnsureGuest(NewID(), protocol.FallbackNick(), true, nil, now.Add(time.Duration(i)*time.Millisecond)); err != nil {
+		if _, err := s.EnsureGuest(NewID(), fmt.Sprintf("Гость %03d", i), true, nil, now.Add(time.Duration(i)*time.Millisecond)); err != nil {
 			t.Fatal(err)
 		}
 	}
