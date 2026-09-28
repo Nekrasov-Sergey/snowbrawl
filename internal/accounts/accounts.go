@@ -1,74 +1,74 @@
-// Package accounts хранит постоянные аккаунты игроков: то немногое, что должно пережить
-// перезапуск сервера и переезд игрока на другое устройство, — ник, прогресс обучения, роль
-// модерации. Всё остальное про игрока по-прежнему живёт в памяти (internal/session).
+// Package accounts хранит постоянные записи игроков: ник, прогресс обучения, роль, бан. Запись
+// есть и у гостя, и у вошедшего через Яндекс: гость — запись без провайдера, а вход превращает
+// её в аккаунт или сливает с уже существующим (Link). Всё остальное про игрока — место в
+// комнате и матче, чат, задержка — живёт в памяти (internal/session).
 //
-// Базы в проекте нет, поэтому аккаунты лежат в одном JSON-файле рядом с ролями и банами
-// (internal/moderation): тот же приём с temp+rename, та же версия формата, та же осторожность
-// с битым файлом.
+// Гостя узнают по подписанной куке, а не по IP (см. internal/auth): у мобильного игрока адрес
+// меняется между загрузками страницы, а кука остаётся той же.
 //
-// Отличие от moderation — в том, КТО ходит на диск. Роли правит только админка, редко; аккаунты
-// же меняются в игре: отметка урока, переименование, обновление времени входа. Синхронный fsync
-// на каждое такое событие встал бы поперёк всех матчей, потому что зовут их из-под мьютекса хаба.
-// Поэтому здесь приём из internal/onlinestat: любая правка меняет только память и поднимает
-// dirty, а на диск пишут фоновая горутина (Run), Close и явный Flush из HTTP-обработчиков,
-// которым важно не потерять событие (вход через OAuth, действия админки). Цена — потеря до
-// периода флаша при kill -9; для отметки урока это приемлемо, для входа — нет, отсюда Flush.
+// Записи лежат в SQLite (internal/store), и база — источник правды: кэша в памяти нет, хаб
+// читает запись при подключении и держит нужное в сессии. Из этого два правила для вызывающего.
+// Читать (Get, ByNickKey) можно откуда угодно, в том числе под мьютексом хаба: чтение идёт через
+// свой пул и писателя не ждёт. Писать (всё остальное) — только вне h.mu: запись ждёт единственное
+// соединение писателя, и контрольная точка WAL делает fsync прямо в коммите.
 //
-// Наружу стор ничего не вызывает (кроме колбэка taken в Ensure/Rename, который обязан быть
-// быстрым и не брать мьютекс хаба), поэтому дедлок с h.mu невозможен по построению.
+// Колбэк taken в Link/EnsureGuest/Rename сообщает про ники, занятые ВНЕ базы (живые брони
+// гостей без куки); он обязан быть быстрым и сам брать мьютекс хаба, если нужно.
 package accounts
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"sort"
+	"errors"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 )
 
-// Провайдеры входа. Пока один, но поле в файле есть с самого начала: добавить второй провайдер
-// потом будет нельзя без миграции, если различать их только по формату Subject.
-const ProviderYandex = "yandex"
-
-// fileVersion — версия формата файла. Растёт при несовместимом изменении, как в moderation.
-const fileVersion = 1
+// Провайдеры входа. Пустой провайдер — гость.
+const (
+	ProviderGuest  = ""
+	ProviderYandex = "yandex"
+)
 
 // RenameCooldown — как часто можно менять ник. Без паузы смена ника превращается в способ
-// перебирать чужие брони и мельтешить в чате под разными именами.
+// перебирать чужие ники и мельтешить в чате под разными именами.
 const RenameCooldown = 10 * time.Minute
 
-// FlushEvery — период фоновой записи на диск (см. Run).
-const FlushEvery = 5 * time.Second
+// GuestTTL — сколько живёт запись гостя без заходов. Потом она удаляется и ник освобождается;
+// роль или бан держат запись. Кука гостя живёт столько же (см. internal/auth).
+const GuestTTL = 90 * 24 * time.Hour
+
+// touchEvery — не чаще этого пишем время последнего захода: запись на каждое переподключение
+// ничего не даёт уборке гостей, у которой срок — месяцы.
+const touchEvery = time.Minute
 
 // Ошибки, которые вызывающий обязан различать: каждой соответствует свой текст игроку.
 var (
-	ErrNotFound  = errors.New("accounts: аккаунт не найден")
+	ErrNotFound  = errors.New("accounts: запись не найдена")
 	ErrNickTaken = errors.New("accounts: ник занят")
 	ErrTooSoon   = errors.New("accounts: ник менялся недавно")
 	ErrNoStore   = errors.New("accounts: стор не создан")
 )
 
 // Account — постоянная часть игрока. Чего здесь намеренно нет: e-mail, токенов провайдера
-// (access_token живёт в памяти до запроса профиля и выбрасывается) и IP — адрес относится
-// к соединению, а не к аккаунту, и его хранит moderation.
+// (access_token живёт в памяти до запроса профиля и выбрасывается) и IP — адрес относится к
+// соединению, а не к игроку.
 type Account struct {
 	ID       string `json:"id"`       // "a" + hex, виден клиенту
-	Provider string `json:"provider"` // ProviderYandex
-	Subject  string `json:"sub"`      // идентификатор пользователя у провайдера
+	Provider string `json:"provider"` // ProviderGuest или ProviderYandex
+	Subject  string `json:"sub,omitempty"`
 	Login    string `json:"login,omitempty"`
 
 	Nick string `json:"nick"`
-	// NickAuto — ник выдан сервером, потому что имя из профиля не подошло или было занято.
-	// По нему клиент сразу предлагает выбрать ник: иначе игрок узнаёт об «Игрок 4821» в бою.
+	// NickAuto — ник выдан сервером. У аккаунта Яндекса это значит «имя из профиля не подошло
+	// или было занято», и клиент сразу предлагает выбрать ник.
 	NickAuto bool `json:"nickAuto,omitempty"`
 
 	Rank     string   `json:"rank,omitempty"`
@@ -79,8 +79,8 @@ type Account struct {
 	Epoch int `json:"epoch"`
 
 	CreatedAt time.Time `json:"createdAt"`
-	// NickAt — когда ник менялся в последний раз. Нулевой у аккаунта, который ещё ни разу не
-	// переименовывался: первая смена бесплатна (см. Ensure).
+	// NickAt — когда ник менялся в последний раз. Нулевой у записи, которая ещё ни разу не
+	// переименовывалась: первая смена бесплатна.
 	NickAt time.Time `json:"nickAt,omitempty"`
 	SeenAt time.Time `json:"seenAt"`
 
@@ -88,446 +88,678 @@ type Account struct {
 	BannedAt  *time.Time `json:"bannedAt,omitempty"`
 }
 
-// Banned — заблокирован ли аккаунт.
+// Banned — заблокирован ли игрок.
 func (a Account) Banned() bool { return a.BannedAt != nil }
 
-type file struct {
-	Version  int       `json:"version"`
-	Accounts []Account `json:"accounts"`
-}
+// Guest — запись гостя, без входа через провайдера.
+func (a Account) Guest() bool { return a.Provider == ProviderGuest }
 
-// Store — аккаунты в памяти с фоновой записью на диск. Все методы безопасны на nil-приёмнике:
-// сервер обязан работать и без аккаунтов (разработка, отключённый вход), как он работает без
-// стора модерации.
+// Store — записи игроков поверх базы. Все методы безопасны на nil-приёмнике: хаб и админка
+// работают и без стора (часть тестов), как раньше работали без аккаунтов.
 type Store struct {
-	mu      sync.RWMutex
-	path    string // "" — только память
-	byID    map[string]*Account
-	bySub   map[string]string // "provider:subject" → id
-	byNick  map[string]string // protocol.NickKey(nick) → id
-	dirty   bool
-	broken  bool
-	log     zerolog.Logger
-	stopCh  chan struct{}
-	stopOne sync.Once
-	wg      sync.WaitGroup
+	db  *store.DB
+	log zerolog.Logger
+
+	touchMu sync.Mutex
+	touched map[string]time.Time // id → когда в последний раз писали seen_at
 }
 
-// Open читает файл аккаунтов. Файла нет — пустой стор. Файл битый — он откладывается рядом с
-// суффиксом .bad, а сервер поднимается с пустым списком: уронить игру из-за испорченного файла
-// хуже, чем потерять аккаунты, но это должно быть видно (ERROR в лог, Broken для админки).
-func Open(path string, log zerolog.Logger) (*Store, error) {
-	s := &Store{
-		path: path, byID: map[string]*Account{}, bySub: map[string]string{},
-		byNick: map[string]string{}, log: log, stopCh: make(chan struct{}),
-	}
-	if path == "" {
-		log.Info().Msg("accounts: файл не задан, аккаунты живут только в памяти")
-		return s, nil
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // путь задаёт администратор через конфиг
-	if errors.Is(err, fs.ErrNotExist) {
-		log.Info().Str("path", path).Msg("accounts: файла нет, начинаем с пустого списка")
-		return s, nil
-	}
-	if err != nil {
-		return nil, errors.Wrap(err, "accounts: чтение файла")
-	}
-	var f file
-	if err := json.Unmarshal(data, &f); err != nil {
-		s.broken = true
-		bad := path + ".bad"
-		if rerr := os.Rename(path, bad); rerr != nil {
-			log.Error().Err(rerr).Str("path", path).Msg("accounts: файл битый и не переименовывается")
-		}
-		log.Error().Err(err).Str("moved", bad).Msg("accounts: файл битый, аккаунты сброшены")
-		return s, nil
-	}
-	for i := range f.Accounts {
-		a := f.Accounts[i]
-		if a.ID == "" || a.Subject == "" {
-			continue
-		}
-		s.put(&a)
-	}
-	log.Info().Int("accounts", len(s.byID)).Str("path", path).Msg("accounts: список загружен")
-	return s, nil
-}
-
-// put кладёт аккаунт в карты и индексы. Вызывать под s.mu (или до выдачи стора наружу).
-func (s *Store) put(a *Account) {
-	s.byID[a.ID] = a
-	s.bySub[subKey(a.Provider, a.Subject)] = a.ID
-	if a.Nick != "" {
-		s.byNick[protocol.NickKey(a.Nick)] = a.ID
-	}
-}
-
-func subKey(provider, sub string) string { return provider + ":" + sub }
-
-// Get возвращает копию аккаунта: наружу указатели не отдаём, иначе его правили бы без мьютекса.
-func (s *Store) Get(id string) (Account, bool) {
-	if s == nil || id == "" {
-		return Account{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	a, ok := s.byID[id]
-	if !ok {
-		return Account{}, false
-	}
-	return *a, true
-}
-
-// BySubject ищет аккаунт по идентификатору у провайдера.
-func (s *Store) BySubject(provider, sub string) (Account, bool) {
-	if s == nil {
-		return Account{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	id, ok := s.bySub[subKey(provider, sub)]
-	if !ok {
-		return Account{}, false
-	}
-	return *s.byID[id], true
-}
-
-// ByNickKey ищет аккаунт по нормализованному нику (protocol.NickKey). Так хаб узнаёт, что имя
-// закреплено за аккаунтом и гостю его выдавать нельзя.
-func (s *Store) ByNickKey(key string) (Account, bool) {
-	if s == nil || key == "" {
-		return Account{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	id, ok := s.byNick[key]
-	if !ok {
-		return Account{}, false
-	}
-	return *s.byID[id], true
-}
-
-// Ensure находит аккаунт по провайдеру или заводит новый. Второе значение — «создан впервые».
-//
-// taken сообщает, занят ли ник чем-то ВНЕ стора (живой бронью гостя); может быть nil. Ник из
-// профиля берётся, только если он проходит обычную проверку ника и свободен, иначе выдаётся
-// «Игрок NNNN» с отметкой NickAuto: вход не должен падать из-за чужого или матерного имени.
-func (s *Store) Ensure(provider, sub, login, suggestNick string, taken func(key string) bool, now time.Time) (Account, bool, error) {
-	if s == nil {
-		return Account{}, false, ErrNoStore
-	}
-	if provider == "" || sub == "" {
-		return Account{}, false, errors.New("accounts: пустой провайдер или subject")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if id, ok := s.bySub[subKey(provider, sub)]; ok {
-		a := s.byID[id]
-		if login != "" && a.Login != login {
-			a.Login = login
-			s.dirty = true
-		}
-		a.SeenAt = now
-		s.dirty = true
-		return *a, false, nil
-	}
-	nick, auto := s.pickNick(suggestNick, taken)
-	if nick == "" {
-		return Account{}, false, errors.New("accounts: не удалось подобрать свободный ник")
-	}
-	// NickAt намеренно нулевой: первая смена ника после входа бесплатна. Иначе игрок, которому
-	// сервер только что выдал «Игрок 4821», десять минут не мог бы назваться по-человечески.
-	a := &Account{
-		ID: newID(), Provider: provider, Subject: sub, Login: login,
-		Nick: nick, NickAuto: auto, CreatedAt: now, SeenAt: now,
-	}
-	s.put(a)
-	s.dirty = true
-	return *a, true, nil
-}
-
-// pickNick подбирает ник новому аккаунту. Вызывать под s.mu.
-func (s *Store) pickNick(suggest string, taken func(string) bool) (string, bool) {
-	if nick, err := protocol.NormalizeNick(suggest); err == nil && s.nickFree(protocol.NickKey(nick), "", taken) {
-		return nick, false
-	}
-	// Имя из профиля не подошло — выдаём своё, тем же генератором, что и гостям: «Ловкий
-	// Пингвин» выглядит именем, а не заглушкой. Если не повезло — «Игрок NNNN», у него
-	// пространство больше.
-	for i := 0; i < 30; i++ {
-		nick := protocol.RandomNick()
-		if s.nickFree(protocol.NickKey(nick), "", taken) {
-			return nick, true
-		}
-	}
-	for i := 0; i < 30; i++ {
-		nick := protocol.FallbackNick()
-		if s.nickFree(protocol.NickKey(nick), "", taken) {
-			return nick, true
-		}
-	}
-	return "", false
-}
-
-// nickFree — свободен ли ключ ника для аккаунта self (пустой self — для нового). Вызывать под s.mu.
-func (s *Store) nickFree(key, self string, taken func(string) bool) bool {
-	if id, ok := s.byNick[key]; ok && id != self {
-		return false
-	}
-	if taken != nil && taken(key) {
-		return false
-	}
-	return true
-}
-
-// Rename меняет ник аккаунта. Ник уже должен быть проверен protocol.NormalizeNick вызывающим —
-// здесь проверяется только занятость и кулдаун.
-func (s *Store) Rename(id, nick string, taken func(key string) bool, now time.Time) error {
-	if s == nil {
-		return ErrNoStore
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a, ok := s.byID[id]
-	if !ok {
-		return ErrNotFound
-	}
-	key := protocol.NickKey(nick)
-	if key == protocol.NickKey(a.Nick) {
-		// Тот же ник в другом написании: кулдаун не тратим, бронь не трогаем.
-		a.Nick, a.NickAuto = nick, false
-		s.dirty = true
+// Open создаёт стор поверх открытой базы.
+func Open(db *store.DB, log zerolog.Logger) *Store {
+	if db == nil {
 		return nil
 	}
-	// Нулевой NickAt бывает у файла, написанного руками: кулдаун к нему не применяем.
-	if !a.NickAt.IsZero() && now.Sub(a.NickAt) < RenameCooldown {
-		return ErrTooSoon
-	}
-	if !s.nickFree(key, id, taken) {
-		return ErrNickTaken
-	}
-	delete(s.byNick, protocol.NickKey(a.Nick))
-	a.Nick, a.NickAuto, a.NickAt = nick, false, now
-	s.byNick[key] = id
-	s.dirty = true
-	return nil
+	return &Store{db: db, log: log, touched: map[string]time.Time{}}
 }
 
-// AddTutorial отмечает пройденные уроки. Возвращает true, если список действительно вырос:
-// объединение множеств конфликтов не даёт, поэтому слияние с localStorage безопасно в любую
-// сторону. Зовётся из-под h.mu — на диск не ходит.
-func (s *Store) AddTutorial(id string, lessons ...string) bool {
-	if s == nil || len(lessons) == 0 {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a, ok := s.byID[id]
-	if !ok {
-		return false
-	}
-	have := make(map[string]bool, len(a.Tutorial))
-	for _, l := range a.Tutorial {
-		have[l] = true
-	}
-	changed := false
-	for _, l := range lessons {
-		if l == "" || have[l] {
-			continue
-		}
-		have[l] = true
-		a.Tutorial = append(a.Tutorial, l)
-		changed = true
-	}
-	if changed {
-		sort.Strings(a.Tutorial) // порядок не важен игре, но важен диффу файла и тестам
-		s.dirty = true
-	}
-	return changed
-}
-
-// SetRank выдаёт роль аккаунту; пустая роль снимает её.
-func (s *Store) SetRank(id, rank string) error { return s.edit(id, func(a *Account) { a.Rank = rank }) }
-
-// Ban блокирует аккаунт, Unban снимает блокировку.
-func (s *Store) Ban(id, reason string, now time.Time) error {
-	return s.edit(id, func(a *Account) { a.BanReason, a.BannedAt = reason, &now })
-}
-
-func (s *Store) Unban(id string) error {
-	return s.edit(id, func(a *Account) { a.BanReason, a.BannedAt = "", nil })
-}
-
-// BumpEpoch обесценивает все выданные куки аккаунта («выйти на всех устройствах»).
-func (s *Store) BumpEpoch(id string) error { return s.edit(id, func(a *Account) { a.Epoch++ }) }
-
-// Touch отмечает время последнего входа. Зовётся из-под h.mu на каждом hello, поэтому только
-// память: писать файл раз в подключение незачем.
-func (s *Store) Touch(id string, now time.Time) {
-	_ = s.edit(id, func(a *Account) { a.SeenAt = now })
-}
-
-func (s *Store) edit(id string, fn func(*Account)) error {
-	if s == nil {
-		return ErrNoStore
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a, ok := s.byID[id]
-	if !ok {
-		return ErrNotFound
-	}
-	fn(a)
-	s.dirty = true
-	return nil
-}
-
-// List возвращает копию списка для админки, от новых к старым. Порядок детерминированный:
-// сводка админки идёт в SSE-поток и обязана быть побайтово той же при неизменном состоянии.
-func (s *Store) List() []Account {
-	if s == nil {
-		return nil
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Account, 0, len(s.byID))
-	for _, a := range s.byID {
-		out = append(out, *a)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.After(out[j].CreatedAt)
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out
-}
-
-// Len — сколько аккаунтов заведено (админке и логам).
-func (s *Store) Len() int {
-	if s == nil {
-		return 0
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.byID)
-}
-
-// Broken — файл при старте оказался испорченным (список сброшен).
-func (s *Store) Broken() bool {
-	if s == nil {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.broken
-}
-
-// Run запускает фоновую запись на диск. Вызывать один раз при старте.
-func (s *Store) Run(every time.Duration) {
-	if s == nil || s.path == "" {
-		return
-	}
-	if every <= 0 {
-		every = FlushEvery
-	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		t := time.NewTicker(every)
-		defer t.Stop()
-		for {
-			select {
-			case <-s.stopCh:
-				return
-			case <-t.C:
-				if err := s.Flush(); err != nil {
-					s.log.Error().Err(err).Msg("accounts: не удалось записать файл")
-				}
-			}
-		}
-	}()
-}
-
-// Close останавливает фоновую горутину и дописывает последние изменения.
-func (s *Store) Close() error {
-	if s == nil {
-		return nil
-	}
-	s.stopOne.Do(func() { close(s.stopCh) })
-	s.wg.Wait()
-	return s.Flush()
-}
-
-// Flush пишет файл, если с прошлого раза что-то менялось. Зовётся фоновой горутиной, Close и
-// теми обработчиками вне h.mu, которым нельзя терять событие (вход, действия админки).
-func (s *Store) Flush() error {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.dirty || s.path == "" {
-		return nil
-	}
-	if err := s.save(); err != nil {
-		return err
-	}
-	s.dirty = false
-	return nil
-}
-
-// save пишет файл целиком: временный файл в том же каталоге плюс rename — чтобы обрыв записи
-// не оставил половину списка. Вызывать под s.mu.
-func (s *Store) save() error {
-	f := file{Version: fileVersion}
-	for _, a := range s.byID {
-		f.Accounts = append(f.Accounts, *a)
-	}
-	sort.Slice(f.Accounts, func(i, j int) bool { return f.Accounts[i].ID < f.Accounts[j].ID })
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil { // в каталоге лежат имена и связи с Яндексом
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "accounts-*.json") // тот же каталог: rename через границу ФС не работает
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	cleanup := func() { _ = tmp.Close(); _ = os.Remove(name) }
-	if _, err := tmp.Write(data); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Chmod(name, 0o600); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, s.path); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	s.broken = false
-	return nil
-}
-
-func newID() string {
+// NewID — новый идентификатор записи. Гостевой куке id выдаётся раньше, чем появляется запись
+// (см. internal/auth), поэтому генератор открыт наружу.
+func NewID() string {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
 	return "a" + hex.EncodeToString(b)
 }
+
+const cols = `id, provider, subject, login, nick, nick_auto, rank, epoch, created_at, nick_at, seen_at, ban_reason, banned_at`
+
+// querier — общее у *sql.DB и *sql.Tx для чтения.
+type querier interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+type scanner interface{ Scan(dest ...any) error }
+
+func scanAccount(r scanner) (Account, error) {
+	var (
+		a                Account
+		auto             int
+		created, seen    int64
+		nickAt, bannedAt sql.NullInt64
+	)
+	if err := r.Scan(&a.ID, &a.Provider, &a.Subject, &a.Login, &a.Nick, &auto, &a.Rank, &a.Epoch,
+		&created, &nickAt, &seen, &a.BanReason, &bannedAt); err != nil {
+		return Account{}, err
+	}
+	a.NickAuto = auto != 0
+	a.CreatedAt, a.SeenAt = fromMs(created), fromMs(seen)
+	if nickAt.Valid {
+		a.NickAt = fromMs(nickAt.Int64)
+	}
+	if bannedAt.Valid {
+		t := fromMs(bannedAt.Int64)
+		a.BannedAt = &t
+	}
+	return a, nil
+}
+
+func fromMs(ms int64) time.Time { return time.UnixMilli(ms) }
+
+func ms(t time.Time) int64 { return t.UnixMilli() }
+
+func nullMs(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UnixMilli()
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// getBy читает одну запись по условию и её уроки.
+func getBy(q querier, where string, args ...any) (Account, bool, error) {
+	a, err := scanAccount(q.QueryRow("SELECT "+cols+" FROM players WHERE "+where, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Account{}, false, nil
+	}
+	if err != nil {
+		return Account{}, false, err
+	}
+	lessons, err := lessonsOf(q, a.ID)
+	if err != nil {
+		return Account{}, false, err
+	}
+	a.Tutorial = lessons
+	return a, true, nil
+}
+
+func lessonsOf(q querier, id string) ([]string, error) {
+	rows, err := q.Query("SELECT lesson FROM player_lessons WHERE player_id = ? ORDER BY lesson", id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// read — чтение с логом ошибки: вызывающему (хабу под мьютексом) ошибка базы не нужна, ему
+// нужно «нашлось или нет», а сбой должен быть виден в логе.
+func (s *Store) read(where string, args ...any) (Account, bool) {
+	a, ok, err := getBy(s.db.R, where, args...)
+	if err != nil {
+		s.log.Error().Err(err).Msg("accounts: чтение записи")
+		return Account{}, false
+	}
+	return a, ok
+}
+
+// Get возвращает запись по id.
+func (s *Store) Get(id string) (Account, bool) {
+	if s == nil || id == "" {
+		return Account{}, false
+	}
+	return s.read("id = ?", id)
+}
+
+// BySubject ищет аккаунт по идентификатору у провайдера.
+func (s *Store) BySubject(provider, sub string) (Account, bool) {
+	if s == nil || provider == ProviderGuest || sub == "" {
+		return Account{}, false
+	}
+	return s.read("provider = ? AND subject = ?", provider, sub)
+}
+
+// ByNickKey ищет запись по нормализованному нику (protocol.NickKey). Так хаб узнаёт, что имя
+// закреплено за игроком и выдавать его другому нельзя.
+func (s *Store) ByNickKey(key string) (Account, bool) {
+	if s == nil || key == "" {
+		return Account{}, false
+	}
+	return s.read("nick_key = ?", key)
+}
+
+// nickFree — свободен ли ник для записи self (пустой self — для новой).
+func nickFree(q querier, key, self string, taken func(string) bool) (bool, error) {
+	var id string
+	err := q.QueryRow("SELECT id FROM players WHERE nick_key = ?", key).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, err
+	case id != self:
+		return false, nil
+	}
+	if taken != nil && taken(key) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// pickNick подбирает ник новой записи: предложенный, если он годится и свободен, иначе свой —
+// тем же генератором, что и гостям («Ловкий Пингвин» выглядит именем, а не заглушкой), и только
+// если не повезло — «Игрок NNNN», у него пространство больше.
+func pickNick(q querier, suggest string, taken func(string) bool) (string, bool, error) {
+	if nick, err := protocol.NormalizeNick(suggest); err == nil {
+		free, err := nickFree(q, protocol.NickKey(nick), "", taken)
+		if err != nil {
+			return "", false, err
+		}
+		if free {
+			return nick, false, nil
+		}
+	}
+	for _, gen := range []func() string{protocol.RandomNick, protocol.FallbackNick} {
+		for i := 0; i < 30; i++ {
+			nick := gen()
+			free, err := nickFree(q, protocol.NickKey(nick), "", taken)
+			if err != nil {
+				return "", false, err
+			}
+			if free {
+				return nick, true, nil
+			}
+		}
+	}
+	return "", false, errors.New("accounts: не удалось подобрать свободный ник")
+}
+
+func insert(e store.Execer, a Account) error {
+	_, err := e.Exec("INSERT INTO players("+cols+", nick_key) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		a.ID, a.Provider, a.Subject, a.Login, a.Nick, boolInt(a.NickAuto), a.Rank, a.Epoch,
+		ms(a.CreatedAt), nullMs(a.NickAt), ms(a.SeenAt), a.BanReason, nil, protocol.NickKey(a.Nick))
+	return err
+}
+
+// EnsureGuest заводит запись гостя с этим id или возвращает уже существующую (второй вкладке,
+// опередившей первую). Ник уже проверен вызывающим (protocol.NormalizeNick); занятый ник —
+// ErrNickTaken. auto — ник выдал сервер, а не игрок.
+func (s *Store) EnsureGuest(id, nick string, auto bool, taken func(key string) bool, now time.Time) (Account, error) {
+	if s == nil {
+		return Account{}, ErrNoStore
+	}
+	if a, ok := s.Get(id); ok {
+		return a, nil
+	}
+	key := protocol.NickKey(nick)
+	if taken != nil && taken(key) {
+		return Account{}, ErrNickTaken
+	}
+	a := Account{ID: id, Nick: nick, NickAuto: auto, CreatedAt: now, SeenAt: now}
+	err := insert(s.db.W, a)
+	if uniq, what := store.IsUnique(err); uniq {
+		if what == "players.id" {
+			// Вторая вкладка того же браузера успела первой: берём её запись.
+			if a, ok := s.Get(id); ok {
+				return a, nil
+			}
+		}
+		return Account{}, ErrNickTaken
+	}
+	if err != nil {
+		return Account{}, err
+	}
+	s.markTouched(id, now)
+	return a, nil
+}
+
+// Ensure находит аккаунт провайдера или заводит новый. Второе значение — «создан впервые».
+// Это Link без гостя: так входят из браузера без гостевой куки и через /auth/dev/login.
+func (s *Store) Ensure(provider, sub, login, suggestNick string, taken func(key string) bool, now time.Time) (Account, bool, error) {
+	return s.Link("", provider, sub, login, suggestNick, taken, now)
+}
+
+// Link — вход через провайдера из браузера, где уже играл гость guestID (может быть пустым).
+//
+//   - Аккаунт провайдера уже есть: прогресс обучения гостя объединяется с ним, ник остаётся от
+//     аккаунта, запись гостя удаляется и освобождает свой ник. Бан гостя переезжает в аккаунт
+//     (иначе от бана спасал бы вход), роль — если у аккаунта её нет.
+//   - Аккаунта нет, а гость есть: гость становится аккаунтом с тем же id, ником, обучением и
+//     ролью. Куки, выданные гостю, продолжают работать.
+//   - Нет ни того, ни другого: новый аккаунт с ником из профиля (suggestNick).
+//
+// Всё в одной транзакции: обрыв посередине не оставит ни двух записей, ни потерянного прогресса.
+func (s *Store) Link(guestID, provider, sub, login, suggestNick string, taken func(key string) bool, now time.Time) (Account, bool, error) {
+	if s == nil {
+		return Account{}, false, ErrNoStore
+	}
+	if provider == ProviderGuest || sub == "" {
+		return Account{}, false, errors.New("accounts: пустой провайдер или subject")
+	}
+	tx, err := s.db.W.Begin()
+	if err != nil {
+		return Account{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var guest *Account
+	if guestID != "" {
+		g, ok, err := getBy(tx, "id = ?", guestID)
+		if err != nil {
+			return Account{}, false, err
+		}
+		if ok && g.Guest() {
+			guest = &g
+		}
+	}
+	existing, found, err := getBy(tx, "provider = ? AND subject = ?", provider, sub)
+	if err != nil {
+		return Account{}, false, err
+	}
+	created := false
+	var id string
+	switch {
+	case found:
+		id = existing.ID
+		if guest != nil {
+			if err := mergeGuest(tx, *guest, existing); err != nil {
+				return Account{}, false, err
+			}
+		}
+		if _, err := tx.Exec("UPDATE players SET login = ?, seen_at = ? WHERE id = ?", login, ms(now), id); err != nil {
+			return Account{}, false, err
+		}
+	case guest != nil:
+		// Ник гостя игрок выбрал сам или уже привык к выданному, поэтому он остаётся. Отметку
+		// «ник выдал сервер» снимаем: у аккаунта она значит «имя из Яндекса не подошло», и
+		// клиент сразу потащил бы игрока на экран ника.
+		id, created = guest.ID, true
+		if _, err := tx.Exec(`UPDATE players SET provider = ?, subject = ?, login = ?, nick_auto = 0, seen_at = ?
+			WHERE id = ?`, provider, sub, login, ms(now), id); err != nil {
+			return Account{}, false, err
+		}
+	default:
+		nick, auto, err := pickNick(tx, suggestNick, taken)
+		if err != nil {
+			return Account{}, false, err
+		}
+		// NickAt намеренно нулевой: первая смена ника после входа бесплатна. Иначе игрок,
+		// которому сервер только что выдал «Игрок 4821», десять минут не мог бы назваться
+		// по-человечески.
+		id, created = NewID(), true
+		a := Account{ID: id, Provider: provider, Subject: sub, Login: login, Nick: nick, NickAuto: auto,
+			CreatedAt: now, SeenAt: now}
+		if err := insert(tx, a); err != nil {
+			if uniq, _ := store.IsUnique(err); uniq {
+				return Account{}, false, ErrNickTaken
+			}
+			return Account{}, false, err
+		}
+	}
+	a, _, err := getBy(tx, "id = ?", id)
+	if err != nil {
+		return Account{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Account{}, false, err
+	}
+	s.markTouched(id, now)
+	return a, created, nil
+}
+
+// mergeGuest переносит гостя в существующий аккаунт и удаляет его запись.
+func mergeGuest(tx *sql.Tx, guest, acc Account) error {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO player_lessons(player_id, lesson)
+		SELECT ?, lesson FROM player_lessons WHERE player_id = ?`, acc.ID, guest.ID); err != nil {
+		return err
+	}
+	if guest.Banned() && !acc.Banned() {
+		if _, err := tx.Exec("UPDATE players SET ban_reason = ?, banned_at = ? WHERE id = ?",
+			guest.BanReason, ms(*guest.BannedAt), acc.ID); err != nil {
+			return err
+		}
+	}
+	if guest.Rank != "" && acc.Rank == "" {
+		if _, err := tx.Exec("UPDATE players SET rank = ? WHERE id = ?", guest.Rank, acc.ID); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec("DELETE FROM players WHERE id = ?", guest.ID)
+	return err
+}
+
+// Rename меняет ник записи. Ник уже должен быть проверен protocol.NormalizeNick вызывающим —
+// здесь проверяются только занятость и кулдаун.
+func (s *Store) Rename(id, nick string, taken func(key string) bool, now time.Time) error {
+	if s == nil {
+		return ErrNoStore
+	}
+	tx, err := s.db.W.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	a, ok, err := getBy(tx, "id = ?", id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	key := protocol.NickKey(nick)
+	if key == protocol.NickKey(a.Nick) {
+		// Тот же ник в другом написании: кулдаун не тратим.
+		if _, err := tx.Exec("UPDATE players SET nick = ?, nick_auto = 0 WHERE id = ?", nick, id); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if !a.NickAt.IsZero() && now.Sub(a.NickAt) < RenameCooldown {
+		return ErrTooSoon
+	}
+	free, err := nickFree(tx, key, id, taken)
+	if err != nil {
+		return err
+	}
+	if !free {
+		return ErrNickTaken
+	}
+	_, err = tx.Exec("UPDATE players SET nick = ?, nick_key = ?, nick_auto = 0, nick_at = ? WHERE id = ?",
+		nick, key, ms(now), id)
+	if uniq, _ := store.IsUnique(err); uniq {
+		return ErrNickTaken
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AddTutorial отмечает пройденные уроки. Возвращает true, если список действительно вырос:
+// объединение множеств конфликтов не даёт, поэтому слияние с localStorage безопасно в любую
+// сторону.
+func (s *Store) AddTutorial(id string, lessons ...string) bool {
+	if s == nil || id == "" || len(lessons) == 0 {
+		return false
+	}
+	tx, err := s.db.W.Begin()
+	if err != nil {
+		s.log.Error().Err(err).Msg("accounts: отметка урока")
+		return false
+	}
+	defer func() { _ = tx.Rollback() }()
+	changed := false
+	for _, l := range lessons {
+		if l == "" {
+			continue
+		}
+		res, err := tx.Exec(`INSERT OR IGNORE INTO player_lessons(player_id, lesson)
+			SELECT id, ? FROM players WHERE id = ?`, l, id)
+		if err != nil {
+			s.log.Error().Err(err).Msg("accounts: отметка урока")
+			return false
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed = true
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		s.log.Error().Err(err).Msg("accounts: отметка урока")
+		return false
+	}
+	return changed
+}
+
+// SetRank выдаёт роль; пустая роль снимает её.
+func (s *Store) SetRank(id, rank string) error {
+	return s.update(id, "UPDATE players SET rank = ? WHERE id = ?", rank, id)
+}
+
+// Ban блокирует игрока, Unban снимает блокировку.
+func (s *Store) Ban(id, reason string, now time.Time) error {
+	return s.update(id, "UPDATE players SET ban_reason = ?, banned_at = ? WHERE id = ?", reason, ms(now), id)
+}
+
+func (s *Store) Unban(id string) error {
+	return s.update(id, "UPDATE players SET ban_reason = '', banned_at = NULL WHERE id = ?", id)
+}
+
+// BumpEpoch обесценивает все выданные куки записи («выйти на всех устройствах»).
+func (s *Store) BumpEpoch(id string) error {
+	return s.update(id, "UPDATE players SET epoch = epoch + 1 WHERE id = ?", id)
+}
+
+func (s *Store) update(id, query string, args ...any) error {
+	if s == nil {
+		return ErrNoStore
+	}
+	if id == "" {
+		return ErrNotFound
+	}
+	res, err := s.db.W.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Touch отмечает время захода — по нему уборка решает, что гость пропал. Пишет не чаще раза в
+// touchEvery на запись.
+func (s *Store) Touch(id string, now time.Time) {
+	if s == nil || id == "" {
+		return
+	}
+	s.touchMu.Lock()
+	last, ok := s.touched[id]
+	if ok && now.Sub(last) < touchEvery {
+		s.touchMu.Unlock()
+		return
+	}
+	s.touched[id] = now
+	if len(s.touched) > 10000 {
+		// Отметки нужны только на минуту вперёд: старые — просто мусор.
+		for k, t := range s.touched {
+			if now.Sub(t) >= touchEvery {
+				delete(s.touched, k)
+			}
+		}
+	}
+	s.touchMu.Unlock()
+	if _, err := s.db.W.Exec("UPDATE players SET seen_at = ? WHERE id = ?", ms(now), id); err != nil {
+		s.log.Error().Err(err).Msg("accounts: время захода")
+	}
+}
+
+func (s *Store) markTouched(id string, now time.Time) {
+	s.touchMu.Lock()
+	s.touched[id] = now
+	s.touchMu.Unlock()
+}
+
+// PurgeGuests удаляет гостей, не заходивших с before, — без роли и без бана: такие записи
+// держат, пока их не снимут руками. Возвращает, сколько удалено.
+func (s *Store) PurgeGuests(before time.Time) (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	res, err := s.db.W.Exec(`DELETE FROM players
+		WHERE provider = '' AND rank = '' AND banned_at IS NULL AND seen_at < ?`, ms(before))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// PurgeTask — задача для store.RunDaily: уборка гостей старше GuestTTL.
+func (s *Store) PurgeTask() func(time.Time) {
+	return func(now time.Time) {
+		n, err := s.PurgeGuests(now.Add(-GuestTTL))
+		switch {
+		case err != nil:
+			s.log.Error().Err(err).Msg("accounts: уборка гостей")
+		case n > 0:
+			s.log.Info().Int("removed", n).Msg("accounts: удалены давно не заходившие гости")
+		}
+	}
+}
+
+// Фильтры списка игроков в админке.
+const (
+	FilterAll    = ""
+	FilterGuests = "guests"
+	FilterYandex = "yandex"
+	FilterRanked = "ranked"
+	FilterBanned = "banned"
+)
+
+// SearchPage — сколько записей на странице списка в админке.
+const SearchPage = 50
+
+// SearchOrder — порядок списка игроков в админке: админы, модераторы, остальные; внутри — кто
+// заходил позже, тот выше; дальше по нику. Онлайн-игроков админка ставит выше сама: о сессиях
+// база не знает.
+const SearchOrder = `CASE rank WHEN 'admin' THEN 0 WHEN 'moderator' THEN 1 ELSE 2 END, seen_at DESC, nick_key, id`
+
+// Search — кусок списка игроков для админки: поиск по нику, логину или id (без учёта регистра),
+// фильтр, исключённые id (они уже показаны выше как онлайн) и окно offset/limit. Порядок —
+// SearchOrder. Возвращает кусок и общее число подходящих записей без исключённых.
+func (s *Store) Search(query, filter string, exclude []string, offset, limit int) ([]Account, int, error) {
+	if s == nil {
+		return nil, 0, ErrNoStore
+	}
+	var where []string
+	var args []any
+	if q := strings.TrimSpace(query); q != "" {
+		// Ищем по ключу ника: он уже приведён к нижнему регистру и ё→е, так что «ёлка» найдёт
+		// «Ёлку». LIKE-символы в запросе экранируем, иначе «_» совпадал бы с чем угодно.
+		pat := "%" + likeEscape(protocol.NickKey(q)) + "%"
+		where = append(where, `(nick_key LIKE ? ESCAPE '\' OR lower(login) LIKE ? ESCAPE '\' OR id = ?)`)
+		args = append(args, pat, "%"+likeEscape(strings.ToLower(q))+"%", q)
+	}
+	switch filter {
+	case FilterGuests:
+		where = append(where, "provider = ''")
+	case FilterYandex:
+		where = append(where, "provider = 'yandex'")
+	case FilterRanked:
+		where = append(where, "rank <> ''")
+	case FilterBanned:
+		where = append(where, "banned_at IS NOT NULL")
+	}
+	if len(exclude) > 0 {
+		where = append(where, "id NOT IN (?"+strings.Repeat(", ?", len(exclude)-1)+")")
+		for _, id := range exclude {
+			args = append(args, id)
+		}
+	}
+	cond := ""
+	if len(where) > 0 {
+		cond = " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int
+	if err := s.db.R.QueryRow("SELECT count(*) FROM players"+cond, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		return nil, total, nil
+	}
+	rows, err := s.db.R.Query("SELECT "+cols+" FROM players"+cond+" ORDER BY "+SearchOrder+" LIMIT ? OFFSET ?",
+		append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	var out []Account
+	for rows.Next() {
+		a, err := scanAccount(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, 0, err
+		}
+		out = append(out, a)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	for i := range out {
+		if out[i].Tutorial, err = lessonsOf(s.db.R, out[i].ID); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, nil
+}
+
+// Matches — подходит ли запись под поиск и фильтр ровно так же, как в Search. Нужно админке
+// для онлайн-игроков: их она отбирает сама, не спрашивая базу.
+func Matches(a Account, query, filter string) bool {
+	switch filter {
+	case FilterGuests:
+		if !a.Guest() {
+			return false
+		}
+	case FilterYandex:
+		if a.Provider != ProviderYandex {
+			return false
+		}
+	case FilterRanked:
+		if a.Rank == "" {
+			return false
+		}
+	case FilterBanned:
+		if !a.Banned() {
+			return false
+		}
+	}
+	return MatchesQuery(a.ID, a.Nick, a.Login, query)
+}
+
+// MatchesQuery — поиск Search по нику, логину и id без фильтра. Годится и для гостя без записи.
+func MatchesQuery(id, nick, login, query string) bool {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return true
+	}
+	return strings.Contains(protocol.NickKey(nick), protocol.NickKey(q)) ||
+		(login != "" && strings.Contains(strings.ToLower(login), strings.ToLower(q))) ||
+		(id != "" && id == q)
+}
+
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// Len — сколько записей в базе (админке и логам).
+func (s *Store) Len() int {
+	if s == nil {
+		return 0
+	}
+	var n int
+	if err := s.db.R.QueryRow("SELECT count(*) FROM players").Scan(&n); err != nil {
+		s.log.Error().Err(err).Msg("accounts: подсчёт записей")
+	}
+	return n
+}
+
+// Broken — файл базы при старте оказался испорченным (записи сброшены).
+func (s *Store) Broken() bool { return s != nil && s.db.Broken() }

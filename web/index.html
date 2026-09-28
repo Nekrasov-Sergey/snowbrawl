@@ -68,13 +68,14 @@
   <div id="screen-menu" class="panel" hidden>
     <div class="subtitle">Зашёл → выбрал комнату → бросай снежки → победи.</div>
     <div class="who">Вы: <b id="menuNick"></b> <button class="linkBtn" id="changeNick">сменить ник</button></div>
+    <div class="who guestHint" id="guestHint" hidden>Войдите через Яндекс ID, чтобы не потерять прогресс на других устройствах.</div>
     <button class="menuBtn ghost wide" id="btnYandexMenu" hidden>Войти через Яндекс ID</button>
     <div class="who" id="onlineInfo">Игроков онлайн: —</div>
     <button class="menuBtn primary" id="btnPvp">РЕЖИМ PVP</button>
     <button class="menuBtn" id="btnPve">РЕЖИМ PVE</button>
     <button class="menuBtn ghost wide" id="btnTutorial">Обучение<span class="badge" id="tutorialBadge" hidden>новое</span></button>
     <button class="menuBtn ghost" id="btnSettings">Настройки</button>
-    <!-- Видна только «Создателю»: сервер пускает его в админку по адресу, без токена -->
+    <!-- Видна только админу: сервер пускает его в админку по роли в записи игрока, без токена -->
     <button class="menuBtn ghost" id="btnAdmin" hidden>Админка</button>
   </div>
 
@@ -293,7 +294,7 @@
   </div>
 
   <div id="toast" hidden></div>
-  <div class="footer">SnowBrawl <span id="verBuild">__BUILD__</span> · sim <span id="verSim">—</span></div>
+  <div class="footer">SnowBrawl <span id="verBuild">__BUILD__</span></div>
 </div>
 <!-- Мобильный бой только в ландшафте: показывается через CSS в портрете во время матча/обучения -->
 <div id="rotateGate"><div><div class="rotIcon">📱↻</div>Поверни телефон<br><small>Бой в SnowBrawl идёт в горизонтальном положении.</small></div></div>

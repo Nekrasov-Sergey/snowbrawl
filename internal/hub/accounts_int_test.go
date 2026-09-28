@@ -5,6 +5,7 @@ package hub_test
 // игры, когда сервер уже узнал игрока.
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -241,5 +242,104 @@ func TestGuestUnaffected(t *testing.T) {
 	again.expect(protocol.SError, &e)
 	if e.Code != protocol.ErrNoAccount {
 		t.Fatalf("гостю ответили %q", e.Code)
+	}
+}
+
+// Гость с кукой — постоянный игрок: сменив адрес и пережив перезапуск сервера, он остаётся с
+// тем же ником и прогрессом. Ради этого гостю и заведена запись.
+func TestGuestKeepsNickAcrossIPAndRestart(t *testing.T) {
+	t.Parallel()
+	dbFile := filepath.Join(t.TempDir(), "snowbrawl.db")
+	mutate := func(c *config.Config) { c.TrustProxy = true; c.DBFile = dbFile }
+	s := newServer(t, mutate)
+	c, id := s.guest(t, "Снежок", "10.0.0.1")
+	if c.Welcome.Account == nil || c.Welcome.Account.ID != id || c.Welcome.Account.Provider != accounts.ProviderGuest {
+		t.Fatalf("у гостя с кукой нет записи в welcome: %+v", c.Welcome.Account)
+	}
+	c.send(protocol.CTutorialDone, protocol.TutorialDone{ID: "basics"})
+	var st protocol.AccountState
+	c.expect(protocol.SAccount, &st)
+	c.close()
+
+	// Другой адрес, пустой ник в hello (localStorage очищен) — тот же игрок.
+	again := s.dialFull(t, "", "", "10.0.0.2", id, false)
+	if again.Welcome.Nick != "Снежок" || len(again.Welcome.Tutorial) != 1 {
+		t.Fatalf("после смены IP: ник %q, уроки %v", again.Welcome.Nick, again.Welcome.Tutorial)
+	}
+	// Чужой гость ник не получит ни с какого адреса.
+	taken := s.connectRaw(t, "снежок", "", "10.0.0.3")
+	var e protocol.Error
+	taken.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrNickTaken {
+		t.Fatalf("ник гостя отдан другому: %q", e.Code)
+	}
+	again.close()
+
+	// Перезапуск: новый сервер на той же базе. Прежний не останавливаем — он закроется в
+	// Cleanup; сессий у нового нет, значит всё, что он знает, пришло из базы.
+	s2 := newServer(t, mutate)
+	back := s2.dialFull(t, "", "", "10.0.0.4", id, false)
+	if back.Welcome.Nick != "Снежок" || len(back.Welcome.Tutorial) != 1 {
+		t.Fatalf("после перезапуска: ник %q, уроки %v", back.Welcome.Nick, back.Welcome.Tutorial)
+	}
+}
+
+// Смена ника гостем с записью — те же правила, что у аккаунта: первая сразу, дальше кулдаун.
+func TestGuestRenameCooldown(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, nil)
+	c, id := s.guest(t, "Снежок", "")
+	c.send(protocol.CNickSet, protocol.NickSet{Nick: "Метель"})
+	var st protocol.AccountState
+	c.expect(protocol.SAccount, &st)
+	if st.Account == nil || st.Account.Nick != "Метель" {
+		t.Fatalf("первая смена ника: %+v", st.Account)
+	}
+	c.send(protocol.CNickSet, protocol.NickSet{Nick: "Вьюга"})
+	var e protocol.Error
+	c.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrRenameCooldown {
+		t.Fatalf("вторая смена подряд: %q", e.Code)
+	}
+	if acc, _ := s.accs.Get(id); acc.Nick != "Метель" {
+		t.Fatalf("в базе ник %q", acc.Nick)
+	}
+}
+
+// Один браузер — один игрок: вторая вкладка гостя перехватывает сессию, как у аккаунта.
+func TestGuestSecondTabTakesOver(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, nil)
+	first, id := s.guest(t, "Снежок", "")
+	second := s.dialFull(t, "", "", "", id, false)
+	if second.Welcome.PlayerID != first.Welcome.PlayerID || second.Welcome.Nick != "Снежок" {
+		t.Fatalf("вторая вкладка: %+v против %+v", second.Welcome, first.Welcome)
+	}
+	first.expectClosed(t)
+}
+
+// Новый гость с кукой, чей ник уже занят записью, получает отказ — и записи у него не
+// появляется, пока он не выберет свободное имя.
+func TestGuestRecordNeedsFreeNick(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, nil)
+	s.account(t, "y-1", "Снежок")
+	id := accounts.NewID()
+	c := s.dialFull(t, "снежок", "", "", id, true)
+	var e protocol.Error
+	c.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrNickTaken {
+		t.Fatalf("код %q", e.Code)
+	}
+	if _, ok := s.accs.Get(id); ok {
+		t.Fatal("запись заведена на занятый ник")
+	}
+	// Пустой ник — «Играть гостем»: имя выдаёт сервер, запись появляется.
+	ok := s.dialFull(t, "", "", "", id, false)
+	if acc, found := s.accs.Get(id); !found || acc.Nick != ok.Welcome.Nick {
+		t.Fatalf("запись гостя: %+v %v", acc, found)
+	}
+	if ok.Welcome.Account.NickAuto {
+		t.Error("гостю не нужно предлагать выбрать ник: он сам нажал «Играть гостем»")
 	}
 }

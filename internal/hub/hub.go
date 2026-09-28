@@ -20,7 +20,6 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/match"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/room"
@@ -69,13 +68,9 @@ type Hub struct {
 	// nicks — брони ников до перезапуска сервера, ключ — protocol.NickKey (см. nicks.go).
 	nicks map[string]nickHold
 
-	// accs — постоянные аккаунты. У стора свой мьютекс, наружу он не ходит, поэтому звать его
-	// под h.mu безопасно; на диск он под нами не пишет (см. internal/accounts). Может быть nil.
+	// accs — постоянные записи игроков в базе. Читать под h.mu можно (у чтения свой пул, писателя
+	// оно не ждёт), писать — только вне h.mu: см. internal/accounts и onHello. Может быть nil.
 	accs *accounts.Store
-
-	// mod — роли и баны по IP. У стора свой мьютекс; hub только читает, запись на диск делает
-	// админка вне h.mu (см. internal/hub/moderation.go). Может быть nil.
-	mod *moderation.Store
 
 	// authInfo — какие способы входа включены; уходит игроку в welcome. nil — вход выключен.
 	authInfo *protocol.AuthInfo
@@ -88,12 +83,11 @@ type Hub struct {
 	wg     sync.WaitGroup
 }
 
-// New создаёт hub. mod может быть nil: тогда все игроки без роли и без бана. series тоже может
-// быть nil — тогда истории онлайна нет, а игра работает как раньше. accs задаётся отдельно
-// (SetAccounts), потому что аккаунты появляются, только когда включён вход.
-func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderation.Store, series *onlinestat.Series) *Hub {
+// New создаёт hub. series может быть nil — тогда истории онлайна нет, а игра работает как
+// раньше. Записи игроков подключаются отдельно (SetAccounts); без них все гости одноразовые.
+func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, series *onlinestat.Series) *Hub {
 	return &Hub{
-		cfg: cfg, prog: prog, log: log, now: time.Now, mod: mod, series: series,
+		cfg: cfg, prog: prog, log: log, now: time.Now, series: series,
 		byToken: map[string]*session.Player{}, byID: map[string]*session.Player{},
 		byAccount: map[string]*session.Player{},
 		rooms:     map[string]*room.Room{},
@@ -111,8 +105,9 @@ func New(cfg config.Config, prog *sim.Program, log zerolog.Logger, mod *moderati
 // SetAccounts подключает стор аккаунтов. Вызывать до Run: менять его на ходу незачем.
 func (h *Hub) SetAccounts(a *accounts.Store) { h.accs = a }
 
-// NickTakenByGuest — занят ли ник живой бронью гостя. Отдаётся входу (internal/auth), чтобы
-// новый аккаунт не получил имя, под которым прямо сейчас кто-то играет.
+// NickTakenByGuest — занят ли ник живой бронью сессии. Отдаётся входу (internal/auth), чтобы
+// новый аккаунт не получил имя, под которым прямо сейчас кто-то играет. Берёт h.mu, поэтому
+// звать его под h.mu нельзя.
 func (h *Hub) NickTakenByGuest(key string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -192,27 +187,32 @@ func (h *Hub) Shutdown() {
 // ---- ws.Handler ----
 
 // OnMessage обрабатывает сообщение клиента.
+//
+// Сообщения, которые пишут в базу, разбираются отдельно: они сами берут h.mu вокруг записи, а не
+// на всё время обработки (см. internal/accounts — писать под h.mu нельзя).
 func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	p, _ := c.Session.(*session.Player)
-	if p == nil {
-		if env.Type != protocol.CHello {
-			h.sendErr(c, protocol.ErrNotAllowed, "send hello first")
-			return
-		}
-		h.handleHello(c, env.Data)
+	switch env.Type {
+	case protocol.CHello:
+		h.onHello(c, env.Data)
+		return
+	case protocol.CNickSet:
+		h.handleNickSet(c, env.Data)
+		return
+	case protocol.CTutorialDone:
+		h.handleTutorialDone(c, env.Data)
+		return
+	case protocol.CTutorialSync:
+		h.handleTutorialSync(c, env.Data)
 		return
 	}
-	if p.Conn != c {
-		// Старое соединение, которое уже заменено новым.
-		c.Close(websocket.StatusPolicyViolation, "replaced")
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p, ok := h.current(c)
+	if !ok {
 		return
 	}
 	switch env.Type {
-	case protocol.CHello:
-		h.sendErr(c, protocol.ErrNotAllowed, "already said hello")
 	case protocol.CPong:
 		h.handlePong(p, env.Data)
 	case protocol.CRoomCreate:
@@ -231,12 +231,6 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 		h.handleRoomList(p, env.Data)
 	case protocol.CRoomUnlist:
 		delete(h.listSubs, p.ID)
-	case protocol.CNickSet:
-		h.handleNickSet(p, env.Data)
-	case protocol.CTutorialDone:
-		h.handleTutorialDone(p, env.Data)
-	case protocol.CTutorialSync:
-		h.handleTutorialSync(p, env.Data)
 	case protocol.CMatchJoin:
 		h.handleMatchJoin(p)
 	case protocol.CRoomKick:
@@ -258,6 +252,22 @@ func (h *Hub) OnMessage(c *ws.Conn, env protocol.Envelope) {
 	default:
 		h.sendErr(c, protocol.ErrBadMessage, "unknown type "+env.Type)
 	}
+}
+
+// current — игрок этого соединения. Нет игрока — ошибка «сначала hello»; соединение, которое уже
+// заменено новым, закрывается. Вызывать под h.mu.
+func (h *Hub) current(c *ws.Conn) (*session.Player, bool) {
+	p, _ := c.Session.(*session.Player)
+	if p == nil {
+		h.sendErr(c, protocol.ErrNotAllowed, "send hello first")
+		return nil, false
+	}
+	if p.Conn != c {
+		// Старое соединение, которое уже заменено новым.
+		c.Close(websocket.StatusPolicyViolation, "replaced")
+		return nil, false
+	}
+	return p, true
 }
 
 // OnClose — соединение закрылось.
@@ -286,40 +296,150 @@ func (h *Hub) OnClose(c *ws.Conn) {
 
 // ---- hello / сессии ----
 
-func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
-	var hello protocol.Hello
-	if err := json.Unmarshal(data, &hello); err != nil {
-		h.sendErr(c, protocol.ErrBadMessage, "bad hello")
-		c.Close(websocket.StatusPolicyViolation, "bad hello")
+// helloPrep — то, что hello выясняет до h.mu: запись игрока из базы (и, если нужно, заведённая).
+type helloPrep struct {
+	hello protocol.Hello
+	now   time.Time
+	// acc — запись игрока; hasAcc — она есть. Нет её у браузера без кук и когда база не ответила:
+	// тогда игрок одноразовый гость, как до записей.
+	acc    accounts.Account
+	hasAcc bool
+}
+
+// onHello — первое сообщение соединения. Всё, что трогает базу (найти запись, завести гостю
+// новую, отметить заход), делается до h.mu; под мьютексом — только сессия.
+func (h *Hub) onHello(c *ws.Conn, data json.RawMessage) {
+	h.mu.Lock()
+	if p, _ := c.Session.(*session.Player); p != nil {
+		if p.Conn != c {
+			c.Close(websocket.StatusPolicyViolation, "replaced")
+		} else {
+			h.sendErr(c, protocol.ErrNotAllowed, "already said hello")
+		}
+		h.mu.Unlock()
 		return
 	}
+	h.mu.Unlock()
+
+	prep, ok := h.prepareHello(c, data)
+	if !ok {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.handleHello(c, prep)
+}
+
+// prepareHello разбирает hello и готовит запись игрока. false — ответ уже отправлен.
+// Вызывать вне h.mu.
+func (h *Hub) prepareHello(c *ws.Conn, data json.RawMessage) (helloPrep, bool) {
+	var prep helloPrep
+	if err := json.Unmarshal(data, &prep.hello); err != nil {
+		h.sendErr(c, protocol.ErrBadMessage, "bad hello")
+		c.Close(websocket.StatusPolicyViolation, "bad hello")
+		return prep, false
+	}
+	hello := prep.hello
 	if hello.ProtocolVersion != protocol.Version {
 		h.sendErr(c, protocol.ErrBadVersion, fmt.Sprintf("protocol %d required", protocol.Version))
 		c.Send(protocol.MustEncode(protocol.SReload, nil))
 		c.Close(websocket.StatusPolicyViolation, "bad protocol version")
-		return
+		return prep, false
 	}
 	if h.cfg.BuildVersion != "dev" && hello.BuildVersion != "" && hello.BuildVersion != h.cfg.BuildVersion {
 		c.Send(protocol.MustEncode(protocol.SReload, nil))
 		c.Close(websocket.StatusPolicyViolation, "stale client")
-		return
+		return prep, false
 	}
-	// Бан проверяем после proto и build: забаненный со старой сборкой сначала должен получить
-	// reload, иначе увидит ошибку, которую его клиент не умеет показать. HTTP не трогаем —
-	// страница и /api/* открываются как всем.
-	if h.banned(c.IP()) {
-		h.sendErr(c, protocol.ErrBanned, "доступ с этого адреса заблокирован")
-		c.Close(websocket.StatusPolicyViolation, "banned")
-		return
+	prep.now = h.now()
+	id := c.AccountID()
+	if id == "" || h.accs == nil {
+		return prep, true // браузер без кук: одноразовый гость
 	}
-	now := h.now()
-	// Аккаунт узнан по куке ещё на апгрейде соединения (см. internal/auth). Забаненный аккаунт
-	// не пускаем так же, как забаненный адрес: иначе достаточно было бы разлогиниться.
-	acc, hasAcc := h.accs.Get(c.AccountID())
-	if hasAcc && acc.Banned() {
-		h.sendErr(c, protocol.ErrBanned, "доступ для этого аккаунта заблокирован")
+	acc, ok := h.accs.Get(id)
+	if !ok {
+		// Кука выдана при открытии страницы, а записи ещё нет — это первый заход гостя.
+		var sent bool
+		acc, ok, sent = h.newGuest(c, id, hello.Nick, prep.now)
+		if sent {
+			return prep, false
+		}
+	}
+	if ok && acc.Banned() {
+		// Бан проверяем после proto и build: забаненный со старой сборкой сначала должен
+		// получить reload, иначе увидит ошибку, которую его клиент не умеет показать.
+		h.sendErr(c, protocol.ErrBanned, "доступ заблокирован")
 		c.Close(websocket.StatusPolicyViolation, "banned")
-		return
+		return prep, false
+	}
+	if ok {
+		h.accs.Touch(acc.ID, prep.now)
+	}
+	prep.acc, prep.hasAcc = acc, ok
+	return prep, true
+}
+
+// newGuest заводит запись гостя с id из его куки. Ник — из hello, если игрок его ввёл, иначе
+// выданный сервером. Третий результат — ответ игроку уже отправлен (плохой или занятый ник).
+// Если база не ответила, игрок пойдёт одноразовым гостем: играть это не мешает. Вызывать вне h.mu.
+func (h *Hub) newGuest(c *ws.Conn, id, want string, now time.Time) (accounts.Account, bool, bool) {
+	taken := h.nickHeldElsewhere(c.IP())
+	if want != "" {
+		nick, err := protocol.NormalizeNick(want)
+		if err != nil {
+			h.sendErr(c, nickErrCode(err), err.Error())
+			return accounts.Account{}, false, true
+		}
+		acc, err := h.accs.EnsureGuest(id, nick, false, taken, now)
+		switch {
+		case errors.Is(err, accounts.ErrNickTaken):
+			// Отказ без закрытия соединения: клиент возвращает игрока на экран ника.
+			h.sendErr(c, protocol.ErrNickTaken, "nick is taken")
+			return accounts.Account{}, false, true
+		case err != nil:
+			h.log.Error().Err(err).Msg("hello: запись гостя не заведена")
+			return accounts.Account{}, false, false
+		}
+		return acc, true, false
+	}
+	// «Играть гостем»: игрок не вводил имени, значит его выдаёт сервер — тем же порядком, что и
+	// pickGuestNick: сначала «прилагательное существительное», потом «Игрок NNNN».
+	for _, gen := range []func() string{protocol.RandomNick, protocol.FallbackNick} {
+		for i := 0; i < guestNickTries; i++ {
+			acc, err := h.accs.EnsureGuest(id, gen(), true, taken, now)
+			if errors.Is(err, accounts.ErrNickTaken) {
+				continue
+			}
+			if err != nil {
+				h.log.Error().Err(err).Msg("hello: запись гостя не заведена")
+				return accounts.Account{}, false, false
+			}
+			return acc, true, false
+		}
+	}
+	h.log.Warn().Msg("hello: не нашлось свободного ника для записи гостя")
+	return accounts.Account{}, false, false
+}
+
+// nickHeldElsewhere — проверка «ник держит живая бронь с другого адреса» для записи, которой ещё
+// нет: та же логика, что в nickFree. Берёт h.mu, поэтому звать её под h.mu нельзя.
+func (h *Hub) nickHeldElsewhere(ip string) func(key string) bool {
+	return func(key string) bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		hold, ok := h.nicks[key]
+		return ok && hold.ip != ip
+	}
+}
+
+// handleHello заводит или находит сессию. Запись игрока уже подготовлена (prepareHello).
+// Вызывать под h.mu.
+func (h *Hub) handleHello(c *ws.Conn, prep helloPrep) {
+	hello, now := prep.hello, prep.now
+	acc, hasAcc := prep.acc, prep.hasAcc
+	accountID := ""
+	if hasAcc {
+		accountID = acc.ID
 	}
 	var p *session.Player
 	// Сессию аккаунта ищем раньше токена: игрок, зашедший с телефона, должен попасть в свою
@@ -331,7 +451,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		p = h.byToken[hello.Token]
 		// Чужой аккаунт при том же токене — не наша сессия: так гостевой токен, попавший в
 		// другой браузер (или оставшийся от прежнего входа), не утащил бы аккаунт.
-		if p != nil && p.AccountID != c.AccountID() {
+		if p != nil && p.AccountID != accountID {
 			p = nil
 		}
 	}
@@ -358,25 +478,24 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 			}
 		}
 		p = session.New(nick, c.IP(), now)
-		p.AccountID = c.AccountID()
+		p.AccountID, p.Rank, p.Guest = accountID, acc.Rank, hasAcc && acc.Guest()
 		h.byToken[p.Token] = p
 		h.byID[p.ID] = p
 		if hasAcc {
 			h.byAccount[acc.ID] = p
-			h.accs.Touch(acc.ID, now)
 		}
 		h.holdNick(nick, p.IP, p.ID, now)
 		h.log.Info().Str("player", p.ID).Str("nick", nick).Str("ip", p.IP).
 			Str("account", p.AccountID).Msg("new player")
 	} else {
 		if hasAcc {
-			// Ник аккаунта — источник истины: он мог смениться на другом устройстве.
+			// Запись — источник истины: ник и роль могли смениться на другом устройстве.
 			if p.Nick != acc.Nick {
 				h.releaseNick(protocol.NickKey(p.Nick), p.ID)
 				p.Nick = acc.Nick
 				h.holdNick(acc.Nick, c.IP(), p.ID, now)
 			}
-			h.accs.Touch(acc.ID, now)
+			p.Rank, p.Guest = acc.Rank, acc.Guest()
 		}
 		if !hasAcc && hello.Nick != "" && p.Place == session.InMenu {
 			// Ошибку не глотаем: с цензурой ников молчаливый отказ выглядел бы как «ник не
@@ -420,11 +539,7 @@ func (h *Hub) handleHello(c *ws.Conn, data json.RawMessage) {
 		welcome.Auth = h.authInfo
 	}
 	if hasAcc {
-		// Аккаунт мог измениться на другом устройстве, поэтому читаем его заново, а не берём
-		// копию, снятую в начале обработки.
-		if fresh, ok := h.accs.Get(acc.ID); ok {
-			welcome.Account, welcome.Tutorial = accountInfo(fresh), fresh.Tutorial
-		}
+		welcome.Account, welcome.Tutorial = accountInfo(acc), acc.Tutorial
 	}
 	c.Send(protocol.MustEncode(protocol.SWelcome, welcome))
 	if h.draining {
@@ -1135,12 +1250,11 @@ type Stats struct {
 	Matches     []match.Info `json:"matches"`
 	MatchesLive int          `json:"matchesLive"`
 
-	// Модерация: выданные роли, баны и размер чата — админка получает их тем же потоком.
-	Ranks     []moderation.Entry `json:"ranks"`
-	Bans      []moderation.Ban   `json:"bans"`
-	ChatSize  int                `json:"chatSize"`
-	RoomChat  int                `json:"roomChat"`            // сообщений во всех чатах комнат
-	ModBroken bool               `json:"modBroken,omitempty"` // файл ролей и банов был битым
+	// Размер чатов: админка получает его тем же потоком.
+	ChatSize int `json:"chatSize"`
+	RoomChat int `json:"roomChat"` // сообщений во всех чатах комнат
+	// StoreBroken — база при старте была битой и создана заново: записи игроков сброшены.
+	StoreBroken bool `json:"storeBroken,omitempty"`
 }
 
 // PlayerStat — сессия игрока в сводке: кто это, где находится и на связи ли.
@@ -1149,11 +1263,12 @@ type PlayerStat struct {
 	Nick         string     `json:"nick"`
 	IP           string     `json:"ip"`
 	Place        string     `json:"place"`           // menu | room | match
-	Where        string     `json:"where,omitempty"` // код комнаты, режим очереди или id матча
+	Where        string     `json:"where,omitempty"` // код комнаты — и в лобби, и в матче
 	Online       bool       `json:"online"`
-	Rank         string     `json:"rank,omitempty"`         // роль модерации по IP
+	Rank         string     `json:"rank,omitempty"`         // роль модерации из записи игрока
 	Ping         int        `json:"ping,omitempty"`         // задержка до сервера, мс; её же игрок видит у себя
-	Banned       bool       `json:"banned,omitempty"`       // адрес в бане (сессия ещё не выкинута)
+	Account      string     `json:"account,omitempty"`      // id записи; пусто у гостя без кук
+	Guest        bool       `json:"guest,omitempty"`        // запись гостя, а не аккаунт Яндекса
 	Since        time.Time  `json:"since"`                  // когда игрок зашёл в игру
 	OfflineSince *time.Time `json:"offlineSince,omitempty"` // с какого момента нет связи
 
@@ -1242,13 +1357,16 @@ func (h *Hub) Stats() Stats {
 		}
 		ps := PlayerStat{
 			ID: p.ID, Nick: p.Nick, IP: p.IP, Place: string(p.Place), Online: online,
-			Since: p.CreatedAt, Rank: h.rankOf(p), Banned: h.banned(p.IP) || h.accountBanned(p), Ping: p.PingMs,
+			Since: p.CreatedAt, Rank: h.rankOf(p), Ping: p.PingMs, Account: p.AccountID,
 		}
+		ps.Guest = p.AccountID != "" && p.Guest
 		switch p.Place {
 		case session.InRoom:
 			ps.Where = p.RoomCode
 		case session.InMatch:
-			ps.Where = p.MatchID
+			// Код комнаты, а не id матча: админ ищет игрока по коду, а id матча нигде, кроме
+			// таблицы матчей, не виден. Код пуст, только если матч не из комнаты.
+			ps.Where = p.RoomCode
 		}
 		if !online && !p.DisconnectedAt.IsZero() {
 			t := p.DisconnectedAt
@@ -1294,12 +1412,11 @@ func (h *Hub) Stats() Stats {
 		return st.Matches[i].ID < st.Matches[j].ID
 	})
 	st.MatchesLive = len(h.matches)
-	st.Ranks, st.Bans = h.mod.Ranks(), h.mod.Bans()
 	st.ChatSize = len(h.chat)
 	for _, buf := range h.roomChat {
 		st.RoomChat += len(buf)
 	}
-	st.ModBroken = h.mod.Broken()
+	st.StoreBroken = h.accs.Broken()
 	return st
 }
 

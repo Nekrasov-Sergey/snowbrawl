@@ -11,7 +11,6 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,11 +22,11 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/ws"
 )
 
@@ -35,7 +34,7 @@ type testServer struct {
 	hub  *hub.Hub
 	srv  *httptest.Server
 	cfg  config.Config
-	mod  *moderation.Store
+	db   *store.DB
 	accs *accounts.Store
 }
 
@@ -65,24 +64,19 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 		mutate(&cfg)
 	}
 	log := zerolog.Nop()
-	if cfg.ModerationFile == "" {
-		cfg.ModerationFile = filepath.Join(t.TempDir(), "moderation.json")
-	}
-	mod, err := moderation.Open(cfg.ModerationFile, log)
+	// База своя у каждого теста, во временном каталоге: DBFile задаёт тест, которому нужен
+	// перезапуск на той же базе.
+	db, err := store.Open(cfg.DBFile, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Серия без файла: история живёт в памяти теста, диск не трогаем.
-	series, err := onlinestat.Open("", log)
+	// Серия без базы: история живёт в памяти теста.
+	series, err := onlinestat.Open(nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Аккаунты держим в памяти: тестам нужен сам механизм, а не файл.
-	accs, err := accounts.Open("", log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := hub.New(cfg, prog, log, mod, series)
+	accs := accounts.Open(db, log)
+	h := hub.New(cfg, prog, log, series)
 	h.SetAccounts(accs)
 	h.SetAuthInfo(&protocol.AuthInfo{Yandex: true})
 	h.Run()
@@ -102,8 +96,8 @@ func newServer(t *testing.T, mutate func(*config.Config)) *testServer {
 	mux := http.NewServeMux()
 	mux.Handle("/ws", wsServer)
 	srv := httptest.NewServer(mux)
-	t.Cleanup(func() { h.Shutdown(); srv.Close() })
-	return &testServer{hub: h, srv: srv, cfg: cfg, mod: mod, accs: accs}
+	t.Cleanup(func() { h.Shutdown(); srv.Close(); _ = db.Close() })
+	return &testServer{hub: h, srv: srv, cfg: cfg, db: db, accs: accs}
 }
 
 type client struct {

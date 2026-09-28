@@ -9,8 +9,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags "-s -w -X main.buildVersion=${BUILD_VERSION}" \
     -o /out/snowbrawl-server ./cmd/snowbrawl-server
 
-# Каталог для файла ролей и банов создаём в образе с владельцем nonroot: иначе docker создаст
-# точку монтирования от root, и сервер (UID 65532) не сможет туда писать — баны молча пропадут.
+# Каталог для базы создаём в образе с владельцем nonroot: иначе docker создаст точку
+# монтирования от root, и сервер (UID 65532) не сможет туда писать и не стартует.
 RUN mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot

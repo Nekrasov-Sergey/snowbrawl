@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 )
@@ -44,14 +45,32 @@ func dialRaw(t *testing.T, s *testServer, nick string) []protocol.Envelope {
 	return out
 }
 
-func TestBannedIPRejectedOnHello(t *testing.T) {
-	t.Parallel()
-	s := newServer(t, nil)
-	a := s.connect(t, "Аня", "")
-	if err := s.mod.Ban("127.0.0.1", "Аня", "флуд", time.Now()); err != nil {
+// guest подключается гостем с кукой: id записи — как в куке браузера, запись заведёт хаб.
+func (s *testServer) guest(t *testing.T, nick, ip string) (*client, string) {
+	t.Helper()
+	id := accounts.NewID()
+	return s.dialFull(t, nick, "", ip, id, false), id
+}
+
+// setRank выдаёт роль записи так же, как админка: сначала база, потом хаб.
+func (s *testServer) setRank(t *testing.T, id, rank string) {
+	t.Helper()
+	if err := s.accs.SetRank(id, rank); err != nil {
 		t.Fatal(err)
 	}
-	if n := s.hub.ApplyBan("127.0.0.1"); n != 1 {
+	s.hub.ApplyRankAccount(id, rank)
+}
+
+// Бан — у записи игрока, а не у адреса: сменив IP, забаненный гость не возвращается, а сосед
+// по адресу играет дальше.
+func TestBannedGuestRejectedAfterIPChange(t *testing.T) {
+	t.Parallel()
+	s := newServer(t, func(c *config.Config) { c.TrustProxy = true })
+	a, id := s.guest(t, "Аня", "10.0.0.1")
+	if err := s.accs.Ban(id, "флуд", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.hub.ApplyBanAccount(id); n != 1 {
 		t.Fatalf("выкинуто сессий: %d, ожидалась одна", n)
 	}
 	// Забаненному уходит ошибка, соединение закрывается.
@@ -64,38 +83,33 @@ func TestBannedIPRejectedOnHello(t *testing.T) {
 		t.Fatalf("сессия должна быть удалена, осталось %d", st.Players)
 	}
 
-	// Повторный вход отклоняется.
-	msgs := dialRaw(t, s, "Аня")
-	sawBanned := false
-	for _, env := range msgs {
-		if env.Type == protocol.SWelcome {
-			t.Fatal("забаненный не должен получать welcome")
-		}
-		if env.Type == protocol.SError {
-			var er protocol.Error
-			_ = json.Unmarshal(env.Data, &er)
-			if er.Code == protocol.ErrBanned {
-				sawBanned = true
-			}
-		}
+	// Та же кука с другого адреса — всё равно бан.
+	again := s.dialFull(t, "Аня", "", "10.0.0.2", id, true)
+	again.expect(protocol.SError, &e)
+	if e.Code != protocol.ErrBanned {
+		t.Fatalf("после смены IP код %q, ожидался banned", e.Code)
 	}
-	if !sawBanned {
-		t.Fatalf("ожидалась ошибка banned, пришло %v", msgs)
-	}
+	again.expectClosed(t)
+
+	// Сосед по адресу бан не наследует.
+	s.connectFrom(t, "Боря", "", "10.0.0.1").close()
 
 	// Разбан возвращает доступ.
-	if err := s.mod.Unban("127.0.0.1"); err != nil {
+	if err := s.accs.Unban(id); err != nil {
 		t.Fatal(err)
 	}
-	back := s.connect(t, "Аня", "")
+	back := s.dialFull(t, "", "", "10.0.0.3", id, false)
+	if back.Welcome.Nick != "Аня" {
+		t.Fatalf("после разбана ник %q", back.Welcome.Nick)
+	}
 	back.close()
 }
 
 func TestBanKicksPlayerFromMatch(t *testing.T) {
 	t.Parallel()
 	s := newServer(t, nil)
-	a := s.connect(t, "Аня", "")
-	b := s.connect(t, "Боря", "")
+	a, aID := s.guest(t, "Аня", "")
+	b, _ := s.guest(t, "Боря", "")
 	a.send(protocol.CRoomCreate, protocol.RoomCreate{Mode: 2, Arena: 0})
 	var st protocol.RoomState
 	a.expect(protocol.SRoomState, &st)
@@ -105,33 +119,30 @@ func TestBanKicksPlayerFromMatch(t *testing.T) {
 	a.expect(protocol.SMatchStart, nil)
 	b.expect(protocol.SMatchStart, nil)
 
-	if err := s.mod.Ban("127.0.0.1", "", "", time.Now()); err != nil {
+	if err := s.accs.Ban(aID, "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	// Оба клиента с одного адреса: бан по IP выкидывает всех, кто с него играет.
-	if n := s.hub.ApplyBan("127.0.0.1"); n != 2 {
-		t.Fatalf("выкинуто %d сессий, ожидалось 2", n)
+	// Оба клиента с одного адреса, но бан у записи: выкидывается только забаненный.
+	if n := s.hub.ApplyBanAccount(aID); n != 1 {
+		t.Fatalf("выкинуто %d сессий, ожидалась одна", n)
 	}
 	var e protocol.Error
 	a.expect(protocol.SError, &e)
 	if e.Code != protocol.ErrBanned {
 		t.Fatalf("код %q", e.Code)
 	}
-	if got := s.hub.Stats(); got.Players != 0 {
-		t.Fatalf("сессии остались: %+v", got.Sessions)
+	if got := s.hub.Stats(); got.Players != 1 || got.Sessions[0].Nick != "Боря" {
+		t.Fatalf("сессии после бана: %+v", got.Sessions)
 	}
 }
 
 func TestRankPushedAndSeenInChatAndLobby(t *testing.T) {
 	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = time.Hour })
-	a := s.connect(t, "Аня", "")
+	a, aID := s.guest(t, "Аня", "")
 	b := s.connect(t, "Боря", "")
 
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankModerator, "Аня", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	s.hub.ApplyRank("127.0.0.1")
+	s.setRank(t, aID, protocol.RankModerator)
 	var upd protocol.RankUpdate
 	a.expect(protocol.SRank, &upd)
 	if upd.Rank != protocol.RankModerator {
@@ -152,30 +163,46 @@ func TestRankPushedAndSeenInChatAndLobby(t *testing.T) {
 		t.Fatalf("роль в лобби: %+v", st.Players)
 	}
 
-	// Снятие роли доезжает так же.
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankPlayer, "", time.Now()); err != nil {
-		t.Fatal(err)
+	// Роль живёт в записи: переподключение с той же кукой её сохраняет.
+	a.close()
+	back := s.dialFull(t, "", "", "", aID, false)
+	if back.Welcome.Rank != protocol.RankModerator {
+		t.Fatalf("роль после переподключения: %q", back.Welcome.Rank)
 	}
-	s.hub.ApplyRank("127.0.0.1")
-	a.expect(protocol.SRank, &upd)
+
+	// Снятие роли доезжает так же, и история чата перекрашивается.
+	s.setRank(t, aID, protocol.RankPlayer)
+	back.expect(protocol.SRank, &upd)
 	if upd.Rank != protocol.RankPlayer {
 		t.Fatalf("роль после снятия: %q", upd.Rank)
+	}
+	var hist protocol.ChatHistory
+	b.expect(protocol.SChatHistory, &hist)
+	if len(hist.Messages) != 1 || hist.Messages[0].Rank != protocol.RankPlayer {
+		t.Fatalf("история чата не перекрашена: %+v", hist.Messages)
 	}
 }
 
 func TestChatDeleteRights(t *testing.T) {
 	t.Parallel()
 	s := newServer(t, func(c *config.Config) { c.ChatCooldown = 0 })
-	a := s.connect(t, "Аня", "")  // станет админом
-	b := s.connect(t, "Боря", "") // обычный игрок
-	c := s.connect(t, "Вика", "") // станет админом
+	admin, adminID := s.guest(t, "Аня", "")
+	player := s.connect(t, "Боря", "") // гость без кук: роли у него быть не может
+	moder, moderID := s.guest(t, "Вика", "")
+	moder2, moder2ID := s.guest(t, "Гена", "")
+	s.setRank(t, adminID, protocol.RankAdmin)
+	s.setRank(t, moderID, protocol.RankModerator)
+	s.setRank(t, moder2ID, protocol.RankModerator)
 
-	// Роль по IP одна на всех в тесте, поэтому проверяем правила по одному, меняя роль.
 	send := func(cl *client, text string) protocol.ChatMessage {
 		cl.send(protocol.CChatSend, protocol.ChatSend{Text: text})
-		var m protocol.ChatMessage
-		cl.expect(protocol.SChatMsg, &m)
-		return m
+		for {
+			var m protocol.ChatMessage
+			cl.expect(protocol.SChatMsg, &m)
+			if m.Text == text {
+				return m
+			}
+		}
 	}
 	// chat.del рассылается всем, и в очереди клиента лежат удаления из предыдущих шагов —
 	// поэтому ждём именно нужный id.
@@ -190,44 +217,39 @@ func TestChatDeleteRights(t *testing.T) {
 		}
 		t.Fatalf("%s не получил удаление сообщения %d", cl.name, id)
 	}
-
-	// 1. Автор удаляет своё сообщение — у всех.
-	own := send(b, "моё сообщение")
-	b.send(protocol.CChatDel, protocol.ChatDel{ID: own.ID})
-	expectDel(a, own.ID)
-	// Повторное удаление того же id не ошибка.
-	b.send(protocol.CChatDel, protocol.ChatDel{ID: own.ID})
-
-	// 2. Обычный игрок не может удалить чужое.
-	other := send(a, "чужое сообщение")
-	b.send(protocol.CChatDel, protocol.ChatDel{ID: other.ID})
-	var e protocol.Error
-	b.expect(protocol.SError, &e)
-	if e.Code != protocol.ErrNotAllowed {
-		t.Fatalf("код %q, ожидался not_allowed", e.Code)
+	denied := func(cl *client, id uint64, what string) {
+		t.Helper()
+		cl.send(protocol.CChatDel, protocol.ChatDel{ID: id})
+		var e protocol.Error
+		cl.expect(protocol.SError, &e)
+		if e.Code != protocol.ErrNotAllowed {
+			t.Fatalf("%s: код %q, ожидался not_allowed", what, e.Code)
+		}
 	}
 
-	// 3. Модератор не может удалить сообщение другого модератора. Роль в тесте одна на IP, поэтому
-	// «модератор удаляет обычного игрока» проверяется отдельно в TestCanDeleteChatRules, где
-	// адреса разные.
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankModerator, "Аня", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	s.hub.ApplyRank("127.0.0.1")
-	adminMsg := send(b, "сообщение модератора")
-	a.send(protocol.CChatDel, protocol.ChatDel{ID: adminMsg.ID})
-	a.expect(protocol.SError, &e)
-	if e.Code != protocol.ErrNotAllowed {
-		t.Fatalf("код %q, ожидался not_allowed на сообщение модератора", e.Code)
-	}
+	// Автор удаляет своё сообщение — у всех; повторное удаление не ошибка.
+	own := send(player, "моё сообщение")
+	player.send(protocol.CChatDel, protocol.ChatDel{ID: own.ID})
+	expectDel(admin, own.ID)
+	player.send(protocol.CChatDel, protocol.ChatDel{ID: own.ID})
 
-	// 4. Админ удаляет сообщение модератора.
-	if err := s.mod.SetRank("127.0.0.1", protocol.RankAdmin, "Вика", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	s.hub.ApplyRank("127.0.0.1")
-	c.send(protocol.CChatDel, protocol.ChatDel{ID: adminMsg.ID})
-	expectDel(b, adminMsg.ID)
+	denied(player, send(admin, "сообщение админа").ID, "игрок удаляет чужое")
+	byModer2 := send(moder2, "сообщение модератора")
+	denied(moder, byModer2.ID, "модератор удаляет модератора")
+	denied(moder, send(admin, "ещё от админа").ID, "модератор удаляет админа")
+
+	byPlayer := send(player, "от игрока")
+	moder.send(protocol.CChatDel, protocol.ChatDel{ID: byPlayer.ID})
+	expectDel(player, byPlayer.ID)
+
+	admin.send(protocol.CChatDel, protocol.ChatDel{ID: byModer2.ID})
+	expectDel(moder2, byModer2.ID)
+
+	// Роль автора берётся актуальная: снятие роли делает его сообщения удаляемыми модератором.
+	again := send(moder2, "до снятия роли")
+	s.setRank(t, moder2ID, protocol.RankPlayer)
+	moder.send(protocol.CChatDel, protocol.ChatDel{ID: again.ID})
+	expectDel(moder2, again.ID)
 }
 
 func TestChatClearWipesHistoryForAll(t *testing.T) {

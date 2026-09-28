@@ -2,73 +2,19 @@ package admin
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/rs/zerolog"
-
-	snowbrawl "github.com/Nekrasov-Sergey/snowbrawl"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
 )
-
-// testCookie — кука, по которой тестовый Identify узнаёт аккаунт. Настоящую подписанную куку
-// проверяет internal/auth; админке важно лишь то, что игрок опознан.
-const testCookie = "acc"
 
 func newAdminWithAccounts(t *testing.T) (*httptest.Server, *accounts.Store) {
 	t.Helper()
-	src, err := snowbrawl.Web.ReadFile(snowbrawl.SimPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prog, err := sim.Compile(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	log := zerolog.New(io.Discard)
-	mod, err := moderation.Open("", log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	accs, err := accounts.Open("", log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Defaults()
-	cfg.HubTick = 20 * time.Millisecond
-	cfg.AdminStreamEvery = 20 * time.Millisecond
-	series, err := onlinestat.Open("", log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := hub.New(cfg, prog, log, mod, series)
-	h.SetAccounts(accs)
-	h.Run()
-	r := gin.New()
-	stop := Register(r, Deps{
-		Hub: h, Moderation: mod, Accounts: accs,
-		Info:  Info{Build: "test", SimVersion: prog.Version(), Proto: 3},
-		Token: testToken, Started: time.Now(), StreamEvery: cfg.AdminStreamEvery,
-		Identify: func(r *http.Request) string {
-			if c, err := r.Cookie(testCookie); err == nil {
-				return c.Value
-			}
-			return ""
-		},
-	})
-	srv := httptest.NewServer(r)
-	t.Cleanup(func() { stop(); h.Shutdown(); srv.Close() })
+	srv, _, accs, _ := newAdminFull(t)
 	return srv, accs
 }
 
@@ -159,15 +105,6 @@ func TestAccountRankAndBanHandlers(t *testing.T) {
 		t.Fatalf("бан админа: %d", resp.StatusCode)
 	}
 
-	// «Выйти везде» двигает epoch, чем обесценивает все выданные куки.
-	resp = do(t, http.MethodPost, url+"/account/logout-all"+tok+"&id="+acc.ID, "", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("выход на всех устройствах: %d", resp.StatusCode)
-	}
-	if got, _ := accs.Get(acc.ID); got.Epoch != 1 {
-		t.Fatalf("epoch: %d", got.Epoch)
-	}
-
 	// Несуществующий аккаунт — 404, а не молчаливый успех.
 	resp = do(t, http.MethodPost, url+"/account/rank"+tok, `{"id":"нет","rank":"admin"}`, "")
 	if resp.StatusCode != http.StatusNotFound {
@@ -175,24 +112,55 @@ func TestAccountRankAndBanHandlers(t *testing.T) {
 	}
 }
 
-func TestAccountsListing(t *testing.T) {
+// Список игроков через ручку: записи из базы, поиск, фильтр, пустой ответ — пустой список.
+// Слияние с живыми сессиями проверяет TestPlayersPage.
+func TestPlayersListing(t *testing.T) {
 	t.Parallel()
 	srv, accs := newAdminWithAccounts(t)
-	if _, _, err := accs.Ensure(accounts.ProviderYandex, "y-1", "vasya", "Снежок", nil, time.Now()); err != nil {
+	now := time.Now()
+	acc, _, err := accs.Ensure(accounts.ProviderYandex, "y-1", "vasya", "Снежок", nil, now)
+	if err != nil {
 		t.Fatal(err)
 	}
-	resp := do(t, http.MethodGet, srv.URL+"/admin/accounts?token="+testToken, "", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("список аккаунтов: %d", resp.StatusCode)
-	}
-	var body struct {
-		Accounts []accounts.Account `json:"accounts"`
-		Broken   bool               `json:"broken"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := accs.SetRank(acc.ID, protocol.RankModerator); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Accounts) != 1 || body.Accounts[0].Nick != "Снежок" || body.Broken {
-		t.Fatalf("в списке: %+v", body)
+	if _, err := accs.EnsureGuest(accounts.NewID(), "Пурга", true, nil, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	list := func(query string) (out struct {
+		Rows    []playerRow `json:"rows"`
+		Total   int         `json:"total"`
+		PerPage int         `json:"perPage"`
+		Broken  bool        `json:"broken"`
+	}) {
+		t.Helper()
+		resp := do(t, http.MethodGet, srv.URL+"/admin/players?token="+testToken+query, "", "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("список игроков: %d", resp.StatusCode)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// Модератор выше, хотя гость заходил позже.
+	all := list("")
+	if all.Total != 2 || len(all.Rows) != 2 || all.Broken || all.PerPage != accounts.SearchPage ||
+		all.Rows[0].Nick != "Снежок" || all.Rows[0].Kind != kindYandex || all.Rows[0].Login != "vasya" {
+		t.Fatalf("все: %+v", all)
+	}
+	if g := list("&filter=guests"); g.Total != 1 || g.Rows[0].Nick != "Пурга" || g.Rows[0].Kind != kindGuest {
+		t.Fatalf("гости: %+v", g)
+	}
+	if q := list("&q=%D1%81%D0%BD%D0%B5%D0%B6"); q.Total != 1 || q.Rows[0].Nick != "Снежок" {
+		t.Fatalf("поиск: %+v", q)
+	}
+	if empty := list("&q=nobody"); empty.Rows == nil || len(empty.Rows) != 0 {
+		t.Fatalf("пустой результат должен быть пустым списком, а не null: %+v", empty)
+	}
+	// «Выйти везде» из админки убрано.
+	if resp := do(t, http.MethodPost, srv.URL+"/admin/account/logout-all?token="+testToken+"&id="+acc.ID, "", ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("ручка logout-all всё ещё есть: %d", resp.StatusCode)
 	}
 }

@@ -12,23 +12,22 @@ import (
 
 // Чаты игры. Общий чат главного меню виден всем подключённым, чат комнаты — только её
 // участникам (включая тех, кто сейчас в матче). Сообщения лежат в памяти hub под общим
-// мьютексом, живут h.cfg.ChatTTL (по умолчанию час) и теряются при перезапуске сервера —
-// БД в проекте нет. Чат комнаты живёт не дольше самой комнаты: буфер удаляется вместе с ней.
+// мьютексом, живут h.cfg.ChatTTL (по умолчанию час) и теряются при перезапуске сервера: в базу
+// чат намеренно не пишется, он не должен переживать выкладку. Чат комнаты живёт не дольше самой комнаты: буфер удаляется вместе с ней.
 // chatCap и roomChatCap ограничивают буферы и при флуде внутри часа.
 const (
 	chatCap     = 300
 	roomChatCap = 100
 )
 
-// chatEntry — сообщение и адрес автора. Адрес нужен для прав модерации: роль автора берётся
-// АКТУАЛЬНАЯ, а не та, что была на момент отправки. Иначе снятие роли с админа не давало бы
-// другому админу удалить его старые сообщения (и наоборот).
+// chatEntry — сообщение и роль автора. Роль нужна для прав модерации и берётся АКТУАЛЬНАЯ, а не
+// та, что была на момент отправки: ApplyRankAccount переписывает её во всех сообщениях автора.
+// Иначе снятие роли с админа не давало бы другому админу удалить его старые сообщения (и наоборот).
 type chatEntry struct {
-	msg      protocol.ChatMessage
-	authorIP string
-	// authorAccount — аккаунт автора на момент отправки (пусто у гостя). Роль считается по нему
-	// в первую очередь: она про человека, а не про сеть, и переезжает с ним на любое устройство.
+	msg protocol.ChatMessage
+	// authorAccount — запись автора (пусто у гостя без кук): по ней роль находит его сообщения.
 	authorAccount string
+	authorRank    string
 }
 
 // chatOut достраивает сообщение для отправки: роль автора считается здесь и только здесь.
@@ -39,15 +38,8 @@ func (h *Hub) chatOut(e chatEntry) protocol.ChatMessage {
 	return out
 }
 
-// rankOfEntry — роль автора сообщения: аккаунт сильнее адреса, как и везде (см. rankOf).
-func (h *Hub) rankOfEntry(e chatEntry) string {
-	if e.authorAccount != "" {
-		if acc, ok := h.accs.Get(e.authorAccount); ok && acc.Rank != "" {
-			return acc.Rank
-		}
-	}
-	return h.mod.Rank(e.authorIP)
-}
+// rankOfEntry — роль автора сообщения.
+func (h *Hub) rankOfEntry(e chatEntry) string { return e.authorRank }
 
 // chatRoom разбирает область чата из сообщения клиента. Для общего чата возвращает nil,
 // для чата комнаты — комнату игрока. Второй результат false означает отказ (ошибка уже
@@ -130,7 +122,7 @@ func (h *Hub) handleChatSend(p *session.Player, data json.RawMessage) {
 		scope = protocol.ChatScopeRoom
 	}
 	e := chatEntry{msg: protocol.ChatMessage{ID: h.chatSeq, PID: p.ID, Nick: p.Nick, Text: text,
-		TS: now.UnixMilli(), Scope: scope}, authorIP: p.IP, authorAccount: p.AccountID}
+		TS: now.UnixMilli(), Scope: scope}, authorAccount: p.AccountID, authorRank: p.Rank}
 	h.setChatBuf(r, append(h.chatBuf(r), e))
 	h.pruneChat(now)
 

@@ -8,9 +8,21 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 )
 
 func testLog() zerolog.Logger { return zerolog.New(io.Discard) }
+
+func openDB(t *testing.T, path string) *store.DB {
+	t.Helper()
+	db, err := store.Open(path, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
 var base = time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 
@@ -18,7 +30,7 @@ var base = time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 // момент минуты сработал семпл.
 func TestMinuteBucketsKeepPeak(t *testing.T) {
 	t.Parallel()
-	s, err := Open("", testLog())
+	s, err := Open(nil, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +60,7 @@ func TestMinuteBucketsKeepPeak(t *testing.T) {
 
 func TestRetentionTrims(t *testing.T) {
 	t.Parallel()
-	s, err := Open("", testLog())
+	s, err := Open(nil, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +78,7 @@ func TestRetentionTrims(t *testing.T) {
 // график врал бы о разрешении данных.
 func TestCoarserStepOnWideWindow(t *testing.T) {
 	t.Parallel()
-	s, err := Open("", testLog())
+	s, err := Open(nil, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +99,12 @@ func TestCoarserStepOnWideWindow(t *testing.T) {
 	}
 }
 
-// TestSurvivesRestartAndKeepsGap — история переживает перезапуск, а простой сервера остаётся
-// дыркой в данных: нулями его заполнять нельзя, иначе «выключен» не отличить от «никого нет».
-func TestSurvivesRestartAndKeepsGap(t *testing.T) {
+// TestSurvivesRestartAndFillsGap — история переживает перезапуск, а минуты простоя сервера
+// отдаются нулями: играть тогда было нельзя, и разрыва в графике после выкладки быть не должно.
+func TestSurvivesRestartAndFillsGap(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "online.log")
-	s, err := Open(path, testLog())
+	db := openDB(t, filepath.Join(t.TempDir(), "snowbrawl.db"))
+	s, err := Open(db, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +116,7 @@ func TestSurvivesRestartAndKeepsGap(t *testing.T) {
 	}
 
 	// Второй запуск: сервер стоял час.
-	s2, err := Open(path, testLog())
+	s2, err := Open(db, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,64 +125,126 @@ func TestSurvivesRestartAndKeepsGap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s3, err := Open(path, testLog())
+	s3, err := Open(db, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s3.Close() }()
 	_, pts := s3.Points(base.Add(-time.Hour), base.Add(3*time.Hour), 1000)
-	if len(pts) != 4 {
-		t.Fatalf("точек %d, ожидалось 4: %+v", len(pts), pts)
+	// Три минуты до простоя, 59 нулей простоя и минута после: подряд, без разрывов.
+	if len(pts) != 63 {
+		t.Fatalf("точек %d, ожидалось 63", len(pts))
 	}
-	if pts[2].N != 6 || pts[3].N != 9 {
-		t.Fatalf("значения не сохранились: %+v", pts)
+	for i, p := range pts {
+		if !p.At.Equal(base.Add(time.Duration(i) * time.Minute)) {
+			t.Fatalf("точка %d в %v: минуты должны идти подряд", i, p.At)
+		}
 	}
-	if got := pts[3].At.Sub(pts[2].At); got != 60*time.Minute {
-		t.Fatalf("простой сервера %v, ожидался час — дырка обязана сохраниться", got)
+	if pts[0].N != 4 || pts[2].N != 6 || pts[62].N != 9 {
+		t.Fatalf("значения не сохранились: %+v %+v %+v", pts[0], pts[2], pts[62])
+	}
+	for _, p := range pts[3:62] {
+		if p.N != 0 {
+			t.Fatalf("минута простоя %v показана как %d, ожидался ноль", p.At, p.N)
+		}
+	}
+	// До первой записанной минуты истории нет — нулями её не выдумываем.
+	if pts[0].At.Before(base) {
+		t.Fatal("ряд начинается раньше первой точки")
 	}
 }
 
-func TestBrokenFileMovedAside(t *testing.T) {
+// Перезапуск посреди минуты: минута есть и в истории, и в текущей — отдаётся одна, с пиком.
+func TestRestartMidMinuteNoDuplicate(t *testing.T) {
+	t.Parallel()
+	db := openDB(t, "")
+	s, err := Open(db, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Observe(base, 3)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(db, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	s2.Observe(base.Add(30*time.Second), 5)
+	_, pts := s2.Points(base.Add(-time.Hour), base.Add(time.Hour), 100)
+	if len(pts) != 1 || pts[0].N != 5 {
+		t.Fatalf("минута перезапуска: %+v", pts)
+	}
+}
+
+// TestRetentionInDB — база не растёт вечно: точки старше ретенции стираются при записи, а после
+// перезапуска в памяти ровно месяц.
+func TestRetentionInDB(t *testing.T) {
+	t.Parallel()
+	db := openDB(t, "")
+	s, err := Open(db, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < RetentionPoints+500; i++ {
+		s.Observe(base.Add(time.Duration(i)*time.Minute), i%7)
+		if i%10000 == 0 {
+			if err := s.Flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.R.QueryRow("SELECT count(*) FROM online_points").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n > RetentionPoints+1 {
+		t.Fatalf("в базе %d точек при ретенции %d", n, RetentionPoints)
+	}
+	s2, err := Open(db, testLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	if len(s2.ring) < RetentionPoints-1 || len(s2.ring) > RetentionPoints {
+		t.Fatalf("после перезапуска точек %d, ожидалось около %d", len(s2.ring), RetentionPoints)
+	}
+}
+
+// TestImportLog — перенос старого online.log: битые строки пропускаются, чужой заголовок — ошибка.
+func TestImportLog(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "online.log")
-	if err := os.WriteFile(path, []byte("это не наш формат\n1 2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Open(path, testLog())
-	if err != nil {
-		t.Fatalf("битый файл не должен ронять сервер: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-	if !s.Broken() {
-		t.Fatal("Broken() обязан сообщить о битом файле")
-	}
-	if _, err := os.Stat(path + ".bad"); err != nil {
-		t.Fatalf("битый файл не отложен: %v", err)
-	}
-	if _, pts := s.Points(base.Add(-time.Hour), base.Add(time.Hour), 100); len(pts) != 0 {
-		t.Fatalf("ряд должен быть пустым, получено %+v", pts)
-	}
-}
-
-// TestBrokenLineSkipped — обрыв на дозаписи стоит одной строки, а не всей истории.
-func TestBrokenLineSkipped(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "online.log")
-	content := header + "\n" + "1757505600 4\nмусор\n1757505660 5\n"
+	content := legacyHeader + "\n" + "1757505600 4\nмусор\n1757505660 5\n1757505720 3"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(path, testLog())
+	db := openDB(t, "")
+	n, err := ImportLog(db.W, path)
+	if err != nil || n != 3 {
+		t.Fatalf("импорт: %d %v", n, err)
+	}
+	s, err := Open(db, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = s.Close() }()
-	if s.Broken() {
-		t.Fatal("одна битая строка — не повод откладывать файл")
+	if len(s.ring) != 3 || s.ring[1].N != 5 {
+		t.Fatalf("после импорта: %+v", s.ring)
 	}
-	if len(s.ring) != 2 {
-		t.Fatalf("загружено %d точек, ожидалось 2", len(s.ring))
+	bad := filepath.Join(dir, "bad.log")
+	if err := os.WriteFile(bad, []byte("чужой формат\n1 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportLog(db.W, bad); err == nil {
+		t.Error("чужой формат принят")
+	}
+	if n, err := ImportLog(db.W, filepath.Join(dir, "нет.log")); err != nil || n != 0 {
+		t.Errorf("отсутствующий файл: %d %v", n, err)
 	}
 }
 
@@ -189,47 +263,5 @@ func TestNilSeriesIsSafe(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestCompactionRewritesFile — append-only файл не растёт вечно: при переполнении он
-// переписывается целиком, и история остаётся читаемой.
-func TestCompactionRewritesFile(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "online.log")
-	s, err := Open(path, testLog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Пишем чуть больше порога компактизации, флашим по частям. Порог — два месяца поминутно,
-	// поэтому флашим редко: каждый вызов делает fsync, и под -race сотня их заметна в CI.
-	for i := 0; i < compactAt+10; i++ {
-		s.Observe(base.Add(time.Duration(i)*time.Minute), i%7)
-		if i%5000 == 0 {
-			if err := s.Flush(); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if err := s.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	if s.lines > compactAt {
-		t.Fatalf("строк в файле %d, компактизация не сработала", s.lines)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	s2, err := Open(path, testLog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = s2.Close() }()
-	if s2.Broken() {
-		t.Fatal("после компактизации файл читается как битый")
-	}
-	if len(s2.ring) < RetentionPoints || len(s2.ring) > RetentionPoints+trimSlack {
-		t.Fatalf("после перезапуска точек %d, ожидалось около %d", len(s2.ring), RetentionPoints)
 	}
 }

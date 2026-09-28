@@ -28,7 +28,7 @@
     token: store.get('sb.token') || '',
     me: null,                 // playerId с сервера
     rank: '',                 // роль модерации: '' | 'moderator' | 'admin' (цвет ника, права в чате)
-    account: null,            // аккаунт из welcome: {id, provider, nick, nickAuto} или null у гостя
+    account: null,            // запись игрока из welcome: {id, provider, nick, nickAuto}; provider '' — гость, null — браузер без кук
     auth: AUTH_META.indexOf('yandex') >= 0 ? { yandex: true } : null, // способы входа: из страницы, затем уточняется в welcome
     net: null,
     connected: false,
@@ -273,7 +273,7 @@
     not_allowed: 'Действие недоступно.',
     chat_flood: 'Не так быстро — подождите пару секунд.',
     wrong_section: 'Этот код — от комнаты другого раздела.',
-    banned: 'Доступ к игре с этого адреса закрыт.',
+    banned: 'Доступ к игре для вас закрыт.',
     kicked: 'Вас выгнали из комнаты.',
     rename_cooldown: 'Ник можно менять раз в десять минут — попробуйте позже.',
     no_account: 'Это действие доступно после входа через Яндекс ID.'
@@ -345,7 +345,7 @@
         tutSynced = false; // новое подключение — новое право на одно слияние
         setAccount(d.account || null, d.tutorial);
         renderAdminBtn();
-        $('verSim').textContent = d.sim; $('menuNick').textContent = d.nick;
+        $('menuNick').textContent = d.nick;
         setOnline(d.online);
         setDrain(!!d.draining);
         if (app.game && app.game.offline) sendTraining(true);
@@ -356,9 +356,10 @@
         else if (app.screen === 'rooms') watchRooms();
         break;
       case 'error':
-        // Имя гостя выдал сервер, и оно за сутки могло достаться другому. Молча берём
-        // следующее: игрок этого имени не выбирал, извиняться перед ним не за что — ни
-        // всплывашки, ни экрана ника здесь быть не должно.
+        // Имя гостя без записи выдал сервер, и оно за сутки могло достаться другому. Молча
+        // берём следующее: игрок этого имени не выбирал, извиняться перед ним не за что — ни
+        // всплывашки, ни экрана ника здесь быть не должно. У игрока с записью (гостя с кукой
+        // тоже) ник хранит сервер, и nick_taken — ответ на его собственную попытку сменить ник.
         if (d.code === 'nick_taken' && store.get('sb.nickAuto') === '1' && !app.account) {
           app.nick = ''; store.set('sb.nick', '');
           if (app.net) app.net.reconnectNow();
@@ -478,9 +479,13 @@
   // ------------------------------------------------------------
   // Аккаунт (вход по Яндекс ID)
   // ------------------------------------------------------------
-  // Гостевой режим остаётся прежним: аккаунт нужен тому, кто хочет один и тот же ник и прогресс
-  // на телефоне и на компьютере. Сервер узнаёт игрока по куке ещё при открытии сокета, поэтому
-  // здесь только отрисовка и отправка изменений.
+  // Запись на сервере есть и у гостя: ник и прогресс держатся за кукой этого браузера, поэтому
+  // переживают смену IP и перезапуск сервера. Вход через Яндекс нужен тому, кто хочет тот же ник
+  // и прогресс на телефоне и на компьютере. Сервер узнаёт игрока по куке ещё при открытии
+  // сокета, поэтому здесь только отрисовка и отправка изменений.
+
+  // loggedIn — игрок вошёл через Яндекс. У гостя запись тоже есть (app.account), но без провайдера.
+  function loggedIn() { return !!(app.account && app.account.provider); }
 
   // accountHint — id аккаунта из читаемой куки sb_acc_hint. Сама авторизация лежит в httpOnly-куке
   // и скриптам недоступна; эта нужна ровно для одного: заметить, что в ДРУГОЙ вкладке вошли или
@@ -520,10 +525,13 @@
     $('btnGuest').classList.toggle('primary', !enabled);
     $('btnGuest').classList.toggle('ghost', enabled);
     // В меню про аккаунт ничего не пишем: имя и так на виду, а выход — редкое действие,
-    // ему место в настройках. Гостю там оставляем кнопку входа.
-    $('btnYandexMenu').hidden = !enabled || !!acc;
-    $('accountBox').hidden = !acc;
-    if (acc) $('accountWho').textContent = t('Ник и прогресс сохраняются на всех устройствах.');
+    // ему место в настройках. Гостю там оставляем кнопку входа и строку о том, зачем она:
+    // его прогресс живёт только в этом браузере.
+    var inside = enabled && !!acc && !!acc.provider;
+    $('btnYandexMenu').hidden = !enabled || inside;
+    $('guestHint').hidden = !enabled || inside;
+    $('accountBox').hidden = !inside;
+    if (inside) $('accountWho').textContent = t('Ник и прогресс сохраняются на всех устройствах.');
   }
 
   function login() {
@@ -543,9 +551,17 @@
     Audio_.uiClick();
     // POST, а не ссылка: выход не должен случаться от чужой картинки на постороннем сайте.
     fetch('/auth/logout', { method: 'POST' }).then(function () {
-      // Ник принадлежал аккаунту и остаётся за ним, поэтому забываем его здесь: иначе вышедший
-      // игрок тут же получил бы «ник занят» на собственное имя и не понял бы, чьё оно.
-      try { localStorage.removeItem('sb.nick'); } catch (e) { /* игнор */ }
+      // После выхода браузер — новый гость. Ник и пройденные уроки принадлежат аккаунту и
+      // остаются за ним, поэтому забываем их здесь: иначе вышедший игрок получил бы «ник занят»
+      // на собственное имя, а новый гость унаследовал бы чужой прогресс при первом же слиянии.
+      try {
+        localStorage.removeItem('sb.nick');
+        localStorage.removeItem('sb.nickAuto');
+        localStorage.removeItem('sb.tutorialDone');
+        Object.keys(localStorage).forEach(function (k) {
+          if (k.indexOf('sb.tut.done.') === 0) localStorage.removeItem(k);
+        });
+      } catch (e) { /* игнор */ }
       location.reload();
     }).catch(function () { toast(t('Не удалось выйти — проверьте связь.')); });
   };
@@ -554,7 +570,7 @@
   // разойдётся с нашим состоянием — переподключаемся, и welcome принесёт правильное лицо.
   function checkAccountHint() {
     if (!app.net || !app.auth) return;
-    if (accountHint() !== (app.account ? app.account.id : '')) app.net.reconnectNow();
+    if (accountHint() !== (loggedIn() ? app.account.id : '')) app.net.reconnectNow();
   }
   window.addEventListener('focus', checkAccountHint);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) checkAccountHint(); });
@@ -587,8 +603,9 @@
     Audio_.uiClick();
     $('nickMsg').textContent = '';
     if (app.account) {
-      // У вошедшего ник хранится на сервере. Отдельное сообщение, а не переподключение:
-      // реконнект посреди комнаты стоил бы места, а игрок всего лишь переименовался.
+      // Ник записи хранится на сервере (у гостя тоже). Отдельное сообщение, а не
+      // переподключение: реконнект посреди комнаты стоил бы места, а игрок всего лишь
+      // переименовался.
       send('nick.set', { nick: v });
       goto('menu');
       return;

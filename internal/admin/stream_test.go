@@ -15,18 +15,19 @@ import (
 	"github.com/rs/zerolog"
 
 	snowbrawl "github.com/Nekrasov-Sergey/snowbrawl"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 )
 
 const testToken = "t0ken"
 
 func newAdmin(t *testing.T) (*httptest.Server, *hub.Hub, func()) {
-	srv, h, _, stop := newAdminWithStore(t)
+	srv, h, _, stop := newAdminFull(t)
 	return srv, h, stop
 }
 
@@ -37,7 +38,11 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.Store, func()) {
+// testCookie — кука, по которой тестовый Identify узнаёт запись игрока. Настоящую подписанную
+// куку проверяет internal/auth; админке важно лишь то, что игрок опознан.
+const testCookie = "acc"
+
+func newAdminFull(t *testing.T) (*httptest.Server, *hub.Hub, *accounts.Store, func()) {
 	t.Helper()
 	src, err := snowbrawl.Web.ReadFile(snowbrawl.SimPath)
 	if err != nil {
@@ -48,86 +53,53 @@ func newAdminWithStore(t *testing.T) (*httptest.Server, *hub.Hub, *moderation.St
 		t.Fatal(err)
 	}
 	log := zerolog.New(io.Discard)
-	mod, err := moderation.Open("", log)
+	db, err := store.Open("", log)
 	if err != nil {
 		t.Fatal(err)
 	}
+	accs := accounts.Open(db, log)
 	cfg := config.Defaults()
 	// Ноль у этих полей означает боевое значение; тесты их сжимают, чтобы не пережидать
 	// секундный период потока и полусекундный фоновый цикл (см. config.Config).
 	cfg.HubTick = 20 * time.Millisecond
 	cfg.AdminStreamEvery = 20 * time.Millisecond
-	series, err := onlinestat.Open("", log)
+	series, err := onlinestat.Open(nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := hub.New(cfg, prog, log, mod, series)
+	h := hub.New(cfg, prog, log, series)
+	h.SetAccounts(accs)
 	h.Run()
 	r := gin.New()
-	// trustProxy=false: адрес берётся только из RemoteAddr, заголовкам не верим.
 	stop := Register(r, Deps{
-		Hub: h, Moderation: mod,
+		Hub: h, Accounts: accs,
 		Info:  Info{Build: "test", SimVersion: prog.Version(), Proto: 3},
 		Token: testToken, Started: time.Now(), StreamEvery: cfg.AdminStreamEvery,
+		Identify: func(r *http.Request) string {
+			if c, err := r.Cookie(testCookie); err == nil {
+				return c.Value
+			}
+			return ""
+		},
 	})
 	srv := httptest.NewServer(r)
-	t.Cleanup(func() { stop(); h.Shutdown(); srv.Close() })
-	return srv, h, mod, stop
+	t.Cleanup(func() { stop(); h.Shutdown(); srv.Close(); _ = db.Close() })
+	return srv, h, accs, stop
 }
 
-// Вход в админку по роли «Админ»: токен ему не выдаётся, пускаем по адресу запроса.
-func TestCreatorEntersWithoutToken(t *testing.T) {
+// Адрес запроса доступа не даёт вовсе: ролей по IP больше нет, а X-Forwarded-For подделывается.
+func TestNoEntryByAddress(t *testing.T) {
 	t.Parallel()
-	srv, _, mod, _ := newAdminWithStore(t)
-
-	res, err := http.Get(srv.URL + "/admin/state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("без токена и без роли ожидался 401, получен %d", res.StatusCode)
-	}
-
-	// httptest слушает loopback, поэтому адрес запроса — 127.0.0.1.
-	if err := mod.SetRank("127.0.0.1", protocol.RankAdmin, "Хозяин", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	res2, err := http.Get(srv.URL + "/admin/state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res2.Body.Close()
-	if res2.StatusCode != http.StatusOK {
-		t.Fatalf("админа должно пускать без токена, получен %d", res2.StatusCode)
-	}
-
-	// «Модератор» — не «Админ»: доступа к странице у него нет.
-	if err := mod.SetRank("127.0.0.1", protocol.RankModerator, "Аня", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	res3, err := http.Get(srv.URL + "/admin/state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res3.Body.Close()
-	if res3.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("админу вход в панель не положен, получен %d", res3.StatusCode)
-	}
-
-	// Подделка адреса заголовком не работает: trustProxy выключен.
-	if err := mod.SetRank("10.1.2.3", protocol.RankAdmin, "", time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	srv, _, _, _ := newAdminFull(t)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/state", nil)
 	req.Header.Set("X-Forwarded-For", "10.1.2.3")
-	res4, err := http.DefaultClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res4.Body.Close()
-	if res4.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("X-Forwarded-For не должен давать доступ, получен %d", res4.StatusCode)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("без токена и роли ожидался 401, получен %d", res.StatusCode)
 	}
 }
 
