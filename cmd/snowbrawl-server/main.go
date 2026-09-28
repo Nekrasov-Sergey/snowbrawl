@@ -22,10 +22,10 @@ import (
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/auth"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/config"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/hub"
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/onlinestat"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/sim"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/web"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/ws"
 )
@@ -63,62 +63,72 @@ func run() error {
 	log.Info().Str("build", cfg.BuildVersion).Str("sim", prog.Version()).Int("proto", protocol.Version).
 		Str("addr", cfg.Addr).Bool("webFromDisk", cfg.WebDir != "").Msg("starting snowbrawl-server")
 
-	mod, err := moderation.Open(cfg.ModerationFile, log)
+	db, err := store.Open(cfg.DBFile, log)
 	if err != nil {
-		return fmt.Errorf("moderation store: %w", err)
+		return fmt.Errorf("store: %w", err)
 	}
-	series, err := onlinestat.Open(cfg.OnlineFile, log)
+	// Задачи ниже пишут в базу, поэтому закрыть её надо последней, после серии онлайна.
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Error().Err(err).Msg("store close")
+		}
+	}()
+	if err := importLegacy(db, cfg, log); err != nil {
+		return fmt.Errorf("импорт старых файлов: %w", err)
+	}
+	series, err := onlinestat.Open(db, log)
 	if err != nil {
 		return fmt.Errorf("online series: %w", err)
 	}
 	series.Run(onlinestat.FlushEvery)
-	accs, err := accounts.Open(cfg.AccountsFile, log)
-	if err != nil {
-		return fmt.Errorf("accounts store: %w", err)
+	accs := accounts.Open(db, log)
+	backupDir := ""
+	if cfg.DBFile != "" {
+		backupDir = filepath.Join(filepath.Dir(cfg.DBFile), "backup")
 	}
-	accs.Run(accounts.FlushEvery)
-	// Вход по Яндекс ID. Пустой client id — фича выключена: ручек нет, игра работает как раньше.
-	var authSvc *auth.Service
-	if auth.Enabled(authConfig(cfg)) {
-		authSvc, err = auth.New(authConfig(cfg), accs, log)
-		if err != nil {
-			return fmt.Errorf("auth: %w", err)
-		}
+	// Раз в сутки: снимок базы и уборка гостей, которые давно не заходили.
+	db.RunDaily(24*time.Hour, db.BackupTask(backupDir), accs.PurgeTask())
+
+	// Кто пришёл — гость или вошедший через Яндекс — сервис знает всегда; ручки Яндекса у него
+	// появляются, только когда заданы client id и секрет.
+	authSvc, err := auth.New(authConfig(cfg), accs, db, log)
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	if authSvc.Yandex() {
 		log.Info().Str("publicURL", cfg.PublicURL).Msg("auth: вход по Яндекс ID включён")
 	} else {
 		log.Info().Msg("auth: вход по Яндекс ID выключен (нет client id или секрета)")
 	}
 
-	h := hub.New(cfg, prog, log, mod, series)
+	h := hub.New(cfg, prog, log, series)
 	h.SetAccounts(accs)
-	if authSvc != nil {
+	if authSvc.Yandex() {
 		h.SetAuthInfo(&protocol.AuthInfo{Yandex: true})
-		// Новый аккаунт не должен получить имя, под которым прямо сейчас играет гость.
-		authSvc.SetNickTaken(h.NickTakenByGuest)
 	}
+	// Новый аккаунт не должен получить имя, под которым прямо сейчас играет гость.
+	authSvc.SetNickTaken(h.NickTakenByGuest)
 	h.Run()
 	wsServer := ws.NewServer(ws.Options{
 		MaxConns: cfg.MaxConns, MsgRate: cfg.MsgRate, TrustProxy: cfg.TrustProxy, Log: log,
-		// Аккаунт узнаётся по куке на апгрейде: игрок опознан ещё до первого сообщения.
+		// Игрок узнаётся по куке на апгрейде: он опознан ещё до первого сообщения.
 		Identify: authSvc.Identify,
 	}, h)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery(), requestLogger(log))
-	if authSvc != nil {
-		r.Use(authSvc.Refresh())
-		authSvc.Register(r)
-	}
+	r.Use(authSvc.Refresh())
+	authSvc.Register(r)
 	r.GET("/ws", gin.WrapH(wsServer))
 	stopAdmin := admin.Register(r, admin.Deps{
-		Hub: h, Moderation: mod, Accounts: accs,
+		Hub: h, Accounts: accs,
 		Info:  admin.Info{Build: cfg.BuildVersion, SimVersion: prog.Version(), Proto: protocol.Version},
-		Token: cfg.AdminToken, Started: started, TrustProxy: cfg.TrustProxy,
+		Token: cfg.AdminToken, Started: started,
 		StreamEvery: cfg.AdminStreamEvery, Identify: authSvc.Identify,
 	})
 	authMethods := ""
-	if authSvc != nil {
+	if authSvc.Yandex() {
 		authMethods = "yandex"
 	}
 	web.Register(r, fsys, cfg.WebDir != "", cfg.BuildVersion, authMethods)
@@ -147,30 +157,21 @@ func run() error {
 		log.Warn().Err(err).Msg("http shutdown")
 	}
 	wsServer.Wait()
-	// Серию закрываем последней: тик hub уже остановлен (Shutdown ждёт свою горутину), поэтому
-	// дописать точку в закрытый файл некому.
+	// Серию закрываем после hub: тик уже остановлен (Shutdown ждёт свою горутину), поэтому
+	// дописать точку в закрытую серию некому. Базу закроет defer выше — после серии.
 	if err := series.Close(); err != nil {
 		log.Error().Err(err).Msg("online series close")
-	}
-	// Аккаунты — по тому же правилу: фоновая горутина уже не нужна, последние изменения
-	// (ник, урок, время входа) дописываем сами.
-	if err := accs.Close(); err != nil {
-		log.Error().Err(err).Msg("accounts close")
 	}
 	log.Info().Msg("bye")
 	return nil
 }
 
 // authConfig переводит настройки сервера в настройки пакета входа. Ключ подписи, если он не
-// задан переменной окружения, хранится рядом с файлом аккаунтов — в том же томе.
+// задан переменной окружения, хранится в базе.
 func authConfig(cfg config.Config) auth.Config {
-	keyFile := ""
-	if cfg.AccountsFile != "" {
-		keyFile = filepath.Join(filepath.Dir(cfg.AccountsFile), "auth.key")
-	}
 	return auth.Config{
 		ClientID: cfg.YandexClientID, ClientSecret: cfg.YandexClientSecret,
-		PublicURL: cfg.PublicURL, Secret: cfg.AuthSecret, KeyFile: keyFile,
+		PublicURL: cfg.PublicURL, Secret: cfg.AuthSecret,
 		DevLogin: cfg.AuthDevLogin, TrustProxy: cfg.TrustProxy,
 	}
 }

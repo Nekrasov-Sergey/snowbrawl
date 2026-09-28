@@ -27,6 +27,7 @@ h1.title { margin: 0 0 18px 0; font-size: 30px; letter-spacing: 2px; text-align:
 .linkBtn { background: none; border: none; color: #4aa8ff; cursor: pointer; font-size: 13px; text-decoration: underline; padding: 0 4px; }
 .subtitle { color: #a9c2e0; font-size: 14px; text-align: center; max-width: 560px; }
 .who { font-size: 14px; color: #a9c2e0; }
+.guestHint { font-size: 12px; max-width: 320px; margin: -4px auto 0; text-align: center; }
 .stub-box {
   background: #16283f; border: 1px solid #3a5a80; border-radius: 10px; padding: 22px 30px;
   text-align: center; max-width: 420px; width: 100%; box-sizing: border-box;

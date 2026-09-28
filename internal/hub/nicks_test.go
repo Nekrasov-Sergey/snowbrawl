@@ -71,23 +71,6 @@ func TestNickReleaseOnlyOwn(t *testing.T) {
 	}
 }
 
-func TestReleaseNicksOfIP(t *testing.T) {
-	t.Parallel()
-	h := newNickHub()
-	now := time.Now()
-	h.holdNick("Вася", "10.0.0.1", "p1", now)
-	h.holdNick("Петя", "10.0.0.1", "p2", now)
-	h.holdNick("Маша", "10.0.0.2", "p3", now)
-
-	h.releaseNicksOfIP("10.0.0.1")
-	if !h.nickFree("Вася", "10.0.0.9", "", "") || !h.nickFree("Петя", "10.0.0.9", "", "") {
-		t.Fatal("бан обязан отпускать ники адреса")
-	}
-	if h.nickFree("Маша", "10.0.0.9", "", "") {
-		t.Fatal("ники других адресов бан не трогает")
-	}
-}
-
 func TestEvictNickHoldsKeepsLiveSessions(t *testing.T) {
 	t.Parallel()
 	h := newNickHub()

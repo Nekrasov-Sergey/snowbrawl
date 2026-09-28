@@ -31,15 +31,17 @@ type Config struct {
 	TrustProxy   bool          // брать IP клиента из X-Forwarded-For (за Caddy/nginx)
 	ChatTTL      time.Duration // сколько живёт сообщение общего чата
 	ChatCooldown time.Duration // минимальная пауза между сообщениями чата от одного игрока
-	// ModerationFile — JSON с ролями и банами по IP (см. internal/moderation). Пустой путь —
-	// всё живёт только в памяти и теряется при перезапуске: так удобно в разработке.
+	// DBFile — база SQLite со всем, что переживает перезапуск: записи игроков, ряд онлайна, ключ
+	// подписи кук (см. internal/store). Пустой путь — база во временном каталоге и пропадает при
+	// остановке: так удобно в разработке. Рядом с файлом, в каталоге backup, лежат суточные снимки.
+	DBFile string
+	// ModerationFile, OnlineFile и AccountsFile — файлы, в которых данные жили до базы. Сервер
+	// читает их один раз, при первом старте с новой базой, переносит в неё и переименовывает в
+	// *.imported (см. cmd/snowbrawl-server/legacy.go). Ключ подписи ищется как auth.key рядом
+	// с AccountsFile.
 	ModerationFile string
-	// OnlineFile — ряд онлайна для графика в админке: точка в минуту, семь дней
-	// (см. internal/onlinestat). Пустой путь — история только в памяти.
-	OnlineFile string
-	// AccountsFile — JSON с постоянными аккаунтами (см. internal/accounts). Пустой путь —
-	// аккаунты живут только в памяти и теряются при перезапуске: так удобно в разработке.
-	AccountsFile string
+	OnlineFile     string
+	AccountsFile   string
 	// Вход по Яндекс ID (см. internal/auth). Пустой YandexClientID или YandexClientSecret —
 	// вход выключен целиком: ручек /auth/* нет, кнопки в клиенте нет. Так же ведёт себя
 	// админка при пустом AdminToken.
@@ -49,8 +51,8 @@ type Config struct {
 	// строится redirect_uri и решается, ставить ли куке флаг Secure. Берём из конфига, а не из
 	// заголовка Host: подменённый Host увёл бы код авторизации на чужой домен.
 	PublicURL string
-	// AuthSecret — ключ подписи кук входа. Пустой — ключ генерируется и сохраняется рядом с
-	// файлом аккаунтов: без этого каждый деплой разлогинивал бы всех игроков.
+	// AuthSecret — ключ подписи кук. Пустой — ключ генерируется и сохраняется в базе: без этого
+	// каждый деплой разлогинивал бы всех игроков и превращал гостей в новых.
 	AuthSecret string
 	// AuthDevLogin — офлайновый вход /auth/dev/login для разработки. В неdev-сборке сервер с
 	// этим флагом не стартует: ручка пускает под любым аккаунтом без пароля.
@@ -105,6 +107,7 @@ func Load(args []string, buildVersion string) (Config, error) {
 	envStr(&c.Addr, "SNOWBRAWL_ADDR")
 	envStr(&c.AdminToken, "SNOWBRAWL_ADMIN_TOKEN")
 	envStr(&c.WebDir, "SNOWBRAWL_WEB_DIR")
+	envStr(&c.DBFile, "SNOWBRAWL_DB")
 	envStr(&c.ModerationFile, "SNOWBRAWL_MODERATION_FILE")
 	envStr(&c.OnlineFile, "SNOWBRAWL_ONLINE_FILE")
 	envStr(&c.AccountsFile, "SNOWBRAWL_ACCOUNTS_FILE")
@@ -151,9 +154,10 @@ func Load(args []string, buildVersion string) (Config, error) {
 	fs.StringVar(&c.Addr, "addr", c.Addr, "адрес прослушивания")
 	fs.StringVar(&c.AdminToken, "admin-token", c.AdminToken, "токен админки (/admin/*)")
 	fs.StringVar(&c.WebDir, "web-dir", c.WebDir, "каталог клиента на диске вместо встроенного")
-	fs.StringVar(&c.ModerationFile, "moderation-file", c.ModerationFile, "файл с ролями и банами по IP")
-	fs.StringVar(&c.OnlineFile, "online-file", c.OnlineFile, "файл истории онлайна для графика в админке")
-	fs.StringVar(&c.AccountsFile, "accounts-file", c.AccountsFile, "файл с аккаунтами игроков")
+	fs.StringVar(&c.DBFile, "db", c.DBFile, "файл базы SQLite")
+	fs.StringVar(&c.ModerationFile, "moderation-file", c.ModerationFile, "старый файл ролей и банов (только для импорта)")
+	fs.StringVar(&c.OnlineFile, "online-file", c.OnlineFile, "старый файл истории онлайна (только для импорта)")
+	fs.StringVar(&c.AccountsFile, "accounts-file", c.AccountsFile, "старый файл аккаунтов (только для импорта)")
 	fs.StringVar(&c.PublicURL, "public-url", c.PublicURL, "публичный адрес игры (для redirect_uri входа)")
 	fs.BoolVar(&c.AuthDevLogin, "auth-dev-login", c.AuthDevLogin, "офлайновый вход /auth/dev/login (только dev-сборка)")
 	fs.IntVar(&c.MaxConns, "max-conns", c.MaxConns, "максимум WebSocket-соединений")

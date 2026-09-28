@@ -1,53 +1,38 @@
-// Package onlinestat — ряд онлайна для графика в админке: одна точка в минуту, семь дней в
-// памяти, дозапись в файл на томе.
+// Package onlinestat — ряд онлайна для графика в админке: одна точка в минуту, тридцать дней в
+// памяти, дозапись в базу (internal/store, таблица online_points).
 //
-// Инвариант, зеркальный internal/moderation. Там hub только читает стор, а пишет админка вне
-// h.mu; здесь наоборот: hub под своим мьютексом только дописывает точку в память (Observe), а в
-// файловую систему ходят собственная горутина серии (Run) и Close. Поэтому в Observe не должно
-// появиться ни одного обращения к диску и ни одного вызова назад в hub — иначе fsync встанет
+// Инвариант: hub под своим мьютексом только дописывает точку в память (Observe), а в базу
+// ходят собственная горутина серии (Run) и Close. Поэтому в Observe не должно появиться ни
+// одного обращения к базе и ни одного вызова назад в hub — иначе запись с её fsync встанет
 // поперёк всех матчей.
-//
-// Формат файла — дозапись строкой на минуту («<минута unix> <онлайн>»), а не полный дамп: писать
-// 10080 точек каждую минуту ради одной новой цифры незачем. Полная перезапись (temp+Sync+Rename)
-// бывает только при компактизации, когда строк накопилось вдвое больше ретенции.
 package onlinestat
 
 import (
-	"bufio"
-	"errors"
-	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
+	"database/sql"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 )
 
 const (
 	// Step — шаг ряда. Точка — максимум онлайна за минуту: пик читается осмысленнее среднего
 	// и не зависит от того, в какой момент минуты сработал семпл.
 	Step = time.Minute
-	// Retention — сколько истории держим. Месяц: график в админке умеет показывать 30 дней,
-	// а файл при поминутном шаге весит около мегабайта — на VPS это ничто.
+	// Retention — сколько истории держим. Месяц: график в админке умеет показывать 30 дней.
 	Retention = 30 * 24 * time.Hour
 	// RetentionPoints — тот же срок в точках.
 	RetentionPoints = int(Retention / Step)
-	// FlushEvery — как часто сбрасываем накопленное на диск. Цена жёсткой остановки — потеря
-	// накопленного с последнего флаша, поэтому пишем раз в минуту: один fsync на несколько
-	// десятков байт дешевле, чем пятиминутная дыра в графике после каждого деплоя.
+	// FlushEvery — как часто сбрасываем накопленное в базу. Цена жёсткой остановки — потеря
+	// накопленного с последнего флаша (такие минуты график покажет нулями), поэтому пишем раз
+	// в минуту: одна строка в минуту дешевле пятиминутного провала после каждого деплоя.
 	FlushEvery = time.Minute
-	// compactAt — при каком числе строк в файле переписываем его целиком.
-	compactAt = 2 * RetentionPoints
 	// trimSlack — на сколько точек кольцу разрешено перерасти ретенцию, прежде чем его
 	// подрежут. Режем пачками, потому что подрезка копирует кольцо целиком: на каждой точке
 	// это копия всех 43 тысяч (месяц поминутно) — впустую и в сервере, и в тестах.
 	trimSlack = 1024
-	// header — первая строка файла: по ней отличаем свой формат от чужого мусора.
-	header = "#snowbrawl-online 1"
 )
 
 // Point — одна точка ряда.
@@ -57,138 +42,54 @@ type Point struct {
 }
 
 // Series — ряд онлайна. Все методы безопасны на nil-приёмнике: сервер должен работать и без
-// файла, и без самой серии.
+// базы, и без самой серии.
 type Series struct {
 	mu   sync.Mutex
-	ring []Point // не длиннее RetentionPoints, старые точки с головы
+	ring []Point // не длиннее RetentionPoints (+ trimSlack), старые точки с головы
 	cur  Point   // незакрытая минута
-	pend []Point // закрытые минуты, ещё не записанные на диск
+	pend []Point // закрытые минуты, ещё не записанные в базу
 
-	fileMu sync.Mutex // всё, что касается файла: fsync никогда не под mu
-	f      *os.File
-	lines  int
-	path   string
-	broken bool
+	flushMu sync.Mutex // запись в базу никогда не под mu
+	db      *store.DB  // nil — только память
 
-	log    zerolog.Logger
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	log      zerolog.Logger
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
-// Open читает ряд с диска. Файла нет — пустой ряд. Файл битый — откладывается рядом с суффиксом
-// .bad, сервер поднимается с пустым рядом: уронить игру из-за испорченного графика нельзя, но
-// это должно быть видно (ERROR в лог, см. Broken).
-func Open(path string, log zerolog.Logger) (*Series, error) {
-	s := &Series{path: path, log: log, stopCh: make(chan struct{})}
-	if path == "" {
-		log.Info().Msg("onlinestat: файл не задан, история онлайна живёт только в памяти")
+// Open читает из базы последние RetentionPoints точек. db может быть nil — тогда ряд только в
+// памяти. Старше ретенции в базе ничего не лежит (это подрезает Flush), так что окно по числу
+// точек совпадает с окном по времени, а от текущих часов загрузка не зависит.
+func Open(db *store.DB, log zerolog.Logger) (*Series, error) {
+	s := &Series{db: db, log: log, stopCh: make(chan struct{})}
+	if db == nil {
+		log.Info().Msg("onlinestat: базы нет, история онлайна живёт только в памяти")
 		return s, nil
 	}
-	if err := s.load(); err != nil {
+	rows, err := db.R.Query(`SELECT at, n FROM (SELECT at, n FROM online_points ORDER BY at DESC LIMIT ?)
+		ORDER BY at`, RetentionPoints)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.openFile(); err != nil {
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var at int64
+		var n int
+		if err := rows.Scan(&at, &n); err != nil {
+			return nil, err
+		}
+		s.ring = append(s.ring, Point{At: time.Unix(at, 0).UTC(), N: n})
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	log.Info().Int("points", len(s.ring)).Str("path", path).Msg("onlinestat: история загружена")
+	log.Info().Int("points", len(s.ring)).Msg("onlinestat: история загружена")
 	return s, nil
 }
 
-// load читает файл в кольцо. Битые строки пропускает, битый заголовок — повод отложить файл.
-func (s *Series) load() error {
-	f, err := os.Open(s.path) //nolint:gosec // путь задаёт администратор через конфиг
-	if errors.Is(err, fs.ErrNotExist) {
-		s.log.Info().Str("path", s.path).Msg("onlinestat: файла нет, начинаем с пустого ряда")
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	sc := bufio.NewScanner(f)
-	if !sc.Scan() || strings.TrimSpace(sc.Text()) != header {
-		_ = f.Close()
-		return s.setAside(errors.New("неизвестный формат файла"))
-	}
-	var skipped int
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		s.lines++
-		minute, n, ok := parseLine(line)
-		if !ok {
-			skipped++
-			continue
-		}
-		s.appendPoint(Point{At: minute, N: n})
-	}
-	if err := sc.Err(); err != nil {
-		_ = f.Close()
-		return s.setAside(err)
-	}
-	if skipped > 0 {
-		// Файл дозаписывается, поэтому обрыв на последней строке — обычное дело после жёсткой
-		// остановки. Не повод откладывать файл, но повод его перезаписать при следующем флаше.
-		s.lines = compactAt
-		s.log.Warn().Int("skipped", skipped).Msg("onlinestat: битые строки пропущены, файл будет перезаписан")
-	}
-	// Ретенция могла измениться между версиями: подрезаем то, что уже не нужно.
-	s.trim()
-	return nil
-}
-
-func parseLine(line string) (time.Time, int, bool) {
-	minute, n, found := strings.Cut(line, " ")
-	if !found {
-		return time.Time{}, 0, false
-	}
-	sec, err := strconv.ParseInt(minute, 10, 64)
-	if err != nil {
-		return time.Time{}, 0, false
-	}
-	cnt, err := strconv.Atoi(n)
-	if err != nil || cnt < 0 {
-		return time.Time{}, 0, false
-	}
-	return time.Unix(sec, 0).UTC(), cnt, true
-}
-
-// setAside откладывает битый файл и оставляет ряд пустым.
-func (s *Series) setAside(cause error) error {
-	s.broken = true
-	s.ring = nil
-	s.lines = 0
-	bad := s.path + ".bad"
-	if err := os.Rename(s.path, bad); err != nil {
-		s.log.Error().Err(err).Str("path", s.path).Msg("onlinestat: файл битый и не переименовывается")
-	}
-	s.log.Error().Err(cause).Str("moved", bad).Msg("onlinestat: файл битый, история онлайна сброшена")
-	return nil
-}
-
-func (s *Series) openFile() error {
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // путь из конфига
-	if err != nil {
-		return err
-	}
-	s.f = f
-	if s.lines == 0 {
-		if _, err := fmt.Fprintln(f, header); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // Observe закрывает минуту и запоминает пик. Вызывается из тика hub под h.mu — поэтому здесь
-// нет ни файловых операций, ни блокирующих ожиданий.
+// нет ни обращений к базе, ни блокирующих ожиданий.
 func (s *Series) Observe(now time.Time, n int) {
 	if s == nil {
 		return
@@ -204,16 +105,11 @@ func (s *Series) Observe(now time.Time, n int) {
 			s.cur.N = n // пик минуты
 		}
 	default:
-		s.appendPoint(s.cur)
+		s.ring = append(s.ring, s.cur)
 		s.pend = append(s.pend, s.cur)
 		s.trim()
 		s.cur = Point{At: minute, N: n}
 	}
-}
-
-// appendPoint кладёт точку в кольцо. Вызывать под mu (или до старта горутин, из load).
-func (s *Series) appendPoint(p Point) {
-	s.ring = append(s.ring, p)
 }
 
 // trim выкидывает точки старше ретенции, пачками по trimSlack. Вызывать под mu. Кольцо может
@@ -230,6 +126,10 @@ func (s *Series) trim() {
 // Points отдаёт точки окна [from, to] не более maxPoints штук. Если точек больше, шаг
 // укрупняется (значение в корзине — максимум), и фактический шаг возвращается вызывающему:
 // иначе график врал бы о разрешении данных. Незакрытая минута тоже отдаётся — с ней график живой.
+//
+// Минуты, когда сервер не работал (перезапуск при выкладке, простой), отдаются нулями: играть в
+// это время было нельзя, и разрыв в линии после каждой выкладки только сбивал с толку. Заполняются
+// только промежутки между точками: до первой записанной минуты истории просто нет.
 func (s *Series) Points(from, to time.Time, maxPoints int) (time.Duration, []Point) {
 	if s == nil {
 		return Step, nil
@@ -248,6 +148,7 @@ func (s *Series) Points(from, to time.Time, maxPoints int) (time.Duration, []Poi
 		src = append(src, s.cur)
 	}
 	s.mu.Unlock()
+	src = fillGaps(src)
 
 	step := Step
 	if len(src) > maxPoints {
@@ -276,22 +177,42 @@ func (s *Series) Points(from, to time.Time, maxPoints int) (time.Duration, []Poi
 	return step, out
 }
 
-// Broken — файл был битым и отложен в .bad.
-func (s *Series) Broken() bool {
-	if s == nil {
-		return false
+// fillGaps вставляет нули на пропущенные минуты между точками и сливает повторы одной минуты
+// (после перезапуска посреди минуты она есть и в истории, и в текущей) — в повторе берётся пик.
+func fillGaps(src []Point) []Point {
+	if len(src) < 2 {
+		return src
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.broken
+	out := make([]Point, 0, len(src))
+	for _, p := range src {
+		if n := len(out); n > 0 {
+			last := out[n-1]
+			if !p.At.After(last.At) {
+				if p.N > last.N {
+					out[n-1].N = p.N
+				}
+				continue
+			}
+			for t := last.At.Add(Step); t.Before(p.At); t = t.Add(Step) {
+				out = append(out, Point{At: t})
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
-// Flush дозаписывает закрытые минуты. Забирает накопленное под mu и отпускает его до записи:
-// иначе запрос админки ждал бы fsync.
+// Broken — база при старте была битой, и история сброшена.
+func (s *Series) Broken() bool { return s != nil && s.db.Broken() }
+
+// Flush пишет закрытые минуты в базу и стирает то, что вышло за ретенцию. Забирает накопленное
+// под mu и отпускает его до записи: иначе запрос админки ждал бы базу.
 func (s *Series) Flush() error {
-	if s == nil || s.path == "" {
+	if s == nil || s.db == nil {
 		return nil
 	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	pend := s.pend
 	s.pend = nil
@@ -299,87 +220,60 @@ func (s *Series) Flush() error {
 	if len(pend) == 0 {
 		return nil
 	}
-
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	if s.f == nil {
-		return nil
-	}
-	var b strings.Builder
-	for _, p := range pend {
-		fmt.Fprintf(&b, "%d %d\n", p.At.Unix(), p.N)
-	}
-	if _, err := s.f.WriteString(b.String()); err != nil {
+	if err := writePoints(s.db.W, pend); err != nil {
+		// Не потерять точки: вернуть их в очередь, следующий флаш попробует ещё раз.
+		s.mu.Lock()
+		s.pend = append(pend, s.pend...)
+		s.mu.Unlock()
 		return err
-	}
-	if err := s.f.Sync(); err != nil {
-		return err
-	}
-	s.lines += len(pend)
-	if s.lines > compactAt {
-		return s.compactLocked()
 	}
 	return nil
 }
 
-// compactLocked переписывает файл целиком, оставляя только точки в ретенции. Вызывать под
-// fileMu. Только здесь нужна атомарная замена: обрыв на дозаписи стоит одной строки, а обрыв на
-// перезаписи оставил бы обрубок вместо истории.
-func (s *Series) compactLocked() error {
-	s.mu.Lock()
-	points := make([]Point, len(s.ring))
-	copy(points, s.ring)
-	s.mu.Unlock()
+// upsertPoint — запись точки; минута, уже лежащая в базе (перезапуск посреди минуты), хранит пик.
+const upsertPoint = "INSERT INTO online_points(at, n) VALUES(?, ?) ON CONFLICT(at) DO UPDATE SET n = max(n, excluded.n)"
 
-	var b strings.Builder
-	b.WriteString(header + "\n")
-	for _, p := range points {
-		fmt.Fprintf(&b, "%d %d\n", p.At.Unix(), p.N)
-	}
-
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, "online-*.log") // тот же каталог: rename через границу ФС не работает
+func writePoints(db *sql.DB, pts []Point) error {
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	name := tmp.Name()
-	cleanup := func() { _ = tmp.Close(); _ = os.Remove(name) }
-	if _, err := tmp.WriteString(b.String()); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Chmod(name, 0o600); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, s.path); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if s.f != nil {
-		_ = s.f.Close()
-	}
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // путь из конфига
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(upsertPoint)
 	if err != nil {
 		return err
 	}
-	s.f = f
-	s.lines = len(points)
-	s.log.Info().Int("points", len(points)).Msg("onlinestat: файл перезаписан")
-	return nil
+	defer func() { _ = stmt.Close() }()
+	for _, p := range pts {
+		if _, err := stmt.Exec(p.At.Unix(), p.N); err != nil {
+			return err
+		}
+	}
+	cut := pts[len(pts)-1].At.Add(-Retention).Unix()
+	if _, err := tx.Exec("DELETE FROM online_points WHERE at < ?", cut); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// Run сбрасывает накопленное на диск по таймеру. Останавливается в Close.
+// ImportLog переносит ряд из старого online.log в базу внутри транзакции вызывающего (см.
+// cmd/snowbrawl-server). Файла нет — ноль и без ошибки; битые строки пропускаются.
+func ImportLog(tx store.Execer, path string) (int, error) {
+	pts, err := readLegacy(path)
+	if err != nil || len(pts) == 0 {
+		return 0, err
+	}
+	for _, p := range pts {
+		if _, err := tx.Exec(upsertPoint, p.At.Unix(), p.N); err != nil {
+			return 0, err
+		}
+	}
+	return len(pts), nil
+}
+
+// Run сбрасывает накопленное в базу по таймеру. Останавливается в Close.
 func (s *Series) Run(period time.Duration) {
-	if s == nil || s.path == "" {
+	if s == nil || s.db == nil {
 		return
 	}
 	s.wg.Add(1)
@@ -400,29 +294,20 @@ func (s *Series) Run(period time.Duration) {
 	}()
 }
 
-// Close закрывает текущую минуту, дописывает всё и закрывает файл. Вызывать после остановки
-// hub: иначе тик успеет дописать точку в уже закрытую серию.
+// Close закрывает текущую минуту и дописывает всё. Вызывать после остановки hub (иначе тик
+// успеет дописать точку в уже закрытую серию) и до закрытия базы.
 func (s *Series) Close() error {
 	if s == nil {
 		return nil
 	}
-	close(s.stopCh)
+	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.wg.Wait()
 	s.mu.Lock()
 	if !s.cur.At.IsZero() {
-		s.appendPoint(s.cur)
+		s.ring = append(s.ring, s.cur)
 		s.pend = append(s.pend, s.cur)
 		s.cur = Point{}
 	}
 	s.mu.Unlock()
-	err := s.Flush()
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	if s.f != nil {
-		if cerr := s.f.Close(); err == nil {
-			err = cerr
-		}
-		s.f = nil
-	}
-	return err
+	return s.Flush()
 }

@@ -18,20 +18,21 @@ services:
       SNOWBRAWL_MAX_CONNS: ${SNOWBRAWL_MAX_CONNS:-200}
       SNOWBRAWL_LOG_LEVEL: ${SNOWBRAWL_LOG_LEVEL:-info}
       SNOWBRAWL_TRUST_PROXY: ${SNOWBRAWL_TRUST_PROXY:-false}
-      # Роли и баны по IP.
+      # База SQLite: игроки (гости и аккаунты), график онлайна, ключ подписи кук. Суточные
+      # снимки — в /data/backup. Пустое значение — временная база, пропадает при перезапуске.
+      SNOWBRAWL_DB: ${SNOWBRAWL_DB:-/data/snowbrawl.db}
+      # Старые файлы до базы: читаются один раз при первом старте, переносятся в базу и
+      # переименовываются в *.imported (см. docs/RUNBOOK.md, «Резервные копии»).
       SNOWBRAWL_MODERATION_FILE: ${SNOWBRAWL_MODERATION_FILE:-/data/moderation.json}
-      # История онлайна для графика в админке: точка в минуту, 30 дней. Пустое значение —
-      # график живёт только в памяти и теряется при перезапуске.
       SNOWBRAWL_ONLINE_FILE: ${SNOWBRAWL_ONLINE_FILE:-/data/online.log}
-      # Аккаунты игроков (вход по Яндекс ID): ник, прогресс обучения, роль модерации.
       SNOWBRAWL_ACCOUNTS_FILE: ${SNOWBRAWL_ACCOUNTS_FILE:-/data/accounts.json}
-      # Вход по Яндекс ID. Пустой CLIENT_ID или SECRET — вход выключен, игра работает как
-      # раньше (гости по нику). PUBLIC_URL нужен для redirect_uri и флага Secure у куки.
+      # Вход по Яндекс ID. Пустой CLIENT_ID или SECRET — вход выключен, игроки заходят гостями.
+      # PUBLIC_URL нужен для redirect_uri и флага Secure у кук.
       SNOWBRAWL_YANDEX_CLIENT_ID: ${SNOWBRAWL_YANDEX_CLIENT_ID:-}
       SNOWBRAWL_YANDEX_CLIENT_SECRET: ${SNOWBRAWL_YANDEX_CLIENT_SECRET:-}
       SNOWBRAWL_PUBLIC_URL: ${SNOWBRAWL_PUBLIC_URL:-}
-      # Ключ подписи кук входа. Пустой — сервер создаст /data/auth.key сам; терять его нельзя,
-      # иначе все игроки разом окажутся разлогинены.
+      # Ключ подписи кук гостя и входа. Пустой — сервер создаст его сам и сохранит в базе;
+      # терять его нельзя, иначе все игроки разом станут новыми гостями или разлогинятся.
       SNOWBRAWL_AUTH_SECRET: ${SNOWBRAWL_AUTH_SECRET:-}
     volumes:
       - snowbrawl_data:/data
@@ -67,6 +68,6 @@ services:
       - caddy_config:/config
 
 volumes:
-  snowbrawl_data:   # /data сервера: аккаунты, роли и баны по IP, история онлайна (down -v их снесёт)
+  snowbrawl_data:   # /data сервера: база игроков и графика, её снимки (down -v их снесёт)
   caddy_data:
   caddy_config:

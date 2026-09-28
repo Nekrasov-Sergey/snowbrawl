@@ -6,7 +6,7 @@
 <title>SnowBrawl admin</title>
 <style>
 :root { color-scheme: dark }
-body { font-family: system-ui, sans-serif; background: #0e1a2b; color: #eaf2ff; padding: 16px; max-width: 1000px; margin: 0 auto }
+body { font-family: system-ui, sans-serif; background: #0e1a2b; color: #eaf2ff; padding: 16px; max-width: 1400px; margin: 0 auto }
 h1 { font-size: 22px; margin: 0 0 12px }
 h3 { font-size: 16px; margin: 22px 0 6px }
 table { border-collapse: collapse; width: 100%; margin: 6px 0 }
@@ -22,7 +22,7 @@ button { background: #274363; border: none; color: #eaf2ff; padding: 5px 12px; b
 .rank-admin { color: #ffc94d; font-weight: 600 }
 .rank-moderator { color: #b478ff; font-weight: 600 }
 .act { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
-.act select { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 12px; padding: 3px 6px }
+.act select, select.pick { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 12px; padding: 3px 6px }
 input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a80; border-radius: 6px; font-size: 13px; padding: 5px 8px }
 .danger { background: #6b2230 }
 .tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 }
@@ -64,24 +64,19 @@ input[type=text] { background: #17293f; color: #eaf2ff; border: 1px solid #3a5a8
   <canvas id="onlineChart"></canvas>
 </div>
 
-<h3>Игроки</h3><div id="sessions"></div>
+<h3>Игроки <span id="playersHint" class="empty"></span></h3>
+<div class="tools">
+  <input type="text" id="playersQ" placeholder="ник или логин" size="22">
+  <select id="playersFilter" class="pick">
+    <option value="">все</option><option value="guests">гости</option><option value="yandex">Яндекс</option>
+    <option value="ranked">с ролью</option><option value="banned">забаненные</option>
+  </select>
+  <button id="playersFind">Найти</button>
+</div>
+<div id="players"></div>
+<div class="tools"><button id="playersPrev">← назад</button><span id="playersPage" class="empty"></span><button id="playersNext">дальше →</button></div>
 <h3>Матчи</h3><div id="matches"></div>
 <h3>Комнаты</h3><div id="rooms"></div>
-<h3>Аккаунты <span id="accountsHint" class="empty"></span></h3><div id="accounts"></div>
-<div class="tools"><button id="accountsReload">Обновить список</button></div>
-
-<h3>Роли по IP</h3><div id="ranks"></div>
-<div class="tools">
-  <input type="text" id="rankIp" placeholder="IP адрес" size="16">
-  <select id="rankVal"><option value="moderator">Модератор</option><option value="admin">Админ</option><option value="">Игрок (снять)</option></select>
-  <button id="rankSet">Выдать роль</button>
-</div>
-<h3>Баны по IP</h3><div id="bans"></div>
-<div class="tools">
-  <input type="text" id="banIp" placeholder="IP адрес" size="16">
-  <input type="text" id="banReason" placeholder="причина (необязательно)" size="24">
-  <button id="banSet" class="danger">Забанить</button>
-</div>
 <h3>Чат</h3>
 <div class="tools"><span id="chatSize" class="empty"></span><button id="chatClear" class="danger">Очистить чат</button></div>
 
@@ -142,7 +137,7 @@ function place(p, now) {
   }
   if (p.place === 'menu') return 'в меню';
   if (p.place === 'room') return 'в комнате ' + esc(p.where);
-  if (p.place === 'match') return 'в матче ' + esc(p.where);
+  if (p.place === 'match') return 'в матче' + (p.where ? ', комната ' + esc(p.where) : '');
   return esc(p.place);
 }
 
@@ -159,7 +154,7 @@ function roster(players) {
   return '<span class="team-A">' + side('A') + '</span> против <span class="team-B">' + side('B') + '</span>';
 }
 
-// Действия модерации: файл ролей и банов правит сервер, страница только вызывает ручки.
+// Действия модерации: роли и баны лежат в записи игрока, страница только вызывает ручки.
 async function post(path, body, method) {
   const r = await fetch('/admin' + path + (path.indexOf('?') < 0 ? '?' : '&') + 'token=' + encodeURIComponent(token), {
     method: method || 'POST',
@@ -170,87 +165,102 @@ async function post(path, body, method) {
   if (!r.ok) { alert('Ошибка: ' + (data.error || r.status)); return null; }
   return data;
 }
-function nicksAt(ip) {
-  return ((last && last.sessions) || []).filter(p => p.ip === ip).map(p => p.nick);
-}
-async function setRank(ip, rank) {
-  const who = nicksAt(ip);
-  const what = rank ? 'выдать роль «' + RANKS[rank] + '»' : 'снять роль';
-  if (!confirm('Адрес ' + ip + (who.length ? ' (сейчас: ' + who.join(', ') + ')' : '') + '\n' + what + '?')) return;
-  await post('/rank', { ip: ip, rank: rank });
-}
-async function ban(ip, reason) {
-  const who = nicksAt(ip);
-  // За одним адресом может сидеть несколько человек (NAT) — показываем всех, кого затронет.
-  if (!confirm('Забанить адрес ' + ip + '?' + (who.length ? '\nСейчас с него играют: ' + who.join(', ') : ''))) return;
-  const res = await post('/ban', { ip: ip, reason: reason || '' });
-  if (res) alert('Забанено. Выкинуто сессий: ' + res.kicked);
-}
-async function unban(ip) {
-  if (!confirm('Разбанить адрес ' + ip + '?')) return;
-  await post('/ban?ip=' + encodeURIComponent(ip), null, 'DELETE');
-}
 
-// Аккаунты приходят отдельной ручкой, а не потоком состояния: у них меняется время последнего
-// входа, и в потоке это ломало бы схлопывание одинаковых кадров. Список нужен редко — список
-// обновляется при открытии страницы и после каждого действия.
-let accounts = [];
-async function loadAccounts() {
-  const r = await fetch('/admin/accounts?token=' + encodeURIComponent(token));
-  if (!r.ok) { document.getElementById('accountsHint').textContent = 'не удалось загрузить'; return; }
-  const data = await r.json();
-  accounts = data.accounts || [];
-  document.getElementById('accountsHint').innerHTML = data.broken
-    ? '<span class="err">файл аккаунтов был испорчен и отложен в .bad</span>'
-    : 'всего: ' + accounts.length;
-  renderAccounts();
+// Ник записи для подтверждения: оно должно называть человека, а не id.
+function nickOf(id) {
+  const a = players.find(x => x.id === id);
+  return a ? a.nick : id;
 }
 async function setAccountRank(id, rank) {
-  const acc = accounts.find(a => a.id === id);
   const what = rank ? 'выдать роль «' + RANKS[rank] + '»' : 'снять роль';
-  if (!confirm('Аккаунт ' + (acc ? acc.nick : id) + '\n' + what + '?')) return;
-  if (await post('/account/rank', { id: id, rank: rank })) loadAccounts();
+  if (!confirm('Игрок ' + nickOf(id) + '\n' + what + '?')) { renderPlayers(); return; }
+  if (await post('/account/rank', { id: id, rank: rank })) loadPlayers();
 }
 async function banAccount(id) {
-  const acc = accounts.find(a => a.id === id);
-  if (!confirm('Забанить аккаунт ' + (acc ? acc.nick : id) + '?\nОн не сможет играть ни с одного устройства.')) return;
+  if (!confirm('Забанить игрока ' + nickOf(id) + '?\nОн не сможет играть ни с одного устройства, где вошёл под этой записью.')) return;
   const res = await post('/account/ban', { id: id, reason: '' });
-  if (res) { alert('Забанено. Выкинуто сессий: ' + res.kicked); loadAccounts(); }
+  if (res) { alert('Забанено. Выкинуто сессий: ' + res.kicked); loadPlayers(); }
 }
 async function unbanAccount(id) {
-  if (await post('/account/ban?id=' + encodeURIComponent(id), null, 'DELETE')) loadAccounts();
+  if (await post('/account/ban?id=' + encodeURIComponent(id), null, 'DELETE')) loadPlayers();
 }
-async function logoutAccount(id) {
-  if (!confirm('Выйти на всех устройствах этого аккаунта? Игроку придётся войти заново.')) return;
-  if (await post('/account/logout-all?id=' + encodeURIComponent(id))) loadAccounts();
+// Выбор роли и кнопка бана для записи игрока.
+function actions(id, rank, banned) {
+  return '<div class="act"><select data-id="' + esc(id) + '" class="accRank">' +
+    ['', 'moderator', 'admin'].map(v => '<option value="' + v + '"' + (v === (rank || '') ? ' selected' : '') + '>' +
+      (RANKS[v] || 'Игрок') + '</option>').join('') + '</select>' +
+    (banned
+      ? '<button class="accUnban" data-id="' + esc(id) + '">Разбанить</button>'
+      : '<button class="accBan danger" data-id="' + esc(id) + '">Бан</button>') + '</div>';
 }
-function renderAccounts() {
-  table('accounts', ['ник', 'вход', 'роль', 'обучение', 'последний вход', 'действия'],
-    accounts.map(a => ({
-      key: a.id,
-      off: !!a.bannedAt,
-      cells: [esc(a.nick) + (a.bannedAt ? ' 🚫' : ''), esc(a.provider) + (a.login ? ' · ' + esc(a.login) : ''),
-        RANKS[a.rank] || 'Игрок', ((a.tut || []).length) + ' из 7', when(a.seenAt),
-        '<div class="act"><select data-id="' + esc(a.id) + '" class="accRank">' +
-          ['', 'moderator', 'admin'].map(v => '<option value="' + v + '"' + (v === (a.rank || '') ? ' selected' : '') + '>' +
-            (RANKS[v] || 'Игрок') + '</option>').join('') + '</select>' +
-          (a.bannedAt
-            ? '<button class="accUnban" data-id="' + esc(a.id) + '">Разбанить</button>'
-            : '<button class="accBan danger" data-id="' + esc(a.id) + '">Бан</button>') +
-          '<button class="accLogout" data-id="' + esc(a.id) + '">Выйти везде</button></div>'],
-    })), 'Аккаунтов пока нет.');
+function bindActions() {
   document.querySelectorAll('.accRank').forEach(el => { el.onchange = () => setAccountRank(el.dataset.id, el.value); });
   document.querySelectorAll('.accBan').forEach(el => { el.onclick = () => banAccount(el.dataset.id); });
   document.querySelectorAll('.accUnban').forEach(el => { el.onclick = () => unbanAccount(el.dataset.id); });
-  document.querySelectorAll('.accLogout').forEach(el => { el.onclick = () => logoutAccount(el.dataset.id); });
+}
+
+// Игроки — одна таблица на живые сессии и записи из базы. Состав и порядок считает сервер
+// (/admin/players: сначала в игре, затем админы, модераторы, затем кто заходил позже, затем по
+// нику), потому что только он видит и сессии, и базу, а записей тысячи. Живые ячейки — статус и
+// пинг — берутся из потока состояния по id сессии: они меняются каждую секунду, и перезапрашивать
+// ради них список незачем. Сам список перезапрашивается, когда в потоке меняется состав сессий,
+// их связь или роль, а ещё по поиску, при листании и после каждого действия.
+let players = [], playersPage = 0, playersTotal = 0, playersPer = 50, playersSig = '', playersTimer = null;
+async function loadPlayers() {
+  const q = document.getElementById('playersQ').value.trim();
+  const f = document.getElementById('playersFilter').value;
+  const r = await fetch('/admin/players?token=' + encodeURIComponent(token) + '&q=' + encodeURIComponent(q) +
+    '&filter=' + encodeURIComponent(f) + '&page=' + playersPage);
+  if (!r.ok) { document.getElementById('playersHint').textContent = 'не удалось загрузить'; return; }
+  const data = await r.json();
+  players = data.rows || [];
+  playersTotal = data.total || 0;
+  playersPer = data.perPage || 50;
+  document.getElementById('playersHint').innerHTML = data.broken
+    ? '<span class="err">база была испорчена и создана заново</span>'
+    : 'найдено: ' + playersTotal;
+  const pages = Math.max(1, Math.ceil(playersTotal / playersPer));
+  document.getElementById('playersPage').textContent = 'страница ' + (playersPage + 1) + ' из ' + pages;
+  document.getElementById('playersPrev').disabled = playersPage <= 0;
+  document.getElementById('playersNext').disabled = playersPage + 1 >= pages;
+  renderPlayers();
+}
+// Отпечаток того, от чего зависят состав и порядок списка: сессии, их связь и роль.
+function sessionsSig(s) {
+  return (s.sessions || []).map(p => p.id + ':' + (p.online ? 1 : 0) + ':' + (p.rank || '')).sort().join(',');
+}
+const KIND = { guest: 'гость', yandex: 'Яндекс', nocookie: 'гость без кук' };
+function renderPlayers() {
+  const byID = {};
+  ((last && last.sessions) || []).forEach(p => { byID[p.id] = p; });
+  const now = last ? new Date(last.now).getTime() : Date.now();
+  table('players', ['ник', 'кто', 'статус', 'пинг', 'последний заход', 'действия'],
+    players.map(a => {
+      const sess = a.session ? byID[a.session] : null;
+      let status = 'не в игре';
+      if (sess) status = sess.online ? place(sess, now) : 'нет связи ' + secs(now - new Date(sess.offlineSince).getTime());
+      const rank = sess ? sess.rank : a.rank;
+      return {
+        key: a.id || a.session,
+        off: !(sess && sess.online),
+        cells: [nickHtml({ nick: a.nick, rank: rank }) + (a.banned ? ' 🚫' : ''),
+          KIND[a.kind] + (a.login ? ' · ' + esc(a.login) : ''),
+          status,
+          // Задержку мерит сервер — это ровно то число, что игрок видит у себя в углу экрана;
+          // «—» значит «не в игре» или «ещё не измерена», а не «нулевая».
+          sess && sess.online && sess.ping ? sess.ping + ' мс' : '—',
+          when(a.seenAt),
+          // У гостя без кук записи нет — роль и бан ему не выдать.
+          a.id ? actions(a.id, rank, a.banned) : '—'],
+      };
+    }), 'Никого не нашлось.');
+  bindActions();
 }
 
 function render(s) {
   last = s;
   document.getElementById('sum').innerHTML =
     '<span class="pill">build ' + esc(s.build) + '</span>' +
-    '<span class="pill">sim ' + esc(s.sim) + '</span>' +
-    '<span class="pill">proto ' + s.proto + '</span>' +
     '<span class="pill">сессий ' + s.players + ', на связи ' + s.online + '</span>' +
     '<span class="pill">матчей ' + s.matchesLive + '</span>' +
     (s.training ? '<span class="pill">в тренировке ' + s.training + '</span>' : '');
@@ -259,30 +269,21 @@ function render(s) {
     ? '<div class="drain">Идёт выкладка новой версии (с ' + new Date(s.drainSince).toLocaleTimeString() +
       '). Новые матчи не начинаются, текущие доигрываются. Снимется само после перезапуска сервера.</div>'
     : '';
-  document.getElementById('modbroken').innerHTML = s.modBroken
-    ? '<div class="warn">Файл ролей и банов при старте был повреждён: он отложен рядом с суффиксом .bad, ' +
-      'роли и баны сброшены. Выдайте их заново.</div>'
+  document.getElementById('modbroken').innerHTML = s.storeBroken
+    ? '<div class="warn">База при старте была повреждена: она отложена рядом с суффиксом .bad, ' +
+      'записи игроков сброшены. Восстановите её из снимка в каталоге backup.</div>'
     : '';
 
   const now = new Date(s.now).getTime();
-  table('sessions', ['ник', 'роль', 'где', 'связь', 'пинг', 'зашёл', 'в игре', 'IP', 'действия'],
-    (s.sessions || []).map(p => ({
-      key: p.id,
-      off: !p.online,
-      cells: [nickHtml(p), (RANKS[p.rank] || 'Игрок') + (p.banned ? ' 🚫' : ''), place(p, now),
-        p.online ? 'онлайн' : 'нет связи ' + secs(now - new Date(p.offlineSince).getTime()),
-        // Задержку мерит сервер — это ровно то число, что игрок видит у себя в углу экрана;
-        // «—» значит «ещё не измерена», а не «нулевая».
-        p.ping ? p.ping + ' мс' : '—',
-        when(p.since), secs(now - new Date(p.since).getTime()),
-        '<span class="ip">' + esc(p.ip) + '</span>',
-        '<div class="act"><select data-ip="' + esc(p.ip) + '" class="rankPick">' +
-          ['', 'moderator', 'admin'].map(v => '<option value="' + v + '"' + (v === (p.rank || '') ? ' selected' : '') + '>' +
-            (RANKS[v] || 'Игрок') + '</option>').join('') + '</select>' +
-          (p.banned
-            ? '<button class="unbanBtn" data-ip="' + esc(p.ip) + '">Разбанить</button>'
-            : '<button class="banBtn danger" data-ip="' + esc(p.ip) + '">Бан</button>') + '</div>'],
-    })), 'Сейчас никого нет.');
+  // Список игроков: состав поменялся — перезапрос (с паузой, чтобы серия входов не дёргала
+  // сервер на каждом кадре), иначе только живые ячейки.
+  const sig = sessionsSig(s);
+  if (sig !== playersSig) {
+    playersSig = sig;
+    clearTimeout(playersTimer);
+    playersTimer = setTimeout(loadPlayers, 1000);
+  }
+  renderPlayers();
 
   table('matches', ['состав', 'режим', 'арена', 'людей', 'на связи', 'начат', 'длительность', 'комната'],
     (s.matches || []).map(m => ({
@@ -307,31 +308,10 @@ function render(s) {
         r.inMatch ? 'да' : 'нет'],
     })), 'Комнат нет.');
 
-  table('ranks', ['IP', 'роль', 'ник при выдаче', 'выдана', 'действия'],
-    (s.ranks || []).map(e => ({
-      key: e.ip,
-      cells: ['<span class="ip">' + esc(e.ip) + '</span>', RANKS[e.rank] || esc(e.rank),
-        esc(e.nick || '—'), when(e.since),
-        '<div class="act"><button class="rankOff" data-ip="' + esc(e.ip) + '">Снять</button></div>'],
-    })), 'Роли никому не выданы.');
-
-  table('bans', ['IP', 'ник при бане', 'причина', 'когда', 'действия'],
-    (s.bans || []).map(b => ({
-      key: b.ip,
-      cells: ['<span class="ip">' + esc(b.ip) + '</span>', esc(b.nick || '—'), esc(b.reason || '—'), when(b.at),
-        '<div class="act"><button class="unbanBtn" data-ip="' + esc(b.ip) + '">Разбанить</button></div>'],
-    })), 'Банов нет.');
-
   // «Очистить чат» стирает только общий: чаты комнат живут не дольше своих комнат.
   document.getElementById('chatSize').textContent =
     'сообщений в общем чате: ' + (s.chatSize || 0) + ', в чатах комнат: ' + (s.roomChat || 0);
 
-  // Обработчики навешиваем после каждого кадра: строки могли пересобраться целиком, а при
-  // точечном обновлении — отдельные ячейки. Назначение onclick идемпотентно, дублей не будет.
-  document.querySelectorAll('.rankPick').forEach(el => { el.onchange = () => setRank(el.dataset.ip, el.value); });
-  document.querySelectorAll('.rankOff').forEach(el => { el.onclick = () => setRank(el.dataset.ip, ''); });
-  document.querySelectorAll('.banBtn').forEach(el => { el.onclick = () => ban(el.dataset.ip, ''); });
-  document.querySelectorAll('.unbanBtn').forEach(el => { el.onclick = () => unban(el.dataset.ip); });
 }
 
 // Состояние приходит потоком: сервер шлёт сводку сразу, как она изменилась. Опроса нет,
@@ -343,15 +323,11 @@ function connect() {
   es.onmessage = e => { try { render(JSON.parse(e.data)); } catch (err) { /* игнор битого кадра */ } };
   es.onerror = () => { document.getElementById('conn').innerHTML = '<span class="err">нет связи с сервером</span>'; };
 }
-document.getElementById('rankSet').onclick = () => {
-  const ip = document.getElementById('rankIp').value.trim();
-  if (ip) setRank(ip, document.getElementById('rankVal').value);
-};
-document.getElementById('banSet').onclick = () => {
-  const ip = document.getElementById('banIp').value.trim();
-  if (ip) ban(ip, document.getElementById('banReason').value.trim());
-};
-document.getElementById('accountsReload').onclick = loadAccounts;
+document.getElementById('playersFind').onclick = () => { playersPage = 0; loadPlayers(); };
+document.getElementById('playersQ').addEventListener('keydown', e => { if (e.key === 'Enter') { playersPage = 0; loadPlayers(); } });
+document.getElementById('playersFilter').onchange = () => { playersPage = 0; loadPlayers(); };
+document.getElementById('playersPrev').onclick = () => { if (playersPage > 0) { playersPage--; loadPlayers(); } };
+document.getElementById('playersNext').onclick = () => { playersPage++; loadPlayers(); };
 document.getElementById('chatClear').onclick = async () => {
   if (!confirm('Удалить все сообщения общего чата у всех игроков?')) return;
   const res = await post('/chat/clear');
@@ -519,8 +495,8 @@ function chartDraw() {
   g.textAlign = 'left';
 
   if (pts.length) {
-    // Ломаная с разрывом: пропуск больше 1.5 шага — сервер был выключен, и соединять точки
-    // прямой значило бы придумать онлайн, которого никто не измерял.
+    // Минуты, когда сервер не работал, сервер присылает нулями (см. internal/onlinestat), так что
+    // разрыв бывает только там, где истории нет вовсе, — соединять туда точки прямой нельзя.
     const gap = vis.step * 1.5;
     g.strokeStyle = '#4aa8ff'; g.lineWidth = 2; g.lineJoin = 'round';
     g.beginPath();
@@ -709,7 +685,7 @@ setInterval(() => {
 chart.from = Math.floor(Date.now() / 1000) - 21600;
 chart.to = Math.floor(Date.now() / 1000);
 chartTopUp();
-loadAccounts();
+loadPlayers();
 connect();
 </script>
 </body>

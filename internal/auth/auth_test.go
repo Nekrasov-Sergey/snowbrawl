@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/accounts"
+	"github.com/Nekrasov-Sergey/snowbrawl/internal/store"
 )
 
 // fakeYandex — провайдер, который ведёт себя как Яндекс ID: меняет код на токен и отдаёт профиль.
@@ -68,20 +69,33 @@ type harness struct {
 	now  time.Time
 }
 
-func newHarness(t *testing.T) *harness {
+func testDB(t *testing.T) *store.DB {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
-	ya := newFakeYandex(t)
-	accs, err := accounts.Open("", zerolog.New(io.Discard))
+	db, err := store.Open("", zerolog.New(io.Discard))
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{ya: ya, accs: accs, now: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)}
-	svc, err := New(Config{
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	ya := newFakeYandex(t)
+	return newHarnessCfg(t, Config{
 		ClientID: "cid", ClientSecret: "sec", PublicURL: "https://snowbrawl.test",
 		Secret: "test-secret", AuthURL: ya.srv.URL + "/authorize",
 		TokenURL: ya.srv.URL + "/token", InfoURL: ya.srv.URL + "/info",
-	}, accs, zerolog.New(io.Discard))
+	}, ya)
+}
+
+func newHarnessCfg(t *testing.T, cfg Config, ya *fakeYandex) *harness {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	db := testDB(t)
+	accs := accounts.Open(db, zerolog.New(io.Discard))
+	h := &harness{ya: ya, accs: accs, now: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)}
+	svc, err := New(cfg, accs, db, zerolog.New(io.Discard))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,9 +105,36 @@ func newHarness(t *testing.T) *harness {
 	r := gin.New()
 	r.Use(svc.Refresh())
 	svc.Register(r)
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 	h.srv = httptest.NewServer(r)
 	t.Cleanup(h.srv.Close)
 	return h
+}
+
+// page открывает страницу игры — так браузер получает гостевую куку.
+func (h *harness) page(t *testing.T, c *http.Client) *http.Response {
+	t.Helper()
+	resp, err := c.Get(h.srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp
+}
+
+func cookieOf(resp *http.Response, name string) *http.Cookie {
+	for _, ck := range resp.Cookies() {
+		if ck.Name == name {
+			return ck
+		}
+	}
+	return nil
+}
+
+func (h *harness) identify(value string) string {
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/ws", nil)
+	req.AddCookie(&http.Cookie{Name: CookieSession, Value: value})
+	return h.svc.Identify(req)
 }
 
 // client без следования редиректам: нам важны сами Location и Set-Cookie.
@@ -324,11 +365,14 @@ func TestCallbackProviderFailures(t *testing.T) {
 	}
 }
 
-func TestLogoutClearsCookies(t *testing.T) {
+// Выход делает браузер новым гостем: подсказка входа гаснет, а кука сессии — уже с новым id,
+// без записи. Прежнее лицо (аккаунт) остаётся за аккаунтом.
+func TestLogoutMakesNewGuest(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	c := h.client()
 	h.login(t, c, h.ya.code)
+	acc, _ := h.accs.BySubject(accounts.ProviderYandex, "y-42")
 	resp, err := c.Post(h.srv.URL+"/auth/logout", "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -337,10 +381,119 @@ func TestLogoutClearsCookies(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("выход: %d", resp.StatusCode)
 	}
-	for _, ck := range resp.Cookies() {
-		if (ck.Name == CookieSession || ck.Name == CookieHint) && ck.MaxAge >= 0 {
-			t.Errorf("кука %s не погашена: %+v", ck.Name, ck)
-		}
+	if hint := cookieOf(resp, CookieHint); hint == nil || hint.MaxAge >= 0 {
+		t.Errorf("подсказка входа не погашена: %+v", hint)
+	}
+	session := cookieOf(resp, CookieSession)
+	if session == nil || session.MaxAge <= 0 || !session.HttpOnly {
+		t.Fatalf("новой гостевой куки нет: %+v", session)
+	}
+	id := h.identify(session.Value)
+	if id == "" || id == acc.ID {
+		t.Fatalf("после выхода кука указывает на %q (аккаунт %q)", id, acc.ID)
+	}
+	if _, ok := h.accs.Get(id); ok {
+		t.Error("у нового гостя сразу появилась запись")
+	}
+}
+
+// Гость получает куку при открытии страницы, и только там: запись в базе заведёт хаб, когда он
+// откроет игру. Кука продлевается при заходе, но не чаще раза в сутки.
+func TestGuestCookieOnPage(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	c := h.client()
+	first := cookieOf(h.page(t, c), CookieSession)
+	if first == nil || !first.HttpOnly || !first.Secure || first.MaxAge != int(GuestTTL.Seconds()) {
+		t.Fatalf("гостевая кука: %+v", first)
+	}
+	id := h.identify(first.Value)
+	if id == "" {
+		t.Fatal("гостевая кука не опознаётся")
+	}
+	if h.accs.Len() != 0 {
+		t.Error("запись гостя заведена ещё до игры")
+	}
+	if again := cookieOf(h.page(t, c), CookieSession); again != nil {
+		t.Errorf("кука перевыдана без нужды: %+v", again)
+	}
+	h.now = h.now.Add(25 * time.Hour)
+	next := cookieOf(h.page(t, c), CookieSession)
+	if next == nil || h.identify(next.Value) != id {
+		t.Fatalf("через сутки кука не продлена тем же id: %+v", next)
+	}
+	// Статика и API куку не получают: база на каждой картинке не нужна.
+	resp, err := h.client().Get(h.srv.URL + "/client/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if cookieOf(resp, CookieSession) != nil {
+		t.Error("кука выдана не на странице игры")
+	}
+}
+
+// Гостевая кука работает и без входа через Яндекс: ручек провайдера нет, а гость есть.
+func TestGuestWithoutYandex(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{Secret: "test-secret"}, nil)
+	if h.svc.Yandex() {
+		t.Fatal("вход включился без client id")
+	}
+	c := h.client()
+	if ck := cookieOf(h.page(t, c), CookieSession); ck == nil || h.identify(ck.Value) == "" {
+		t.Fatalf("без Яндекса гость не получил куку: %+v", ck)
+	}
+	resp, err := c.Get(h.srv.URL + "/auth/yandex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusFound {
+		t.Error("ручка входа существует при выключенном Яндексе")
+	}
+}
+
+// Первый вход из браузера гостя превращает гостя в аккаунт: тот же id, ник и прогресс.
+func TestLoginTurnsGuestIntoAccount(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	c := h.client()
+	id := h.identify(cookieOf(h.page(t, c), CookieSession).Value)
+	// Запись заводит хаб при открытии игры — повторяем это здесь.
+	if _, err := h.accs.EnsureGuest(id, "Снежок", false, nil, h.now); err != nil {
+		t.Fatal(err)
+	}
+	h.accs.AddTutorial(id, "basics")
+	resp := h.login(t, c, h.ya.code)
+	acc, ok := h.accs.BySubject(accounts.ProviderYandex, "y-42")
+	if !ok || acc.ID != id || acc.Nick != "Снежок" || len(acc.Tutorial) != 1 {
+		t.Fatalf("гость не стал аккаунтом: %+v", acc)
+	}
+	if hint := cookieOf(resp, CookieHint); hint == nil || hint.Value != id {
+		t.Errorf("подсказка входа: %+v", hint)
+	}
+}
+
+// Ключ подписи хранится в базе: второй запуск с той же базой узнаёт выданные куки.
+func TestSecretKeptInDB(t *testing.T) {
+	t.Parallel()
+	db := testDB(t)
+	accs := accounts.Open(db, zerolog.New(io.Discard))
+	a, err := New(Config{}, accs, db, zerolog.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(Config{}, accs, db, zerolog.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a.secret) != string(b.secret) || len(a.secret) < 32 {
+		t.Fatal("ключ подписи не сохранился между запусками")
+	}
+	c, err := New(Config{Secret: "из окружения"}, accs, db, zerolog.New(io.Discard))
+	if err != nil || string(c.secret) != "из окружения" {
+		t.Fatal("ключ из окружения должен быть главнее базы")
 	}
 }
 
@@ -352,11 +505,7 @@ func TestIdentifyRejectsForgedAndRevoked(t *testing.T) {
 	acc, _ := h.accs.BySubject(accounts.ProviderYandex, "y-42")
 	good := sessionValue(h.svc.secret, acc.ID, acc.Epoch, h.now.Add(SessionTTL))
 
-	check := func(value string) string {
-		req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/ws", nil)
-		req.AddCookie(&http.Cookie{Name: CookieSession, Value: value})
-		return h.svc.Identify(req)
-	}
+	check := h.identify
 	if check(good) != acc.ID {
 		t.Fatal("правильная кука не принята")
 	}
@@ -371,6 +520,15 @@ func TestIdentifyRejectsForgedAndRevoked(t *testing.T) {
 	}
 	if check("мусор") != "" {
 		t.Error("принят мусор вместо куки")
+	}
+	// Гость, у которого записи ещё нет, узнаётся по нулевой эпохе; с ненулевой — это отозванная
+	// кука удалённой записи.
+	fresh := accounts.NewID()
+	if check(sessionValue(h.svc.secret, fresh, 0, h.now.Add(GuestTTL))) != fresh {
+		t.Error("кука нового гостя не принята")
+	}
+	if check(sessionValue(h.svc.secret, fresh, 1, h.now.Add(GuestTTL))) != "" {
+		t.Error("принята кука с эпохой для записи, которой нет")
 	}
 	if err := h.accs.BumpEpoch(acc.ID); err != nil {
 		t.Fatal(err)
@@ -388,22 +546,15 @@ func TestRefreshExtendsCookie(t *testing.T) {
 	c := h.client()
 	h.login(t, c, h.ya.code)
 
+	if got := cookieOf(h.page(t, c), CookieSession); got != nil {
+		t.Fatalf("свежая кука аккаунта перевыдана: %+v", got)
+	}
 	h.now = h.now.Add(SessionTTL - refreshBefore + time.Hour)
-	resp, err := c.Get(h.srv.URL + "/auth/logout-nonexistent")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	var got *http.Cookie
-	for _, ck := range resp.Cookies() {
-		if ck.Name == CookieSession {
-			got = ck
-		}
-	}
+	got := cookieOf(h.page(t, c), CookieSession)
 	if got == nil {
 		t.Fatal("кука не продлена")
 	}
-	_, _, err = parseSession(h.svc.secret, got.Value, h.now.Add(SessionTTL-time.Hour))
+	_, _, err := parseSession(h.svc.secret, got.Value, h.now.Add(SessionTTL-time.Hour))
 	if err != nil {
 		t.Errorf("продлённая кука живёт не полный срок: %v", err)
 	}

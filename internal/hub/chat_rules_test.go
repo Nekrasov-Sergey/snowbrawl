@@ -1,50 +1,25 @@
 package hub
 
 import (
-	"io"
 	"testing"
-	"time"
 
-	"github.com/rs/zerolog"
-
-	"github.com/Nekrasov-Sergey/snowbrawl/internal/moderation"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/protocol"
 	"github.com/Nekrasov-Sergey/snowbrawl/internal/session"
 )
 
-// Права на удаление сообщений проверяем внутри пакета: роли выдаются по IP, а в
-// интеграционных тестах все клиенты приходят с 127.0.0.1 и роль у них общая.
+// Права на удаление сообщений — таблицей, внутри пакета: так все сочетания ролей проверяются
+// без живых соединений. Интеграционный вариант — TestChatDeleteRights.
 func TestCanDeleteChatRules(t *testing.T) {
 	t.Parallel()
-	mod, err := moderation.Open("", zerolog.New(io.Discard))
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	const (
-		playerIP = "10.0.0.1"
-		modIP    = "10.0.0.2"
-		mod2IP   = "10.0.0.3"
-		adminIP  = "10.0.0.4"
-	)
-	for ip, rank := range map[string]string{
-		modIP:   protocol.RankModerator,
-		mod2IP:  protocol.RankModerator,
-		adminIP: protocol.RankAdmin,
-	} {
-		if err := mod.SetRank(ip, rank, "", now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h := &Hub{mod: mod}
+	h := &Hub{}
 
-	player := &session.Player{ID: "p1", IP: playerIP}
-	moder := &session.Player{ID: "p2", IP: modIP}
-	moder2 := &session.Player{ID: "p3", IP: mod2IP}
-	admin := &session.Player{ID: "p4", IP: adminIP}
+	player := &session.Player{ID: "p1", AccountID: "a1"}
+	moder := &session.Player{ID: "p2", AccountID: "a2", Rank: protocol.RankModerator}
+	moder2 := &session.Player{ID: "p3", AccountID: "a3", Rank: protocol.RankModerator}
+	admin := &session.Player{ID: "p4", AccountID: "a4", Rank: protocol.RankAdmin}
 
 	msg := func(author *session.Player) chatEntry {
-		return chatEntry{msg: protocol.ChatMessage{ID: 1, PID: author.ID}, authorIP: author.IP}
+		return chatEntry{msg: protocol.ChatMessage{ID: 1, PID: author.ID}, authorAccount: author.AccountID, authorRank: author.Rank}
 	}
 
 	cases := []struct {
@@ -66,13 +41,5 @@ func TestCanDeleteChatRules(t *testing.T) {
 		if got := h.canDeleteChat(c.deleter, c.entry); got != c.want {
 			t.Errorf("%s: получилось %v, ожидалось %v", c.name, got, c.want)
 		}
-	}
-
-	// Роль автора берётся актуальная: снятие роли с модератора делает его сообщения удаляемыми.
-	if err := mod.SetRank(mod2IP, protocol.RankPlayer, "", now); err != nil {
-		t.Fatal(err)
-	}
-	if !h.canDeleteChat(moder, msg(moder2)) {
-		t.Error("после снятия роли сообщение должно стать удаляемым для модератора")
 	}
 }
