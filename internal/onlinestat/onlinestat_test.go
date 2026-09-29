@@ -187,9 +187,15 @@ func TestRetentionInDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < RetentionPoints+500; i++ {
-		s.Observe(base.Add(time.Duration(i)*time.Minute), i%7)
-		if i%10000 == 0 {
+	// Точка раз в полчаса на 35 дней, а не поминутно: ретенция режется по времени, и для проверки
+	// хватает полутора тысяч строк. Поминутный месяц — 43 тысячи записей в SQLite под -race, это
+	// десять секунд процессора, которые отнимали время у соседних тестов с таймингами (релиз
+	// v0.25.1 упал на TestRoomPingPushedOnlyOnChange именно так).
+	const every = 30 * time.Minute
+	total := int((Retention + 5*24*time.Hour) / every)
+	for i := 0; i < total; i++ {
+		s.Observe(base.Add(time.Duration(i)*every), i%7)
+		if i%500 == 0 {
 			if err := s.Flush(); err != nil {
 				t.Fatal(err)
 			}
@@ -198,20 +204,25 @@ func TestRetentionInDB(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
+	last := base.Add(time.Duration(total-1) * every)
 	var n int
-	if err := db.R.QueryRow("SELECT count(*) FROM online_points").Scan(&n); err != nil {
+	var oldest int64
+	if err := db.R.QueryRow("SELECT count(*), min(at) FROM online_points").Scan(&n, &oldest); err != nil {
 		t.Fatal(err)
 	}
-	if n > RetentionPoints+1 {
-		t.Fatalf("в базе %d точек при ретенции %d", n, RetentionPoints)
+	if time.Unix(oldest, 0).Before(last.Add(-Retention)) {
+		t.Fatalf("в базе точка %v старше ретенции (последняя %v)", time.Unix(oldest, 0).UTC(), last)
+	}
+	if want := int(Retention/every) + 1; n != want {
+		t.Fatalf("в базе %d точек, ожидалось %d — ровно месяц", n, want)
 	}
 	s2, err := Open(db, testLog())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s2.Close() }()
-	if len(s2.ring) < RetentionPoints-1 || len(s2.ring) > RetentionPoints {
-		t.Fatalf("после перезапуска точек %d, ожидалось около %d", len(s2.ring), RetentionPoints)
+	if len(s2.ring) != n {
+		t.Fatalf("после перезапуска точек %d, в базе %d", len(s2.ring), n)
 	}
 }
 

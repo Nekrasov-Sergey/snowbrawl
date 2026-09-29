@@ -52,7 +52,6 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 	cl.expect(protocol.SRoomState, &st)
 
 	// Отвечаем на зонды сервера сами: первый уходит сразу, дальше раз в период зонда.
-	probe := s.cfg.PingProbeEvery
 	mine := func(rp protocol.RoomPing) bool {
 		for _, pp := range rp.Pings {
 			if pp.ID == cl.ID && pp.Ping > 0 {
@@ -96,7 +95,11 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 		}
 	}
 
-	got := collect(40*probe, func(out []protocol.RoomPing) bool { return len(out) > 0 && mine(out[len(out)-1]) })
+	// Срок — только страховка: collect выходит, как только условие выполнено. Раньше он был
+	// 40 периодов зонда (2 с в тестах), и на загруженном раннере GitHub, где рядом под -race идут
+	// sim и SQLite, первый pong не успевал — так упал релиз v0.25.1.
+	const wait = 20 * time.Second
+	got := collect(wait, func(out []protocol.RoomPing) bool { return len(out) > 0 && mine(out[len(out)-1]) })
 	if len(got) == 0 {
 		t.Fatal("задержки лобби не приехали")
 	}
@@ -118,7 +121,9 @@ func TestRoomPingPushedOnlyOnChange(t *testing.T) {
 	second.expect(protocol.SRoomState, nil)
 	all := make([]protocol.RoomPing, 0, len(got)+2)
 	all = append(all, got...)
-	all = append(all, collect(40*probe, func(out []protocol.RoomPing) bool {
+	// Здесь срок короткий: второй клиент на зонды не отвечает, условие обычно не выполняется, и
+	// сбор просто ждёт кадр о смене состава. На итог длина срока не влияет — проверяются кадры.
+	all = append(all, collect(40*s.cfg.PingProbeEvery, func(out []protocol.RoomPing) bool {
 		return len(out) > 0 && len(out[len(out)-1].Pings) > 1 // в кадре уже двое
 	})...)
 	if len(all) < 2 {
